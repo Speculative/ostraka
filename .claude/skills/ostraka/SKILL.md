@@ -16,6 +16,19 @@ ostraka is a structured side-channel between you and the user. Three channels:
 
 All access is through the `ostraka` CLI. Never read or write `.ostraka/` files directly.
 
+## Which binary
+
+When working *on* the ostraka repo itself, build and use the local tree rather than
+any `ostraka` already on PATH — otherwise you exercise a stale build instead of your
+own changes:
+
+```bash
+go build -o /tmp/ostraka ./cmd/ostraka && OSTRAKA=/tmp/ostraka
+```
+
+Use `$OSTRAKA` in place of `ostraka` for every command below. In any other project,
+use `ostraka` from PATH.
+
 ## Session start
 
 ```bash

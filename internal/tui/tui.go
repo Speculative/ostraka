@@ -10,6 +10,7 @@ import (
 
 	"ostraka/internal/models"
 	"ostraka/internal/store"
+	"ostraka/internal/supervisor"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -48,6 +49,9 @@ var (
 	dimStyle           = lipgloss.NewStyle().Foreground(dimFg)
 	scrollTrackStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	scrollThumbStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	newBelowStyle = lipgloss.NewStyle().Bold(true).
+			Foreground(lipgloss.Color("16")).
+			Background(pendingFg)
 	borderStyle   = lipgloss.NewStyle().BorderRight(true).BorderStyle(lipgloss.NormalBorder())
 )
 
@@ -126,6 +130,7 @@ func loadItemsCmd(s *store.Store, ch models.Channel) tea.Cmd {
 type model struct {
 	store   *store.Store
 	watchCh <-chan struct{}
+	sup     *supervisor.Supervisor
 
 	channel  models.Channel
 	channels []models.Channel
@@ -135,6 +140,13 @@ type model struct {
 	conv      viewport.Model
 	input     textarea.Model
 	inputMode bool
+
+	// convTurns is the turn count of the item currently rendered into conv,
+	// so a reload can tell "new turn arrived" from "same item, redrawn".
+	convTurns int
+	// newBelow marks that a turn landed off-screen below the reader, who was
+	// scrolled up at the time and so was not auto-followed down to it.
+	newBelow bool
 
 	width  int
 	height int
@@ -146,7 +158,7 @@ const (
 	inputMaxHeight = 8
 )
 
-func newModel(s *store.Store, watchCh <-chan struct{}) model {
+func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Supervisor) model {
 	ta := textarea.New()
 	ta.Placeholder = "Add turn… (ctrl+s to submit, esc to cancel)"
 	ta.ShowLineNumbers = false
@@ -160,6 +172,7 @@ func newModel(s *store.Store, watchCh <-chan struct{}) model {
 	return model{
 		store:    s,
 		watchCh:  watchCh,
+		sup:      sup,
 		channel:  models.ChannelAsks,
 		channels: []models.Channel{models.ChannelInbox, models.ChannelAsks, models.ChannelHandoff},
 		input:    ta,
@@ -187,9 +200,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case itemsLoadedMsg:
 		prevID := m.selectedID()
+		prevTurns := m.convTurns
+		// Sample before SetContent: appending lines can change the answer.
+		wasAtBottom := m.conv.AtBottom()
+
 		m.items = []models.Item(msg)
 		m.restoreSelection(prevID)
 		m.updateConv()
+
+		// Only a genuinely new turn on the item already being read counts.
+		// A first load, or a reload that landed on a different item, has no
+		// "before" to compare against.
+		if prevID != "" && m.selectedID() == prevID && m.convTurns > prevTurns {
+			if wasAtBottom {
+				m.conv.GotoBottom()
+			} else {
+				m.newBelow = true
+			}
+		}
 		return m, nil
 
 	case watchEventMsg:
@@ -232,12 +260,22 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selected < len(m.items)-1 {
 			m.selected++
 			m.updateConv()
+			m.conv.GotoTop()
+			m.newBelow = false
 		}
 	case "k", "up":
 		if m.selected > 0 {
 			m.selected--
 			m.updateConv()
+			m.conv.GotoTop()
+			m.newBelow = false
 		}
+	case "pgdown":
+		m.conv.PageDown()
+		m.syncNewBelow()
+	case "pgup":
+		m.conv.PageUp()
+		m.syncNewBelow()
 	case "1":
 		return m.switchChannel(models.ChannelInbox)
 	case "2":
@@ -264,18 +302,36 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if content != "" && m.selected < len(m.items) {
 			item := m.items[m.selected]
 			m.store.AddTurn(item.ID, models.ActorUser, content) //nolint:errcheck
-			if item.Status == models.StatusPendingUser {
+			// A user turn hands the ball to the agent wherever the item was
+			// parked, so advance from any non-terminal status — not just
+			// pending-user. Otherwise the dispatched session's discovery
+			// command (--status pending-agent) comes back empty.
+			if item.Status != models.StatusDone && item.Status != models.StatusArchived {
 				m.store.SetStatus(item.ID, models.StatusPendingAgent) //nolint:errcheck
 			}
+			m.sup.Enqueue(item.ID)
 		}
 		m.inputMode = false
 		m.input.Blur()
 		m = m.recalcLayout()
+		// Your own turn is never "new messages below" — go to the bottom now so
+		// the reload that follows sees AtBottom and auto-follows onto it.
+		m.conv.GotoBottom()
 		return m, loadItemsCmd(m.store, m.channel)
 	case "esc":
 		m.inputMode = false
 		m.input.Blur()
 		m = m.recalcLayout()
+		return m, nil
+	case "pgdown":
+		// The textarea binds neither page key, so they stay available for
+		// scrolling the conversation while composing a reply to it.
+		m.conv.PageDown()
+		m.syncNewBelow()
+		return m, nil
+	case "pgup":
+		m.conv.PageUp()
+		m.syncNewBelow()
 		return m, nil
 	}
 	prevH := m.currentInputHeight()
@@ -320,6 +376,8 @@ func (m model) switchChannel(ch models.Channel) (model, tea.Cmd) {
 	m.selected = 0
 	m.items = nil
 	m.updateConv()
+	m.conv.GotoTop()
+	m.newBelow = false
 	return m, loadItemsCmd(m.store, ch)
 }
 
@@ -350,7 +408,7 @@ func (m model) View() string {
 	if m.inputMode {
 		// Per-element padding so the separator spans the full column width,
 		// giving │──────── instead of │ ──────── at the corner.
-		viewportBlock := lipgloss.NewStyle().Padding(1, 1, 0, 1).Render(m.conv.View())
+		viewportBlock := lipgloss.NewStyle().Padding(1, 1, 0, 1).Render(m.renderConv())
 		sep := strings.Repeat("─", convAreaW)
 
 		// Render textarea first (its View() updates the shared viewport via the
@@ -364,11 +422,29 @@ func (m model) View() string {
 		)
 		convPanel = lipgloss.JoinVertical(lipgloss.Left, viewportBlock, sep, inputBlock)
 	} else {
-		convPanel = lipgloss.NewStyle().Padding(1).Render(m.conv.View())
+		convPanel = lipgloss.NewStyle().Padding(1).Render(m.renderConv())
 	}
 	mainRow := lipgloss.JoinHorizontal(lipgloss.Top, listPanel, convPanel)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, mainRow, footer)
+}
+
+// renderConv renders the conversation viewport, overlaying a "new messages
+// below" bar on its final row when a turn has landed out of sight. The bar
+// replaces the last line rather than being appended, so the pane keeps its
+// exact height and nothing else in the layout shifts.
+func (m model) renderConv() string {
+	view := m.conv.View()
+	if !m.newBelow {
+		return view
+	}
+	lines := strings.Split(view, "\n")
+	if len(lines) == 0 {
+		return view
+	}
+	lines[len(lines)-1] = newBelowStyle.Width(m.conv.Width).Align(lipgloss.Center).
+		Render("↓ new messages below ↓")
+	return strings.Join(lines, "\n")
 }
 
 func (m model) renderHeader() string {
@@ -395,15 +471,33 @@ func (m model) renderHeader() string {
 }
 
 func (m model) renderFooter() string {
-	text := "q quit  j/k navigate  1/2/3 channel  t add turn  r refresh"
+	text := "q quit  j/k navigate  pgup/pgdn scroll  1/2/3 channel  t add turn  r refresh"
 	if m.inputMode {
-		text = "ctrl+s submit  esc cancel"
+		text = "ctrl+s submit  esc cancel  pgup/pgdn scroll"
 	}
-	pad := m.width - len(text)
-	if pad > 0 {
+
+	// Right-aligned scroll position, shown only when the conversation actually
+	// overflows — otherwise there is nothing to tell the reader.
+	var right string
+	if m.conv.TotalLineCount() > m.conv.Height {
+		switch {
+		case m.conv.AtTop():
+			right = "top "
+		case m.conv.AtBottom():
+			right = "bot "
+		default:
+			right = fmt.Sprintf("%3.0f%% ", m.conv.ScrollPercent()*100)
+		}
+	}
+
+	// The hint text grows with the keymap; drop it rather than overflow the row.
+	if len(text)+len(right) > m.width {
+		text = ""
+	}
+	if pad := m.width - len(text) - len(right); pad > 0 {
 		text += strings.Repeat(" ", pad)
 	}
-	return footerStyle.Render(text)
+	return footerStyle.Render(text + right)
 }
 
 func (m model) renderList() string {
@@ -489,25 +583,119 @@ func wordWrap(s string, width int) []string {
 	return append(lines, current)
 }
 
+// wrapText wraps s to width columns. The viewport splits content on "\n" and
+// truncates anything wider, so wrapping has to happen before SetContent —
+// there is no wrapping mode to switch on.
+//
+// Unlike wordWrap above, this preserves blank lines and each line's leading
+// indentation, because turn bodies carry markdown: indented code blocks,
+// quotes and list continuations all lose their shape if whitespace is
+// collapsed.
+func wrapText(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		out = append(out, wrapLine(line, width)...)
+	}
+	return strings.Join(out, "\n")
+}
+
+func wrapLine(line string, width int) []string {
+	if lipgloss.Width(line) <= width {
+		return []string{line}
+	}
+	indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	// A deep indent would otherwise squeeze the text column to nothing; past
+	// half the pane it is worth more to keep the words readable.
+	if lipgloss.Width(indent) > width/2 {
+		indent = ""
+	}
+	avail := max(1, width-lipgloss.Width(indent))
+
+	var lines []string
+	cur := ""
+	flush := func() {
+		lines = append(lines, indent+cur)
+		cur = ""
+	}
+	for _, w := range strings.Fields(line) {
+		// An unbreakable token (URL, long path) has to be cut, or it runs off
+		// the edge exactly as before.
+		for lipgloss.Width(w) > avail {
+			if cur != "" {
+				flush()
+			}
+			r := []rune(w)
+			lines = append(lines, indent+string(r[:avail]))
+			w = string(r[avail:])
+		}
+		switch {
+		case cur == "":
+			cur = w
+		case lipgloss.Width(cur)+1+lipgloss.Width(w) <= avail:
+			cur += " " + w
+		default:
+			flush()
+			cur = w
+		}
+	}
+	if cur != "" {
+		flush()
+	}
+	if len(lines) == 0 {
+		return []string{line}
+	}
+	return lines
+}
+
+// syncNewBelow retires the "new messages below" marker once the reader has
+// actually reached the bottom, which is the only thing that makes it stale.
+func (m *model) syncNewBelow() {
+	if m.conv.AtBottom() {
+		m.newBelow = false
+	}
+}
+
 func (m *model) updateConv() {
 	if len(m.items) == 0 || m.selected >= len(m.items) {
 		m.conv.SetContent("")
+		m.convTurns = 0
 		return
 	}
 	item := m.items[m.selected]
+	m.convTurns = len(item.Turns)
+	w := m.conv.Width
+
+	// Rules are drawn to the pane, not to fixed 60/40 — a fixed rule in a
+	// narrow pane is just another line that overflows.
+	headRule := strings.Repeat("─", clampRule(w, 60))
+	turnRule := strings.Repeat("─", clampRule(w, 40))
+
 	var sb strings.Builder
 	meta := fmt.Sprintf("[%s]  %s  %s", item.Channel, item.Status, item.ID)
 	if item.Parent != "" {
 		meta += "  parent: " + item.Parent
 	}
-	sb.WriteString(meta + "\n" + strings.Repeat("─", 60) + "\n\n")
-	sb.WriteString(item.Body)
+	sb.WriteString(wrapText(meta, w) + "\n" + headRule + "\n\n")
+	sb.WriteString(wrapText(item.Body, w))
 	for _, turn := range item.Turns {
 		ts := turn.Timestamp.Format("2006-01-02 15:04")
 		sb.WriteString(fmt.Sprintf("\n\n%s\n%s  ·  %s\n\n%s",
-			strings.Repeat("─", 40), turn.Actor, ts, turn.Content))
+			turnRule, turn.Actor, ts, wrapText(turn.Content, w)))
 	}
 	m.conv.SetContent(sb.String())
+}
+
+// clampRule returns the rule width: the preferred length, or the pane width
+// when that is narrower. Width 0 (before the first WindowSizeMsg) keeps the
+// preferred length rather than collapsing to nothing.
+func clampRule(paneW, prefer int) int {
+	if paneW > 0 && paneW < prefer {
+		return paneW
+	}
+	return prefer
 }
 
 // ── layout helpers ────────────────────────────────────────────────────────────
@@ -585,9 +773,23 @@ func (m model) adjustInputHeight(h int) model {
 		convH = 1
 	}
 	m.input.SetHeight(h)
-	m.conv.Height = convH
 	m.updateConv()
+	m.setConvHeight(convH)
 	return m
+}
+
+// setConvHeight resizes the conversation viewport while keeping its *bottom*
+// line pinned. The turn input grows upward from the bottom of the pane, so
+// top-anchoring would slide the newest turns — the ones being replied to —
+// out of view behind the input. Since keystrokes go to the textarea while
+// composing, there is no way to scroll them back, so the shrink must not
+// discard them. SetYOffset clamps, so this is safe at either extreme.
+func (m *model) setConvHeight(h int) {
+	delta := m.conv.Height - h
+	m.conv.Height = h
+	if delta != 0 {
+		m.conv.SetYOffset(m.conv.YOffset + delta)
+	}
 }
 
 func (m model) recalcLayout() model {
@@ -615,8 +817,8 @@ func (m model) recalcLayout() model {
 	m.input.SetWidth(convW)
 	m.input.SetHeight(inputH)
 	m.conv.Width = convW
-	m.conv.Height = convH
 	m.updateConv()
+	m.setConvHeight(convH)
 	return m
 }
 
@@ -661,7 +863,9 @@ func Run(s *store.Store) error {
 	if err != nil {
 		return fmt.Errorf("watcher: %w", err)
 	}
-	p := tea.NewProgram(newModel(s, watchCh), tea.WithAltScreen())
+	sup := supervisor.New(s.Root)
+	sup.Start()
+	p := tea.NewProgram(newModel(s, watchCh, sup), tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }
