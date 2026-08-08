@@ -417,7 +417,7 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.selected = len(m.items)
 		m.mode = modeTitle
 		m.title.Reset()
-		m.title.Width = m.listWidth() - 4
+		m.title.Width = m.titleWidth()
 		m.updateConv()
 		return m, m.title.Focus()
 	case "s":
@@ -904,7 +904,7 @@ func (m model) renderList() string {
 	if m.draft {
 		rowSty := lipgloss.NewStyle().Width(colW).Background(selectedBg).Bold(true)
 		metaSty := lipgloss.NewStyle().Width(colW).Background(selectedBg).Foreground(lipgloss.Color("245"))
-		m.title.Width = max(1, colW-2)
+		m.title.Width = m.titleWidth()
 		lines = append(lines,
 			rowSty.Render("› "+m.title.View())+"\n"+metaSty.Render("  new item [backlog]"))
 	}
@@ -1126,6 +1126,21 @@ func clampRule(paneW, prefer int) int {
 
 // ── layout helpers ────────────────────────────────────────────────────────────
 
+// titleWidth is how wide the draft title editor may be.
+//
+// textinput renders Width+1 columns — it reserves a cell for the cursor past
+// the end of the text — and the draft row prefixes two more for the badge
+// column. Budgeting only for the prefix overflowed the row by exactly one
+// column, so lipgloss wrapped every draft row onto two lines and the trailing
+// cell flickered between them as the cursor blinked.
+//
+// The model's Width and the render-time Width must agree: textinput computes
+// its horizontal scroll offset from Width during Update, so a mismatch would
+// scroll against a different column count than the one being drawn.
+func (m model) titleWidth() int {
+	return max(1, m.listWidth()-5)
+}
+
 func (m model) listWidth() int {
 	w := m.width * 30 / 100
 	if w < 24 {
@@ -1239,6 +1254,7 @@ func (m model) recalcLayout() model {
 	if convH < 1 {
 		convH = 1
 	}
+	m.title.Width = m.titleWidth()
 	inputH := m.currentInputHeight()
 	m.input.SetWidth(convW)
 	m.input.SetHeight(inputH)

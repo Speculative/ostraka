@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"ostraka/internal/models"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func item(ch models.Channel, st models.Status, created time.Time, turns ...time.Time) models.Item {
@@ -260,5 +263,31 @@ func TestHiddenBacklogRowDropsRulesWhenTooNarrow(t *testing.T) {
 func TestHiddenBacklogRowIsEmptyWithoutALabel(t *testing.T) {
 	if got := hiddenBacklogRow("", 40); got != "" {
 		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestTitleInputFitsTheDraftRow(t *testing.T) {
+	// textinput renders Width+1 columns (a cell for the cursor past the end of
+	// the text) and the draft row prefixes two more. Budgeting for only the
+	// prefix overflowed the row by one column, which made lipgloss wrap every
+	// draft row and the trailing cell flicker as the cursor blinked.
+	const prefix = "› "
+	for _, termW := range []int{80, 100, 120, 160} {
+		m := model{width: termW}
+		colW := m.listWidth() - 2
+
+		ti := textinput.New()
+		ti.Prompt = ""
+		ti.Width = m.titleWidth()
+		ti.Focus()
+
+		for _, valueLen := range []int{0, 1, colW, colW * 3} {
+			ti.SetValue(strings.Repeat("x", valueLen))
+			ti.CursorEnd()
+			if got := lipgloss.Width(prefix + ti.View()); got > colW {
+				t.Errorf("term=%d len=%d: draft row is %d wide, column is %d",
+					termW, valueLen, got, colW)
+			}
+		}
 	}
 }
