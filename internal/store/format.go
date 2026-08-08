@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -176,5 +177,39 @@ func WriteItem(item models.Item, path string) error {
 		sb.WriteString(turn.Content)
 	}
 
-	return os.WriteFile(path, []byte(sb.String()), 0644)
+	return writeFileAtomic(path, []byte(sb.String()))
+}
+
+// writeFileAtomic writes through a temporary file in the same directory and
+// renames it into place.
+//
+// os.WriteFile truncates before writing, so a reader that arrives mid-write
+// sees an empty or partial file. ParseItem then fails and ListItems skips the
+// item — it vanishes from the list entirely. That is not theoretical: the TUI
+// reloads on every file change and the supervisor writes a status of its own
+// milliseconds after the TUI writes one, so reloads land inside write windows
+// routinely. Rename is atomic within a filesystem, so a reader sees either the
+// whole old file or the whole new one.
+//
+// The temporary name has no .md suffix, so allPaths's glob cannot pick it up
+// even if a crash leaves one behind.
+func writeFileAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // no-op once the rename below succeeds
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

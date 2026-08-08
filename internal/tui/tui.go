@@ -172,6 +172,9 @@ type model struct {
 	draft bool
 	// statusIdx is the cursor into allStatuses while the selector is open.
 	statusIdx int
+	// sessionIdx picks a fresh harness session in the deliberately small v0
+	// session menu. Full session history and switching comes later.
+	sessionIdx int
 
 	// convTurns is the turn count of the item currently rendered into conv,
 	// so a reload can tell "new turn arrived" from "same item, redrawn".
@@ -206,6 +209,7 @@ const (
 	modeCompose
 	modeTitle
 	modeStatus
+	modeSession
 )
 
 // allStatuses is the selector's running order, coarsest lifecycle first.
@@ -217,6 +221,11 @@ var allStatuses = []models.Status{
 	models.StatusAgentAcknowledged,
 	models.StatusDone,
 	models.StatusArchived,
+}
+
+var sessionProviders = []supervisor.Provider{
+	supervisor.ProviderClaude,
+	supervisor.ProviderCodex,
 }
 
 // dispatchable reports whether submitting a turn on an item in this status
@@ -251,7 +260,9 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Superviso
 		store:   s,
 		watchCh: watchCh,
 		sup:     sup,
-		view:    channelView(models.ChannelAsks),
+		// Opens on inbox: it is the channel with the work in it. Asks is where
+		// the agent puts questions, so it is empty until there is one.
+		view: channelView(models.ChannelInbox),
 		views: []listView{
 			channelView(models.ChannelInbox),
 			channelView(models.ChannelAsks),
@@ -339,6 +350,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleTitleKey(msg)
 		case modeStatus:
 			return m.handleStatusKey(msg)
+		case modeSession:
+			return m.handleSessionKey(msg)
 		}
 		return m.handleNavKey(msg)
 	}
@@ -425,8 +438,21 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeStatus
 			m.statusIdx = statusIndex(m.items[m.selected].Status)
 		}
+	case "S":
+		m.mode = modeSession
+		provider, _ := m.sup.Session()
+		m.sessionIdx = sessionProviderIndex(provider)
 	}
 	return m, nil
+}
+
+func sessionProviderIndex(provider supervisor.Provider) int {
+	for i, p := range sessionProviders {
+		if p == provider {
+			return i
+		}
+	}
+	return 0
 }
 
 // openComposer focuses the turn textarea for the selected item.
@@ -528,6 +554,30 @@ func (m model) handleStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.mode = modeNav
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+	}
+	return m, nil
+}
+
+// handleSessionKey exposes only the cheap operation we need today: begin a
+// fresh Claude or Codex context. The persisted provider travels with the empty
+// cursor, so the next dispatch cannot resume a session from the other CLI.
+func (m model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.mode = modeNav
+	case "j", "down":
+		if m.sessionIdx < len(sessionProviders)-1 {
+			m.sessionIdx++
+		}
+	case "k", "up":
+		if m.sessionIdx > 0 {
+			m.sessionIdx--
+		}
+	case "enter":
+		if err := m.sup.StartNewSession(sessionProviders[m.sessionIdx]); err != nil {
+			m.err = err
+		}
+		m.mode = modeNav
 	}
 	return m, nil
 }
@@ -738,8 +788,36 @@ func (m model) renderConv() string {
 	}
 	if m.mode == modeStatus {
 		lines = m.overlayStatusPopup(lines)
+	} else if m.mode == modeSession {
+		lines = m.overlaySessionPopup(lines)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m model) overlaySessionPopup(lines []string) []string {
+	current, id := m.sup.Session()
+	rows := make([]string, len(sessionProviders))
+	for i, provider := range sessionProviders {
+		marker, sty := "  ", lipgloss.NewStyle()
+		if i == m.sessionIdx {
+			marker, sty = "› ", lipgloss.NewStyle().Bold(true).Foreground(pendingFg)
+		}
+		rows[i] = sty.Render(marker + "new " + string(provider) + " session")
+	}
+	active := string(current)
+	if id == "" {
+		active += " (none)"
+	}
+	box := popupStyle.Render("agent session · current " + active + "\n" + strings.Join(rows, "\n"))
+	pad := lipgloss.NewStyle().Width(m.conv.Width)
+	for i, boxLine := range strings.Split(box, "\n") {
+		row := 1 + i
+		if row >= len(lines) {
+			break
+		}
+		lines[row] = pad.Render(boxLine)
+	}
+	return lines
 }
 
 // overlayStatusPopup draws the status selector over the top rows of the
@@ -809,10 +887,12 @@ func (m model) renderFooter() string {
 		text = "enter next (body)  esc cancel"
 	case modeStatus:
 		text = "j/k select  enter apply  esc cancel"
+	case modeSession:
+		text = "j/k select  enter start fresh session  esc cancel"
 	default:
-		text = "q quit  j/k nav  a add  s status  t turn  1-4 view  b backlog  pgup/pgdn scroll  r refresh"
+		text = "q quit  j/k nav  a add  s status  S session  t turn  1-4 view  b backlog  pgup/pgdn scroll  r refresh"
 		if m.showBacklog {
-			text = "q quit  j/k nav  a add  s status  t turn  1-4 view  b hide backlog  pgup/pgdn scroll  r refresh"
+			text = "q quit  j/k nav  a add  s status  S session  t turn  1-4 view  b hide backlog  pgup/pgdn scroll  r refresh"
 		}
 	}
 
@@ -1273,15 +1353,26 @@ func (m model) selectedID() string {
 	return ""
 }
 
+// restoreSelection puts the cursor back on the item it was on, wherever that
+// item has moved to — a status change re-sorts the list, so the row index is
+// not stable across a reload but the id is.
+//
+// When the item is no longer in the view at all — archived, or parked in
+// backlog with the filter on — the cursor holds its row instead, landing on
+// whatever moved up into it, and clamps to the last row if the list shrank
+// past it. Without the clamp, selected could point beyond the end and the
+// reading pane would go blank with no way to tell why.
 func (m *model) restoreSelection(id string) {
-	if id == "" {
-		return
-	}
 	for i, item := range m.items {
 		if item.ID == id {
 			m.selected = i
 			return
 		}
+	}
+	// A draft deliberately parks selected one past the end; clamping here
+	// would drop the cursor onto a real item and hide the draft.
+	if !m.draft && m.selected >= len(m.items) {
+		m.selected = max(0, len(m.items)-1)
 	}
 }
 

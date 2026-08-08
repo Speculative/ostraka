@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"ostraka/internal/models"
+	"ostraka/internal/store"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
@@ -289,5 +291,106 @@ func TestTitleInputFitsTheDraftRow(t *testing.T) {
 					termW, valueLen, got, colW)
 			}
 		}
+	}
+}
+
+// mkItem builds a minimal inbox item for the selection tests below.
+func mkItem(id string, st models.Status) models.Item {
+	return models.Item{ID: id, Channel: models.ChannelInbox, Status: st, Created: t0, Title: id}
+}
+
+// loadInto runs the real itemsLoadedMsg path, which is where selection is
+// re-established after any reload.
+func loadInto(t *testing.T, m model, items []models.Item) model {
+	t.Helper()
+	out, _ := m.Update(itemsLoadedMsg{items: items})
+	return out.(model)
+}
+
+func newSelectionModel(t *testing.T, items []models.Item, selected int) model {
+	t.Helper()
+	st, err := store.NewStore(filepath.Join(t.TempDir(), ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := model{
+		store: st, view: channelView(models.ChannelInbox),
+		items: items, selected: selected, width: 120, height: 40,
+	}
+	m.convItemID = m.selectedID()
+	return m
+}
+
+func TestSelectionFollowsAnItemThatResorts(t *testing.T) {
+	// A status change re-orders the list, so the row index is not stable
+	// across a reload — the id is.
+	before := []models.Item{
+		mkItem("A", models.StatusPendingUser),
+		mkItem("B", models.StatusPendingUser),
+		mkItem("C", models.StatusPendingUser),
+	}
+	m := newSelectionModel(t, before, 2)
+
+	// C is picked up by the agent and sorts to the top.
+	after := []models.Item{
+		mkItem("C", models.StatusAgentAcknowledged),
+		mkItem("A", models.StatusPendingUser),
+		mkItem("B", models.StatusPendingUser),
+	}
+	got := loadInto(t, m, after)
+
+	if got.selectedID() != "C" {
+		t.Errorf("selection landed on %q, want C", got.selectedID())
+	}
+	if got.selected != 0 {
+		t.Errorf("selected index is %d, want 0", got.selected)
+	}
+}
+
+func TestSelectionHoldsItsRowWhenTheItemLeavesTheView(t *testing.T) {
+	// Archiving the selected item, or parking it in backlog with the filter
+	// on, removes it from this view. Leaving selected untouched pointed it
+	// past the end of the list and blanked the reading pane.
+	before := []models.Item{
+		mkItem("A", models.StatusPendingUser),
+		mkItem("B", models.StatusPendingUser),
+		mkItem("C", models.StatusPendingUser),
+	}
+	m := newSelectionModel(t, before, 2)
+
+	got := loadInto(t, m, before[:2]) // C archived
+
+	if got.selected >= len(got.items) {
+		t.Fatalf("selected %d is past the end of %d items", got.selected, len(got.items))
+	}
+	if got.selectedID() != "B" {
+		t.Errorf("selection landed on %q, want the last remaining row B", got.selectedID())
+	}
+}
+
+func TestSelectionSurvivesAnEmptiedView(t *testing.T) {
+	m := newSelectionModel(t, []models.Item{mkItem("A", models.StatusPendingUser)}, 0)
+
+	got := loadInto(t, m, nil)
+
+	if got.selected != 0 {
+		t.Errorf("selected = %d on an empty list, want 0", got.selected)
+	}
+	if got.selectedID() != "" {
+		t.Errorf("selectedID = %q on an empty list, want empty", got.selectedID())
+	}
+}
+
+func TestDraftKeepsItsRowPastTheEnd(t *testing.T) {
+	// A draft parks selected one past the last item on purpose; clamping it
+	// would drop the cursor onto a real item and hide the draft row.
+	items := []models.Item{mkItem("A", models.StatusPendingUser)}
+	m := newSelectionModel(t, items, 1)
+	m.draft = true
+
+	got := loadInto(t, m, items)
+
+	if got.selected != 1 {
+		t.Errorf("draft selection moved to %d, want 1 (one past the end)", got.selected)
 	}
 }

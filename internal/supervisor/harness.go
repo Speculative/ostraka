@@ -39,6 +39,13 @@ type claudeHarness struct {
 	bin string
 }
 
+// codexHarness drives the Codex CLI's JSONL exec interface. Unlike the
+// app-server this is deliberately one process per turn, matching the existing
+// Claude adapter and keeping v0's lifecycle simple.
+type codexHarness struct{ bin string }
+
+func newCodexHarness() *codexHarness { return &codexHarness{bin: "codex"} }
+
 func newClaudeHarness() *claudeHarness {
 	return &claudeHarness{bin: "claude"}
 }
@@ -138,6 +145,99 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID string, o
 		return result, fmt.Errorf("claude exited with error: %w (stderr=%q)", runErr, truncate(stderr.String(), 500))
 	}
 	return result, nil
+}
+
+func (h *codexHarness) RunTurn(ctx context.Context, prompt, sessionID string, onEvent func(string)) (TurnResult, error) {
+	args := []string{"exec"}
+	if sessionID != "" {
+		args = append(args, "resume", sessionID)
+	}
+	args = append(args, "--json", "--dangerously-bypass-approvals-and-sandbox", prompt)
+	cmd := exec.CommandContext(ctx, h.bin, args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return TurnResult{}, fmt.Errorf("codex: stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return TurnResult{}, fmt.Errorf("codex: start: %w", err)
+	}
+
+	var result TurnResult
+	var tail bytes.Buffer
+	r := bufio.NewReader(stdout)
+	for {
+		line, readErr := r.ReadString('\n')
+		if len(line) > 0 {
+			if tail.Len() < 2000 {
+				tail.WriteString(line)
+			}
+			parseCodexLine(line, &result, onEvent)
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				stderr.WriteString("\nstdout read error: " + readErr.Error())
+			}
+			break
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		return result, fmt.Errorf("codex exited with error: %w (stderr=%q, stdout=%q)", err, truncate(stderr.String(), 500), truncate(tail.String(), 500))
+	}
+	if result.SessionID == "" {
+		return TurnResult{}, fmt.Errorf("codex: no thread.started event in output (stderr=%q, stdout=%q)", truncate(stderr.String(), 500), truncate(tail.String(), 500))
+	}
+	return result, nil
+}
+
+// Codex exec --json emits JSONL events. Keep the decoder intentionally loose:
+// unknown event types are safely ignored, so cosmetic CLI event additions do
+// not break dispatch. thread.started supplies the durable resume ID; completed
+// agent messages and tool calls are the useful parts of the live trace.
+func parseCodexLine(line string, result *TurnResult, onEvent func(string)) {
+	var event struct {
+		Type     string `json:"type"`
+		ThreadID string `json:"thread_id"`
+		Item     struct {
+			Type    string          `json:"type"`
+			Text    string          `json:"text"`
+			Command string          `json:"command"`
+			Name    string          `json:"name"`
+			Input   json.RawMessage `json:"input"`
+		} `json:"item"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(line)), &event) != nil {
+		return
+	}
+	if event.Type == "thread.started" && event.ThreadID != "" {
+		result.SessionID = event.ThreadID
+		return
+	}
+	if event.Type != "item.completed" || onEvent == nil {
+		return
+	}
+	switch event.Item.Type {
+	case "agent_message":
+		if text := strings.TrimSpace(event.Item.Text); text != "" {
+			result.ResultText = text
+			onEvent(text)
+		}
+	case "command_execution":
+		if event.Item.Command != "" {
+			onEvent("⚒ shell  " + oneLine(event.Item.Command, 120))
+		}
+	case "mcp_tool_call", "web_search", "file_change":
+		name := event.Item.Name
+		if name == "" {
+			name = event.Item.Type
+		}
+		if summary := summarizeToolInput(event.Item.Input); summary != "" {
+			onEvent("⚒ " + name + "  " + summary)
+		} else {
+			onEvent("⚒ " + name)
+		}
+	}
 }
 
 // parseStreamLine decodes one stream-json line, reporting any display-worthy

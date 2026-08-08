@@ -121,3 +121,30 @@ func TestTruncateCountsRunesNotBytes(t *testing.T) {
 		t.Errorf("short string was altered: %q", got)
 	}
 }
+
+func TestParseCodexLineTracksThreadAndLiveTrace(t *testing.T) {
+	var result TurnResult
+	var got []string
+	parseCodexLine(`{"type":"thread.started","thread_id":"thread-123"}`, &result, func(s string) { got = append(got, s) })
+	parseCodexLine(`{"type":"item.completed","item":{"type":"command_execution","command":"go test ./..."}}`, &result, func(s string) { got = append(got, s) })
+	parseCodexLine(`{"type":"item.completed","item":{"type":"agent_message","text":"All tests pass."}}`, &result, func(s string) { got = append(got, s) })
+
+	if result.SessionID != "thread-123" {
+		t.Errorf("session = %q, want thread-123", result.SessionID)
+	}
+	if result.ResultText != "All tests pass." {
+		t.Errorf("result = %q", result.ResultText)
+	}
+	if len(got) != 2 || !strings.Contains(got[0], "go test ./...") || got[1] != "All tests pass." {
+		t.Errorf("live trace = %q", got)
+	}
+}
+
+func TestParseCodexLineIgnoresUnknownEvents(t *testing.T) {
+	result := TurnResult{}
+	parseCodexLine(`{"type":"turn.started"}`, &result, nil)
+	parseCodexLine(`not json`, &result, nil)
+	if result.SessionID != "" || result.ResultText != "" {
+		t.Errorf("unknown event changed result: %+v", result)
+	}
+}

@@ -225,3 +225,78 @@ func TestAddTurnLeavesUserTurnsAlone(t *testing.T) {
 		t.Errorf("got %q want %q", got.Status, models.StatusBacklog)
 	}
 }
+
+// countAbsences reloads the list while a writer changes the item's status, and
+// reports how many reloads failed to see it at all. pause paces the writer:
+// zero hammers the store, which is useful for finding windows but is not how
+// the app behaves.
+func countAbsences(t *testing.T, pause time.Duration, rounds int, statuses ...models.Status) int {
+	t.Helper()
+	s := newTestStore(t)
+	a, err := s.CreateItem(models.ChannelInbox, "A", "body", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateItem(models.ChannelInbox, "B", "body", models.TypeThread, models.StatusBacklog, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < rounds; i++ {
+			for _, st := range statuses {
+				s.SetStatus(a.ID, st) //nolint:errcheck
+				time.Sleep(pause)
+			}
+		}
+	}()
+
+	missing := 0
+	for i := 0; i < 2000; i++ {
+		items, err := s.ListItems(store.ListOpts{})
+		if err != nil {
+			continue
+		}
+		found := false
+		for _, it := range items {
+			if it.ID == a.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing++
+		}
+	}
+	<-done
+	return missing
+}
+
+func TestItemStaysVisibleWhileItsStatusIsWritten(t *testing.T) {
+	// os.WriteFile truncates before writing, so a reader arriving mid-write saw
+	// a partial file, ParseItem failed, and ListItems silently skipped the item.
+	// The TUI reloads on every file change and the supervisor writes a status
+	// milliseconds after the TUI writes one, so reloads landed inside write
+	// windows routinely — and the item vanished from the list, taking the
+	// selection with it.
+	if missing := countAbsences(t, 0, 200, models.StatusPendingAgent, models.StatusAgentAcknowledged); missing != 0 {
+		t.Errorf("item was absent from %d reloads, want 0", missing)
+	}
+}
+
+func TestItemStaysVisibleWhileItMovesToTheArchive(t *testing.T) {
+	// A status change across the channel/archive boundary renames the file
+	// between two directories, and allPaths globs them one at a time — so on
+	// top of the write window there is a scan window. Writing before removing,
+	// plus re-scanning when the listing changes underneath the read, closes it
+	// at the pace a person actually archives things.
+	//
+	// It is not closed under an unpaced writer: a listing that never holds
+	// still exhausts the bounded retry. Removing that last sliver would mean
+	// not renaming across directories at all, which is a change to the on-disk
+	// layout rather than to this function.
+	if missing := countAbsences(t, time.Millisecond, 40, models.StatusArchived, models.StatusActive); missing != 0 {
+		t.Errorf("item was absent from %d reloads, want 0", missing)
+	}
+}

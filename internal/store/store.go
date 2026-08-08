@@ -103,17 +103,48 @@ func (s *Store) itemPath(item models.Item) string {
 	return filepath.Join(s.Root, channelDirs[item.Channel], item.ID+".md")
 }
 
+// listRetries bounds the re-scan below. One retry closes the window in
+// practice; the cap is only there so a pathological writer cannot spin us.
+const listRetries = 2
+
 func (s *Store) ListItems(opts ListOpts) ([]models.Item, error) {
+	for attempt := 0; ; attempt++ {
+		items, unstable, err := s.listOnce(opts)
+		if err != nil {
+			return nil, err
+		}
+		// A path that existed during the directory scan but not by the time we
+		// read it is an item being moved between a channel and the archive,
+		// not a missing one. Re-scanning finds it at its new location; dropping
+		// it would report the item as gone for one reload, which is enough to
+		// lose the selection sitting on it.
+		if !unstable || attempt == listRetries {
+			return items, nil
+		}
+	}
+}
+
+func (s *Store) listOnce(opts ListOpts) (items []models.Item, unstable bool, err error) {
 	paths, err := s.allPaths()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	var items []models.Item
+	seen := make(map[string]bool, len(paths))
 	for _, p := range paths {
 		item, err := ParseItem(p)
 		if err != nil {
+			if os.IsNotExist(err) {
+				unstable = true
+			}
 			continue
 		}
+		// A move writes the new location before removing the old, so an item
+		// can legitimately be readable from both at once. Report it once.
+		if seen[item.ID] {
+			continue
+		}
+		seen[item.ID] = true
+
 		if opts.Channel != nil && item.Channel != *opts.Channel {
 			continue
 		}
@@ -122,10 +153,35 @@ func (s *Store) ListItems(opts ListOpts) ([]models.Item, error) {
 		}
 		items = append(items, item)
 	}
+	// A move renames across directories, and allPaths globs them one at a
+	// time — so a scan can miss an item that was in the directory already
+	// globbed and arrives in one not yet globbed. Nothing fails to parse in
+	// that case, so re-scan and compare: a listing that changed underneath us
+	// is one we cannot trust to be complete.
+	if after, err := s.allPaths(); err == nil && !sameStrings(paths, after) {
+		unstable = true
+	}
+
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].Created.Before(items[j].Created)
 	})
-	return items, nil
+	return items, unstable, nil
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		set[s] = struct{}{}
+	}
+	for _, s := range b {
+		if _, ok := set[s]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) GetItem(id string) (models.Item, error) {
@@ -196,10 +252,16 @@ func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.I
 			// one the item was read from.
 			newPath := s.itemPath(item)
 			if newPath != path {
+				// Write the new location before dropping the old one. The
+				// reverse order leaves a window where the item exists nowhere,
+				// and a concurrent reload would show it as deleted.
+				if err := WriteItem(item, newPath); err != nil {
+					return models.Item{}, err
+				}
 				if err := os.Remove(path); err != nil {
 					return models.Item{}, err
 				}
-				path = newPath
+				return item, nil
 			}
 		}
 	}
@@ -233,12 +295,18 @@ func (s *Store) SetStatus(id string, status models.Status) (models.Item, error) 
 	}
 	item.Status = status
 	newPath := s.itemPath(item)
+	if err := WriteItem(item, newPath); err != nil {
+		return models.Item{}, err
+	}
+	// Only after the new file exists, so the item is never absent from both
+	// locations at once. A reader that lands in between sees it twice, which
+	// is harmless — a reader that saw it in neither would show it as gone.
 	if newPath != oldPath {
 		if err := os.Remove(oldPath); err != nil {
 			return models.Item{}, err
 		}
 	}
-	return item, WriteItem(item, newPath)
+	return item, nil
 }
 
 func (s *Store) DeleteItem(id string) error {

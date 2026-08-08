@@ -39,6 +39,37 @@ type Supervisor struct {
 	store   *store.Store
 	queue   chan enqueueMsg
 	logger  *log.Logger
+	session sessionGuard
+}
+
+// Session returns the provider and ID that the next queued turn will use.
+func (s *Supervisor) Session() (Provider, string) {
+	s.session.mu.Lock()
+	defer s.session.mu.Unlock()
+	sf, err := loadSession(s.root)
+	if err != nil {
+		return ProviderClaude, ""
+	}
+	return sf.Provider, sf.SessionID
+}
+
+// StartNewSession switches harness and clears its resume cursor. It is safe to
+// call during a running turn: dispatch will not let the old turn overwrite the
+// freshly selected session state when it finishes.
+func (s *Supervisor) StartNewSession(provider Provider) error {
+	if !provider.valid() {
+		return fmt.Errorf("unknown provider %q", provider)
+	}
+	s.session.mu.Lock()
+	defer s.session.mu.Unlock()
+	return saveSession(s.root, sessionFile{Provider: provider})
+}
+
+func (s *Supervisor) harnessFor(provider Provider) Harness {
+	if provider == ProviderCodex {
+		return newCodexHarness()
+	}
+	return s.harness
 }
 
 // New constructs a Supervisor rooted at the given .ostraka directory using
@@ -124,16 +155,18 @@ func (s *Supervisor) revertAcknowledged(itemID string, to models.Status) {
 }
 
 func (s *Supervisor) dispatch(msg enqueueMsg) {
-	sessionID, err := loadSessionID(s.root)
+	s.session.mu.Lock()
+	sf, err := loadSession(s.root)
+	s.session.mu.Unlock()
 	if err != nil {
-		s.logger.Printf("item %s: failed to load session id, starting fresh: %v", msg.itemID, err)
-		sessionID = ""
+		s.logger.Printf("item %s: failed to load session, starting fresh with Claude: %v", msg.itemID, err)
+		sf = sessionFile{Provider: ProviderClaude}
 	}
 
-	if sessionID == "" {
-		s.logger.Printf("item %s: dispatching (fresh session)", msg.itemID)
+	if sf.SessionID == "" {
+		s.logger.Printf("item %s: dispatching (fresh %s session)", msg.itemID, sf.Provider)
 	} else {
-		s.logger.Printf("item %s: dispatching (resuming session %s)", msg.itemID, sessionID)
+		s.logger.Printf("item %s: dispatching (%s session %s)", msg.itemID, sf.Provider, sf.SessionID)
 	}
 
 	s.markAcknowledged(msg.itemID)
@@ -141,7 +174,7 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	live := newLiveLog(s.root, msg.itemID)
 	defer live.clear()
 
-	result, err := s.harness.RunTurn(context.Background(), nudgePrompt(msg.itemID), sessionID, live.append)
+	result, err := s.harnessFor(sf.Provider).RunTurn(context.Background(), nudgePrompt(msg.itemID), sf.SessionID, live.append)
 	if err != nil {
 		s.logger.Printf("item %s: dispatch failed: %v", msg.itemID, err)
 		// Put it back in the queue's state so it doesn't sit forever showing
@@ -153,7 +186,14 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	// behind — hand it back rather than showing work that isn't happening.
 	s.revertAcknowledged(msg.itemID, models.StatusPendingUser)
 	if result.SessionID != "" {
-		if saveErr := saveSessionID(s.root, result.SessionID); saveErr != nil {
+		s.session.mu.Lock()
+		current, loadErr := loadSession(s.root)
+		var saveErr error
+		if loadErr == nil && current == sf {
+			saveErr = saveSession(s.root, sessionFile{Provider: sf.Provider, SessionID: result.SessionID})
+		}
+		s.session.mu.Unlock()
+		if saveErr != nil {
 			s.logger.Printf("item %s: failed to persist session id %s: %v", msg.itemID, result.SessionID, saveErr)
 		}
 	}
