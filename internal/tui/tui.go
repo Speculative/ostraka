@@ -161,6 +161,10 @@ type model struct {
 	// convLive is the length of the live progress block currently rendered,
 	// so a reload can tell a growing in-flight run from a static redraw.
 	convLive int
+	// convItemID is the item the pane is currently rendering. A reload that
+	// changes it is a move to a different conversation, not an update to the
+	// one being read.
+	convItemID string
 	// newBelow marks that a turn landed off-screen below the reader, who was
 	// scrolled up at the time and so was not auto-followed down to it.
 	newBelow bool
@@ -257,6 +261,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case itemsLoadedMsg:
 		prevID := m.selectedID()
+		prevRendered := m.convItemID
 		prevTurns := m.convTurns
 		prevLive := m.convLive
 		// Sample before SetContent: appending lines can change the answer.
@@ -265,6 +270,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.items = []models.Item(msg)
 		m.restoreSelection(prevID)
 		m.updateConv()
+
+		// A load that brings a different conversation into the pane parks it
+		// at the newest content, the same as moving there by hand. This is the
+		// asynchronous half of showSelected: switching channel empties the list
+		// and the replacement arrives here, a frame later.
+		if m.convItemID != "" && m.convItemID != prevRendered {
+			m.conv.GotoBottom()
+			m.newBelow = false
+			return m, nil
+		}
 
 		// Only a genuinely new turn on the item already being read counts.
 		// A first load, or a reload that landed on a different item, has no
@@ -333,16 +348,12 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "j", "down":
 		if m.selected < len(m.items)-1 {
 			m.selected++
-			m.updateConv()
-			m.conv.GotoTop()
-			m.newBelow = false
+			m.showSelected()
 		}
 	case "k", "up":
 		if m.selected > 0 {
 			m.selected--
-			m.updateConv()
-			m.conv.GotoTop()
-			m.newBelow = false
+			m.showSelected()
 		}
 	case "pgdown":
 		m.conv.PageDown()
@@ -619,9 +630,7 @@ func (m model) switchChannel(ch models.Channel) (model, tea.Cmd) {
 	m.channel = ch
 	m.selected = 0
 	m.items = nil
-	m.updateConv()
-	m.conv.GotoTop()
-	m.newBelow = false
+	m.showSelected()
 	return m, loadItemsCmd(m.store, ch)
 }
 
@@ -970,6 +979,15 @@ func wrapLine(line string, width int) []string {
 	return lines
 }
 
+// showSelected renders the current selection and parks the pane at its newest
+// content. Opening an item at the top means scrolling past the entire history
+// to reach the part that changed, which is almost never what the reader wants.
+func (m *model) showSelected() {
+	m.updateConv()
+	m.conv.GotoBottom()
+	m.newBelow = false
+}
+
 // syncNewBelow retires the "new messages below" marker once the reader has
 // actually reached the bottom, which is the only thing that makes it stale.
 func (m *model) syncNewBelow() {
@@ -993,9 +1011,11 @@ func (m *model) updateConv() {
 		}
 		m.convTurns = 0
 		m.convLive = 0
+		m.convItemID = ""
 		return
 	}
 	item := m.items[m.selected]
+	m.convItemID = item.ID
 	m.convTurns = len(item.Turns)
 	w := m.conv.Width
 
