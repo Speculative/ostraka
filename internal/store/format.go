@@ -23,6 +23,41 @@ type frontmatter struct {
 	Status  string `yaml:"status"`
 	Created string `yaml:"created"`
 	Parent  string `yaml:"parent,omitempty"`
+	Title   string `yaml:"title,omitempty"`
+}
+
+// titleMaxLen bounds a derived title. Only items written before title existed
+// need deriving, and their bodies run to paragraphs; the cut keeps one of them
+// from being a de facto multi-line title again.
+const titleMaxLen = 80
+
+// DeriveTitle produces a single-line title from a body. It is the fallback for
+// items written before the title field existed: they are read with a derived
+// title and gain a real one the next time they are written, so no separate
+// migration step is needed.
+func DeriveTitle(body string) string {
+	line := body
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.TrimSpace(line)
+	if r := []rune(line); len(r) > titleMaxLen {
+		line = strings.TrimRight(string(r[:titleMaxLen-1]), " ") + "…"
+	}
+	return line
+}
+
+// ErrTitleNotSingleLine rejects a title that would break list rendering.
+// Sanitising silently would store something other than what was typed.
+var ErrTitleNotSingleLine = fmt.Errorf("title must be a single non-empty line")
+
+// ValidateTitle enforces the single-line rule at the one place every caller —
+// CLI and TUI alike — has to pass through.
+func ValidateTitle(title string) error {
+	if strings.TrimSpace(title) == "" || strings.ContainsAny(title, "\n\r") {
+		return ErrTitleNotSingleLine
+	}
+	return nil
 }
 
 func ParseItem(path string) (models.Item, error) {
@@ -95,6 +130,11 @@ func ParseItem(path string) (models.Item, error) {
 		status = models.StatusActive
 	}
 
+	title := fm.Title
+	if title == "" {
+		title = DeriveTitle(itemBody)
+	}
+
 	return models.Item{
 		ID:      fm.ID,
 		Channel: models.Channel(fm.Channel),
@@ -102,6 +142,7 @@ func ParseItem(path string) (models.Item, error) {
 		Status:  status,
 		Created: created,
 		Parent:  fm.Parent,
+		Title:   title,
 		Body:    itemBody,
 		Turns:   turns,
 	}, nil
@@ -115,6 +156,7 @@ func WriteItem(item models.Item, path string) error {
 		Status:  string(item.Status),
 		Created: item.Created.UTC().Format(time.RFC3339Nano),
 		Parent:  item.Parent,
+		Title:   item.Title,
 	}
 
 	yamlBytes, err := yaml.Marshal(fm)

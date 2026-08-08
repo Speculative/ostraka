@@ -13,6 +13,7 @@ import (
 	"ostraka/internal/supervisor"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -52,6 +53,10 @@ var (
 	newBelowStyle = lipgloss.NewStyle().Bold(true).
 			Foreground(lipgloss.Color("16")).
 			Background(pendingFg)
+	popupStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("12")).
+			Padding(0, 1)
 	borderStyle   = lipgloss.NewStyle().BorderRight(true).BorderStyle(lipgloss.NormalBorder())
 )
 
@@ -137,9 +142,17 @@ type model struct {
 	items    []models.Item
 	selected int
 
-	conv      viewport.Model
-	input     textarea.Model
-	inputMode bool
+	conv  viewport.Model
+	input textarea.Model
+	title textinput.Model
+	mode  uiMode
+
+	// draft marks an unsaved new item occupying a synthetic last row of the
+	// list while its title is typed. selected points one past the real items
+	// for its duration, which the existing range guards already handle.
+	draft bool
+	// statusIdx is the cursor into allStatuses while the selector is open.
+	statusIdx int
 
 	// convTurns is the turn count of the item currently rendered into conv,
 	// so a reload can tell "new turn arrived" from "same item, redrawn".
@@ -158,6 +171,39 @@ const (
 	inputMaxHeight = 8
 )
 
+// uiMode is which widget owns the keyboard. Everything except modeNav is a
+// transient editing state entered from, and returning to, modeNav.
+type uiMode int
+
+const (
+	modeNav uiMode = iota
+	modeCompose
+	modeTitle
+	modeStatus
+)
+
+// allStatuses is the selector's running order, coarsest lifecycle first.
+var allStatuses = []models.Status{
+	models.StatusBacklog,
+	models.StatusActive,
+	models.StatusPendingUser,
+	models.StatusPendingAgent,
+	models.StatusDone,
+	models.StatusArchived,
+}
+
+// dispatchable reports whether submitting a turn on an item in this status
+// should wake the agent. Backlog deliberately does not: it is where an item
+// is parked precisely so the agent does not see it yet. Terminal statuses do
+// not either — there is no one left to answer.
+func dispatchable(s models.Status) bool {
+	switch s {
+	case models.StatusActive, models.StatusPendingUser, models.StatusPendingAgent:
+		return true
+	}
+	return false
+}
+
 func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Supervisor) model {
 	ta := textarea.New()
 	ta.Placeholder = "Add turn… (ctrl+s to submit, esc to cancel)"
@@ -169,6 +215,10 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Superviso
 	// Inline(true) is hardcoded in computedCursorLine(); clear the background so
 	// the cursor line doesn't show a 1-char-wide highlight on an empty textarea.
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
+
+	ti := textinput.New()
+	ti.Prompt = ""
+	ti.Placeholder = "new item title…"
 	return model{
 		store:    s,
 		watchCh:  watchCh,
@@ -176,6 +226,7 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Superviso
 		channel:  models.ChannelAsks,
 		channels: []models.Channel{models.ChannelInbox, models.ChannelAsks, models.ChannelHandoff},
 		input:    ta,
+		title:    ti,
 	}
 }
 
@@ -211,7 +262,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Only a genuinely new turn on the item already being read counts.
 		// A first load, or a reload that landed on a different item, has no
 		// "before" to compare against.
-		if prevID != "" && m.selectedID() == prevID && m.convTurns > prevTurns {
+		if !m.draft && prevID != "" && m.selectedID() == prevID && m.convTurns > prevTurns {
 			if wasAtBottom {
 				m.conv.GotoBottom()
 			} else {
@@ -229,14 +280,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		if m.inputMode {
+		switch m.mode {
+		case modeCompose:
 			return m.handleInputKey(msg)
+		case modeTitle:
+			return m.handleTitleKey(msg)
+		case modeStatus:
+			return m.handleStatusKey(msg)
 		}
 		return m.handleNavKey(msg)
 	}
 
 	// Pass other messages to sub-components.
-	if m.inputMode {
+	switch m.mode {
+	case modeCompose:
 		prevLines := m.currentInputHeight()
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -244,7 +301,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentInputHeight() != prevLines {
 			m = m.recalcLayout()
 		}
-	} else {
+	case modeTitle:
+		var cmd tea.Cmd
+		m.title, cmd = m.title.Update(msg)
+		cmds = append(cmds, cmd)
+	default:
 		var cmd tea.Cmd
 		m.conv, cmd = m.conv.Update(msg)
 		cmds = append(cmds, cmd)
@@ -286,32 +347,185 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, loadItemsCmd(m.store, m.channel)
 	case "t":
 		if len(m.items) > 0 {
-			m.inputMode = true
-			m.input.Reset()
-			m = m.recalcLayout()
-			return m, m.input.Focus()
+			return m.openComposer()
+		}
+	case "a":
+		// A synthetic row past the end of items; selected follows it there so
+		// the conversation pane clears to the draft hint.
+		m.draft = true
+		m.selected = len(m.items)
+		m.mode = modeTitle
+		m.title.Reset()
+		m.title.Width = m.listWidth() - 4
+		m.updateConv()
+		return m, m.title.Focus()
+	case "s":
+		if m.selected < len(m.items) {
+			m.mode = modeStatus
+			m.statusIdx = statusIndex(m.items[m.selected].Status)
 		}
 	}
 	return m, nil
+}
+
+// openComposer focuses the turn textarea for the selected item.
+func (m model) openComposer() (tea.Model, tea.Cmd) {
+	m.mode = modeCompose
+	m.input.Reset()
+	m = m.recalcLayout()
+	return m, m.input.Focus()
+}
+
+func statusIndex(s models.Status) int {
+	for i, c := range allStatuses {
+		if c == s {
+			return i
+		}
+	}
+	return 0
+}
+
+// handleTitleKey drives the inline title editor for a draft item. Enter
+// commits the title — titles are single-line, so there is nothing else Enter
+// could mean here — and moves on to the body, which is the other half of a
+// mandatory pair. The item is not written until the body is submitted.
+func (m model) handleTitleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m = m.cancelDraft()
+		return m, nil
+	case "enter":
+		if store.ValidateTitle(m.title.Value()) != nil {
+			return m, nil // refuse to advance rather than create a bad item
+		}
+		m.title.Blur()
+		return m.openComposer()
+	}
+	var cmd tea.Cmd
+	m.title, cmd = m.title.Update(msg)
+	return m, cmd
+}
+
+// commitDraft writes the pending item from the title and the body just typed.
+func (m model) commitDraft(body string) model {
+	// New items start in backlog: created, but not yet the agent's problem.
+	item, err := m.store.CreateItem(m.channel, m.title.Value(), body, models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		m.err = err
+		return m.cancelDraft()
+	}
+	m.draft = false
+	// Reload synchronously so the new item is selectable in this same frame
+	// rather than after a round trip through loadItemsCmd.
+	m.reload()
+	m.restoreSelection(item.ID)
+	m.updateConv()
+	return m
+}
+
+func (m model) cancelDraft() model {
+	m.draft = false
+	m.mode = modeNav
+	m.title.Blur()
+	if m.selected >= len(m.items) {
+		m.selected = max(0, len(m.items)-1)
+	}
+	m.updateConv()
+	return m
+}
+
+// handleStatusKey drives the status selector popup.
+func (m model) handleStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.mode = modeNav
+	case "j", "down":
+		if m.statusIdx < len(allStatuses)-1 {
+			m.statusIdx++
+		}
+	case "k", "up":
+		if m.statusIdx > 0 {
+			m.statusIdx--
+		}
+	case "enter":
+		if m.selected < len(m.items) {
+			item := m.items[m.selected]
+			status := allStatuses[m.statusIdx]
+			// Moving an item the agent already owes a reply on into a working
+			// status is itself the "go" signal — otherwise you have to set
+			// active and then post a turn you have nothing to say in.
+			if wakesAgent(status) && awaitingAgent(item) {
+				status = models.StatusPendingAgent
+				m.store.SetStatus(item.ID, status) //nolint:errcheck
+				m.sup.Enqueue(item.ID)
+			} else {
+				m.store.SetStatus(item.ID, status) //nolint:errcheck
+			}
+		}
+		m.mode = modeNav
+		return m, loadItemsCmd(m.store, m.channel)
+	}
+	return m, nil
+}
+
+// wakesAgent reports whether moving an item *into* this status is a request
+// for the agent to pick it up. Narrower than dispatchable: choosing
+// pending-user is a deliberate hand-off in the other direction, so it parks
+// the item however recently the user wrote.
+func wakesAgent(s models.Status) bool {
+	return s == models.StatusActive || s == models.StatusPendingAgent
+}
+
+// awaitingAgent reports whether the last word on an item is the user's, and so
+// whether there is anything for a dispatch to respond to. An item with no
+// turns counts: its body is the user's opening statement.
+func awaitingAgent(item models.Item) bool {
+	if len(item.Turns) == 0 {
+		return true
+	}
+	return item.Turns[len(item.Turns)-1].Actor == models.ActorUser
+}
+
+// reload refreshes items in place. The async loadItemsCmd is still the normal
+// path; this exists for the few spots that must see the new list immediately.
+func (m *model) reload() {
+	items, err := m.store.ListItems(store.ListOpts{Channel: &m.channel})
+	if err != nil {
+		m.err = err
+		return
+	}
+	m.items = items
 }
 
 func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+s":
 		content := strings.TrimSpace(m.input.Value())
+		if m.draft {
+			// The body is mandatory, so an empty one leaves the draft open
+			// rather than writing a half-item.
+			if content == "" {
+				return m, nil
+			}
+			m = m.commitDraft(content)
+			m.mode = modeNav
+			m.input.Blur()
+			m = m.recalcLayout()
+			return m, loadItemsCmd(m.store, m.channel)
+		}
 		if content != "" && m.selected < len(m.items) {
 			item := m.items[m.selected]
 			m.store.AddTurn(item.ID, models.ActorUser, content) //nolint:errcheck
-			// A user turn hands the ball to the agent wherever the item was
-			// parked, so advance from any non-terminal status — not just
-			// pending-user. Otherwise the dispatched session's discovery
-			// command (--status pending-agent) comes back empty.
-			if item.Status != models.StatusDone && item.Status != models.StatusArchived {
+			// Whether a turn wakes the agent is a property of the item's
+			// status, not of the keystroke: advancing to pending-agent and
+			// enqueueing are the same decision, so they move together. A
+			// backlog item stays silent — see dispatchable.
+			if dispatchable(item.Status) {
 				m.store.SetStatus(item.ID, models.StatusPendingAgent) //nolint:errcheck
+				m.sup.Enqueue(item.ID)
 			}
-			m.sup.Enqueue(item.ID)
 		}
-		m.inputMode = false
+		m.mode = modeNav
 		m.input.Blur()
 		m = m.recalcLayout()
 		// Your own turn is never "new messages below" — go to the bottom now so
@@ -319,8 +533,12 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.conv.GotoBottom()
 		return m, loadItemsCmd(m.store, m.channel)
 	case "esc":
-		m.inputMode = false
 		m.input.Blur()
+		if m.draft {
+			// Abandoning the body abandons the whole unwritten item.
+			m = m.cancelDraft()
+		}
+		m.mode = modeNav
 		m = m.recalcLayout()
 		return m, nil
 	case "pgdown":
@@ -405,7 +623,7 @@ func (m model) View() string {
 	listPanel := listPanelStyle.Width(listW).Render(listContent)
 	convAreaW := m.width - (m.listWidth() + 1)
 	var convPanel string
-	if m.inputMode {
+	if m.mode == modeCompose {
 		// Per-element padding so the separator spans the full column width,
 		// giving │──────── instead of │ ──────── at the corner.
 		viewportBlock := lipgloss.NewStyle().Padding(1, 1, 0, 1).Render(m.renderConv())
@@ -435,16 +653,46 @@ func (m model) View() string {
 // exact height and nothing else in the layout shifts.
 func (m model) renderConv() string {
 	view := m.conv.View()
-	if !m.newBelow {
-		return view
-	}
 	lines := strings.Split(view, "\n")
 	if len(lines) == 0 {
 		return view
 	}
-	lines[len(lines)-1] = newBelowStyle.Width(m.conv.Width).Align(lipgloss.Center).
-		Render("↓ new messages below ↓")
+	if m.newBelow {
+		lines[len(lines)-1] = newBelowStyle.Width(m.conv.Width).Align(lipgloss.Center).
+			Render("↓ new messages below ↓")
+	}
+	if m.mode == modeStatus {
+		lines = m.overlayStatusPopup(lines)
+	}
 	return strings.Join(lines, "\n")
+}
+
+// overlayStatusPopup draws the status selector over the top rows of the
+// conversation. Each popup row replaces a whole line rather than being spliced
+// into one — the underlying content is styled, and cutting a line mid-way
+// would mean slicing ANSI sequences. Whole-row replacement is the cheap
+// version, and it still reads as a floating box.
+func (m model) overlayStatusPopup(lines []string) []string {
+	rows := make([]string, len(allStatuses))
+	for i, s := range allStatuses {
+		marker, sty := "  ", lipgloss.NewStyle()
+		if i == m.statusIdx {
+			marker, sty = "› ", lipgloss.NewStyle().Bold(true).Foreground(pendingFg)
+		}
+		rows[i] = sty.Render(marker + string(s))
+	}
+	box := popupStyle.Render("set status\n" + strings.Join(rows, "\n"))
+
+	const topRow = 1 // one row of breathing space above the popup
+	pad := lipgloss.NewStyle().Width(m.conv.Width)
+	for i, boxLine := range strings.Split(box, "\n") {
+		row := topRow + i
+		if row >= len(lines) {
+			break
+		}
+		lines[row] = pad.Render(boxLine)
+	}
+	return lines
 }
 
 func (m model) renderHeader() string {
@@ -471,9 +719,23 @@ func (m model) renderHeader() string {
 }
 
 func (m model) renderFooter() string {
-	text := "q quit  j/k navigate  pgup/pgdn scroll  1/2/3 channel  t add turn  r refresh"
-	if m.inputMode {
+	var text string
+	switch m.mode {
+	case modeCompose:
 		text = "ctrl+s submit  esc cancel  pgup/pgdn scroll"
+		if m.draft {
+			text = "ctrl+s create item  esc discard draft"
+		} else if m.selected < len(m.items) && !dispatchable(m.items[m.selected].Status) {
+			// Silent submit is the surprising case, so name it rather than
+			// leaving the reader to discover the agent never woke up.
+			text = "ctrl+s save (no dispatch — backlog)  esc cancel  pgup/pgdn scroll"
+		}
+	case modeTitle:
+		text = "enter next (body)  esc cancel"
+	case modeStatus:
+		text = "j/k select  enter apply  esc cancel"
+	default:
+		text = "q quit  j/k nav  a add  s status  t turn  1/2/3 channel  pgup/pgdn scroll  r refresh"
 	}
 
 	// Right-aligned scroll position, shown only when the conversation actually
@@ -501,7 +763,7 @@ func (m model) renderFooter() string {
 }
 
 func (m model) renderList() string {
-	if len(m.items) == 0 {
+	if len(m.items) == 0 && !m.draft {
 		return dimStyle.Render("(empty)")
 	}
 	colW := m.listWidth() - 2 // panel uses Width(listW) with Padding(1), so content = listW-2
@@ -514,13 +776,13 @@ func (m model) renderList() string {
 		isSelected := i == m.selected
 		isPending := item.Status == models.StatusPendingUser
 
-		preview := strings.ReplaceAll(item.Body, "\n", " ")
+		preview := item.Title
 		meta := fmt.Sprintf("%s [%s]", item.ID, item.Status)
 
 		// Word-wrap the preview manually so we control each line's prefix and
 		// background independently — JoinHorizontal pads shorter columns with
 		// unstyled spaces, losing the background on wrapped continuation lines.
-		previewLines := wordWrap(preview, textW)
+		previewLines := truncateLines(wordWrap(preview, textW), previewMaxLines, textW)
 
 		var rowLineSty, metaSty lipgloss.Style
 		if isSelected {
@@ -555,7 +817,42 @@ func (m model) renderList() string {
 		parts = append(parts, metaSty.Render("  "+meta))
 		lines[i] = strings.Join(parts, "\n")
 	}
+
+	// The draft is a synthetic row: it has no file behind it yet, so it is
+	// rendered from the title input rather than from an item.
+	if m.draft {
+		rowSty := lipgloss.NewStyle().Width(colW).Background(selectedBg).Bold(true)
+		metaSty := lipgloss.NewStyle().Width(colW).Background(selectedBg).Foreground(lipgloss.Color("245"))
+		m.title.Width = max(1, colW-2)
+		lines = append(lines,
+			rowSty.Render("› "+m.title.View())+"\n"+metaSty.Render("  new item [backlog]"))
+	}
 	return strings.Join(lines, "\n")
+}
+
+// previewMaxLines caps how much of an item's body the list will show. Bodies
+// are only single-line by convention — the TUI's add flow enforces it, the
+// CLI does not — so one long-bodied item could otherwise crowd out every
+// other row in the list.
+const previewMaxLines = 2
+
+// truncateLines caps lines at n, marking the cut with an ellipsis so a
+// shortened preview is visibly shortened rather than silently wrong. The
+// ellipsis has to fit inside width, or the row it lands in overflows the
+// column by exactly the character meant to signal the truncation. Callers
+// pass lines that already fit width — wordWrap output, in practice — so only
+// the line the ellipsis lands on needs re-trimming.
+func truncateLines(lines []string, n, width int) []string {
+	if len(lines) <= n || n <= 0 {
+		return lines
+	}
+	out := append([]string(nil), lines[:n]...)
+	r := []rune(out[n-1])
+	if width > 0 && len(r) > width-1 {
+		r = r[:max(0, width-1)]
+	}
+	out[n-1] = strings.TrimRight(string(r), " ") + "…"
+	return out
 }
 
 // wordWrap splits s into lines of at most width runes, breaking at word boundaries.
@@ -660,7 +957,17 @@ func (m *model) syncNewBelow() {
 
 func (m *model) updateConv() {
 	if len(m.items) == 0 || m.selected >= len(m.items) {
-		m.conv.SetContent("")
+		if m.draft {
+			m.conv.SetContent(wrapText(
+				"New item.\n\n"+
+					"1. Title — one line, typed in the list. Enter moves on.\n"+
+					"2. Body — the opening description, any length. ctrl+s creates the item.\n\n"+
+					"Both are required. It starts in backlog, so it won't wake the agent; "+
+					"press s afterwards to move it to active if you want it dispatched.",
+				m.conv.Width))
+		} else {
+			m.conv.SetContent("")
+		}
 		m.convTurns = 0
 		return
 	}
@@ -678,6 +985,7 @@ func (m *model) updateConv() {
 	if item.Parent != "" {
 		meta += "  parent: " + item.Parent
 	}
+	sb.WriteString(wrapText(item.Title, w) + "\n")
 	sb.WriteString(wrapText(meta, w) + "\n" + headRule + "\n\n")
 	sb.WriteString(wrapText(item.Body, w))
 	for _, turn := range item.Turns {
@@ -803,7 +1111,7 @@ func (m model) recalcLayout() model {
 	}
 	mainH := m.height - 2 // subtract header and footer
 	var convH int
-	if m.inputMode {
+	if m.mode == modeCompose {
 		// per-element padding: 1(top) + convH + 1(sep) + inputH + 1(bottom) = mainH
 		convH = mainH - m.currentInputHeight() - 3
 	} else {

@@ -19,7 +19,7 @@ func newTestStore(t *testing.T) *store.Store {
 
 func TestCreateAndGet(t *testing.T) {
 	s := newTestStore(t)
-	item, err := s.CreateItem(models.ChannelAsks, "hello", models.TypeThread, models.StatusActive, "")
+	item, err := s.CreateItem(models.ChannelAsks, "hello", "hello", models.TypeThread, models.StatusActive, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,9 +41,9 @@ func TestCreateAndGet(t *testing.T) {
 
 func TestListItems(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateItem(models.ChannelAsks, "ask 1", models.TypeThread, models.StatusActive, "")
-	s.CreateItem(models.ChannelAsks, "ask 2", models.TypeThread, models.StatusPendingUser, "")
-	s.CreateItem(models.ChannelInbox, "inbox 1", models.TypeThread, models.StatusActive, "")
+	s.CreateItem(models.ChannelAsks, "ask 1", "ask 1", models.TypeThread, models.StatusActive, "")
+	s.CreateItem(models.ChannelAsks, "ask 2", "ask 2", models.TypeThread, models.StatusPendingUser, "")
+	s.CreateItem(models.ChannelInbox, "inbox 1", "inbox 1", models.TypeThread, models.StatusActive, "")
 
 	ch := models.ChannelAsks
 	items, err := s.ListItems(store.ListOpts{Channel: &ch})
@@ -67,7 +67,7 @@ func TestListItems(t *testing.T) {
 func TestListSortedByCreated(t *testing.T) {
 	s := newTestStore(t)
 	for _, body := range []string{"first", "second", "third"} {
-		s.CreateItem(models.ChannelHandoff, body, models.TypeThread, models.StatusActive, "")
+		s.CreateItem(models.ChannelHandoff, body, body, models.TypeThread, models.StatusActive, "")
 		time.Sleep(time.Millisecond) // ensure distinct timestamps
 	}
 	items, err := s.ListItems(store.ListOpts{})
@@ -84,7 +84,7 @@ func TestListSortedByCreated(t *testing.T) {
 
 func TestAddTurn(t *testing.T) {
 	s := newTestStore(t)
-	item, _ := s.CreateItem(models.ChannelAsks, "question", models.TypeThread, models.StatusActive, "")
+	item, _ := s.CreateItem(models.ChannelAsks, "question", "question", models.TypeThread, models.StatusActive, "")
 
 	updated, err := s.AddTurn(item.ID, models.ActorAgent, "my answer")
 	if err != nil {
@@ -106,7 +106,7 @@ func TestAddTurn(t *testing.T) {
 
 func TestSetStatus(t *testing.T) {
 	s := newTestStore(t)
-	item, _ := s.CreateItem(models.ChannelAsks, "q", models.TypeThread, models.StatusActive, "")
+	item, _ := s.CreateItem(models.ChannelAsks, "q", "q", models.TypeThread, models.StatusActive, "")
 
 	_, err := s.SetStatus(item.ID, models.StatusPendingUser)
 	if err != nil {
@@ -121,7 +121,7 @@ func TestSetStatus(t *testing.T) {
 
 func TestSetStatusArchives(t *testing.T) {
 	s := newTestStore(t)
-	item, _ := s.CreateItem(models.ChannelAsks, "q", models.TypeThread, models.StatusActive, "")
+	item, _ := s.CreateItem(models.ChannelAsks, "q", "q", models.TypeThread, models.StatusActive, "")
 
 	if _, err := s.SetStatus(item.ID, models.StatusDone); err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestSetStatusArchives(t *testing.T) {
 
 func TestDeleteItem(t *testing.T) {
 	s := newTestStore(t)
-	item, _ := s.CreateItem(models.ChannelAsks, "q", models.TypeThread, models.StatusActive, "")
+	item, _ := s.CreateItem(models.ChannelAsks, "q", "q", models.TypeThread, models.StatusActive, "")
 
 	if err := s.DeleteItem(item.ID); err != nil {
 		t.Fatal(err)
@@ -159,9 +159,68 @@ func TestGetNotFound(t *testing.T) {
 func TestIDCollisionHandled(t *testing.T) {
 	s := newTestStore(t)
 	// Create two items rapidly; IDs should be unique
-	a, _ := s.CreateItem(models.ChannelAsks, "a", models.TypeThread, models.StatusActive, "")
-	b, _ := s.CreateItem(models.ChannelAsks, "b", models.TypeThread, models.StatusActive, "")
+	a, _ := s.CreateItem(models.ChannelAsks, "a", "a", models.TypeThread, models.StatusActive, "")
+	b, _ := s.CreateItem(models.ChannelAsks, "b", "b", models.TypeThread, models.StatusActive, "")
 	if a.ID == b.ID {
 		t.Errorf("ID collision: both got %q", a.ID)
+	}
+}
+
+func TestStatusAfterAgentTurn(t *testing.T) {
+	for _, tc := range []struct {
+		current models.Status
+		want    models.Status
+		moved   bool
+	}{
+		{models.StatusPendingAgent, models.StatusPendingUser, true},
+		{models.StatusActive, models.StatusPendingUser, true},
+		// Parked states: an agent turn is not a request for the user to act.
+		{models.StatusBacklog, models.StatusBacklog, false},
+		{models.StatusPendingUser, models.StatusPendingUser, false},
+		{models.StatusDone, models.StatusDone, false},
+		{models.StatusArchived, models.StatusArchived, false},
+	} {
+		got, moved := store.StatusAfterAgentTurn(tc.current)
+		if got != tc.want || moved != tc.moved {
+			t.Errorf("StatusAfterAgentTurn(%q) = (%q, %v), want (%q, %v)",
+				tc.current, got, moved, tc.want, tc.moved)
+		}
+	}
+}
+
+func TestAddTurnHandsBackOnAgentTurn(t *testing.T) {
+	s := newTestStore(t)
+	item, _ := s.CreateItem(models.ChannelAsks, "q", "q", models.TypeThread, models.StatusPendingAgent, "")
+
+	got, err := s.AddTurn(item.ID, models.ActorAgent, "answered")
+	if err != nil {
+		t.Fatalf("AddTurn: %v", err)
+	}
+	if got.Status != models.StatusPendingUser {
+		t.Errorf("in-memory status: got %q want %q", got.Status, models.StatusPendingUser)
+	}
+	// The advance has to survive the write, or the next list still shows it
+	// waiting on the agent.
+	reread, err := s.GetItem(item.ID)
+	if err != nil {
+		t.Fatalf("GetItem: %v", err)
+	}
+	if reread.Status != models.StatusPendingUser {
+		t.Errorf("persisted status: got %q want %q", reread.Status, models.StatusPendingUser)
+	}
+}
+
+func TestAddTurnLeavesUserTurnsAlone(t *testing.T) {
+	// User-turn status logic belongs to the caller: the TUI decides whether a
+	// turn dispatches, and a backlog item must stay quiet.
+	s := newTestStore(t)
+	item, _ := s.CreateItem(models.ChannelAsks, "q", "q", models.TypeThread, models.StatusBacklog, "")
+
+	got, err := s.AddTurn(item.ID, models.ActorUser, "note to self")
+	if err != nil {
+		t.Fatalf("AddTurn: %v", err)
+	}
+	if got.Status != models.StatusBacklog {
+		t.Errorf("got %q want %q", got.Status, models.StatusBacklog)
 	}
 }

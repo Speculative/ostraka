@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"ostraka/internal/models"
@@ -135,7 +136,10 @@ func (s *Store) GetItem(id string) (models.Item, error) {
 	return ParseItem(path)
 }
 
-func (s *Store) CreateItem(channel models.Channel, body string, itemType models.ItemType, status models.Status, parent string) (models.Item, error) {
+func (s *Store) CreateItem(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent string) (models.Item, error) {
+	if err := ValidateTitle(title); err != nil {
+		return models.Item{}, err
+	}
 	now := time.Now().UTC()
 	id := now.Format("20060102-150405")
 
@@ -161,6 +165,7 @@ func (s *Store) CreateItem(channel models.Channel, body string, itemType models.
 		Status:  status,
 		Created: now,
 		Parent:  parent,
+		Title:   strings.TrimSpace(title),
 		Body:    body,
 	}
 	if err := WriteItem(item, s.itemPath(item)); err != nil {
@@ -183,7 +188,38 @@ func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.I
 		Timestamp: time.Now().UTC(),
 		Content:   content,
 	})
+	if actor == models.ActorAgent {
+		if next, ok := StatusAfterAgentTurn(item.Status); ok {
+			item.Status = next
+			// A status change can move the file between channel and archive
+			// directories, so re-derive the path rather than writing to the
+			// one the item was read from.
+			newPath := s.itemPath(item)
+			if newPath != path {
+				if err := os.Remove(path); err != nil {
+					return models.Item{}, err
+				}
+				path = newPath
+			}
+		}
+	}
 	return item, WriteItem(item, path)
+}
+
+// StatusAfterAgentTurn gives the status an item moves to once the agent has
+// spoken, and whether it moves at all. An agent turn hands the ball back to
+// the user, mirroring the advance to pending-agent that a user turn triggers;
+// without it an item stays flagged for the agent after it has already been
+// answered and keeps resurfacing in the pending-agent queue.
+//
+// Backlog and the terminal statuses are left alone: those are parked states,
+// and an agent turn is not a request for the user to do anything.
+func StatusAfterAgentTurn(current models.Status) (models.Status, bool) {
+	switch current {
+	case models.StatusActive, models.StatusPendingAgent:
+		return models.StatusPendingUser, true
+	}
+	return current, false
 }
 
 func (s *Store) SetStatus(id string, status models.Status) (models.Item, error) {

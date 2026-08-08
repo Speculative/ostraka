@@ -52,6 +52,10 @@ type Item struct {
 	Status  Status
 	Created time.Time
 	Parent  string // empty if none
-	Body    string
-	Turns   []Turn
+	// Title is a single line: it is the item's label in list views, where a
+	// multi-line one would crowd out every other row. Body carries the
+	// opening description at whatever length it needs.
+	Title string
+	Body  string
+	Turns []Turn
 }

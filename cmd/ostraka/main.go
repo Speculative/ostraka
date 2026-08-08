@@ -106,6 +106,8 @@ var itemCmd = &cobra.Command{
 
 var addFlags struct {
 	channel string
+	title   string
+	body    string
 	itype   string
 	status  string
 	parent  string
@@ -114,21 +116,29 @@ var addFlags struct {
 func addItemAddFlags() {
 	f := itemAddCmd.Flags()
 	f.StringVarP(&addFlags.channel, "channel", "c", "", "inbox|asks|handoff (required)")
+	f.StringVar(&addFlags.title, "title", "", "single-line label for list views (required)")
+	f.StringVar(&addFlags.body, "body", "", "opening description, any length (required)")
 	f.StringVarP(&addFlags.itype, "type", "t", "thread", "thread|doc")
 	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|pending-agent|done|archived")
 	f.StringVarP(&addFlags.parent, "parent", "p", "", "parent item ID")
 	itemAddCmd.MarkFlagRequired("channel")
+	itemAddCmd.MarkFlagRequired("title")
+	itemAddCmd.MarkFlagRequired("body")
 }
 
+// Title and body are separate mandatory flags rather than one positional
+// argument: when a single value served as both, callers passed whole reports
+// as the label and the list view had to render them.
 var itemAddCmd = &cobra.Command{
-	Use:   "add <body>",
+	Use:   "add --title <title> --body <body>",
 	Short: "Create a new item and print its ID",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s := mustStore()
 		item, err := s.CreateItem(
 			models.Channel(addFlags.channel),
-			args[0],
+			addFlags.title,
+			addFlags.body,
 			models.ItemType(addFlags.itype),
 			models.Status(addFlags.status),
 			addFlags.parent,
@@ -181,12 +191,12 @@ var itemListCmd = &cobra.Command{
 		fmt.Printf("%-22s  %-8s  %-15s  %s  %5s  %s\n", "ID", "Ch", "Status", "T", "Turns", "Preview")
 		fmt.Println(strings.Repeat("─", 90))
 		for _, item := range items {
-			preview := strings.ReplaceAll(item.Body, "\n", " ")
-			if len(preview) > 60 {
-				preview = preview[:60] + "…"
+			title := item.Title
+			if r := []rune(title); len(r) > 60 {
+				title = string(r[:60]) + "…"
 			}
 			fmt.Printf("%-22s  %-8s  %-15s  %s  %5d  %s\n",
-				item.ID, item.Channel, item.Status, string(item.Type[0]), len(item.Turns), preview)
+				item.ID, item.Channel, item.Status, string(item.Type[0]), len(item.Turns), title)
 		}
 		return nil
 	},
@@ -313,6 +323,7 @@ func itemToJSON(item models.Item) map[string]any {
 		"status":  item.Status,
 		"created": item.Created.Format(time.RFC3339Nano),
 		"parent":  item.Parent,
+		"title":   item.Title,
 		"body":    item.Body,
 		"turns":   turns,
 	}

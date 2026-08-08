@@ -3,6 +3,7 @@ package store_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,5 +156,45 @@ func TestParseMissingFrontmatter(t *testing.T) {
 	_, err := store.ParseItem(path)
 	if err == nil {
 		t.Error("expected error for missing frontmatter")
+	}
+}
+
+func TestValidateTitleRejectsMultiLineAndEmpty(t *testing.T) {
+	for _, bad := range []string{"", "   ", "two\nlines", "carriage\rreturn", "trailing\n"} {
+		if err := store.ValidateTitle(bad); err == nil {
+			t.Errorf("ValidateTitle(%q) = nil, want an error", bad)
+		}
+	}
+	for _, ok := range []string{"a", "A normal title", "  padded  "} {
+		if err := store.ValidateTitle(ok); err != nil {
+			t.Errorf("ValidateTitle(%q) = %v, want nil", ok, err)
+		}
+	}
+}
+
+func TestDeriveTitleTakesFirstLine(t *testing.T) {
+	if got := store.DeriveTitle("first line\n\nsecond paragraph"); got != "first line" {
+		t.Errorf("got %q, want %q", got, "first line")
+	}
+}
+
+func TestDeriveTitleBoundsLength(t *testing.T) {
+	// The whole point of deriving is to rescue pre-title items whose bodies run
+	// to paragraphs; an unbounded derive would reproduce the problem.
+	got := store.DeriveTitle(strings.Repeat("word ", 100))
+	if n := len([]rune(got)); n > 80 {
+		t.Errorf("derived title is %d runes, want <= 80", n)
+	}
+	if !strings.HasSuffix(got, "\u2026") {
+		t.Errorf("truncated title %q should be marked with an ellipsis", got)
+	}
+}
+
+func TestDeriveTitleIsAlwaysValid(t *testing.T) {
+	// Every legacy item must survive the round trip through the fallback.
+	for _, body := range []string{"one line", "first\nsecond", strings.Repeat("x", 500)} {
+		if err := store.ValidateTitle(store.DeriveTitle(body)); err != nil {
+			t.Errorf("DeriveTitle(%q) produced an invalid title: %v", body, err)
+		}
 	}
 }
