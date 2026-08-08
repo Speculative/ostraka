@@ -119,7 +119,7 @@ func addItemAddFlags() {
 	f.StringVar(&addFlags.title, "title", "", "single-line label for list views (required)")
 	f.StringVar(&addFlags.body, "body", "", "opening description, any length (required)")
 	f.StringVarP(&addFlags.itype, "type", "t", "thread", "thread|doc")
-	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|pending-agent|done|archived")
+	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|pending-agent|agent-acknowledged|done|archived")
 	f.StringVarP(&addFlags.parent, "parent", "p", "", "parent item ID")
 	itemAddCmd.MarkFlagRequired("channel")
 	itemAddCmd.MarkFlagRequired("title")
@@ -224,6 +224,7 @@ var itemShowCmd = &cobra.Command{
 			return json.NewEncoder(os.Stdout).Encode(itemToJSON(item))
 		}
 		fmt.Printf("── %s ──\n", item.ID)
+		fmt.Println(item.Title)
 		fmt.Printf("channel: %s  type: %s  status: %s  created: %s\n",
 			item.Channel, item.Type, item.Status, item.Created.Format(time.RFC3339))
 		if item.Parent != "" {

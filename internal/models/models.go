@@ -23,6 +23,10 @@ const (
 	StatusActive       Status = "active"
 	StatusPendingUser  Status = "pending-user"
 	StatusPendingAgent Status = "pending-agent"
+	// StatusAgentAcknowledged sits between pending-agent and the agent's
+	// reply: the supervisor sets it when a dispatch starts, so a turn that is
+	// being worked on is distinguishable from one still sitting in the queue.
+	StatusAgentAcknowledged Status = "agent-acknowledged"
 	StatusDone         Status = "done"
 	StatusArchived     Status = "archived"
 )

@@ -2,13 +2,27 @@ package supervisor
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
+
+	"ostraka/internal/models"
+	"ostraka/internal/store"
 )
 
-const nudgePrompt = "There is new activity in ostraka (a pending-agent item). " +
-	"Run `ostraka item list --status pending-agent --json` to see what changed, " +
-	"then respond via `ostraka item turn <id> --actor agent \"<content>\"` per the ostraka protocol."
+// nudgePrompt names the item directly. It used to say "run `item list
+// --status pending-agent`", which stopped working the moment dispatch began
+// marking items agent-acknowledged: by the time the agent ran, the item it
+// was dispatched for no longer matched the query it was told to run. The
+// supervisor already knows the id, so telling the agent beats making it search.
+func nudgePrompt(itemID string) string {
+	return fmt.Sprintf(
+		"There is new activity in ostraka on item %s. "+
+			"Run `ostraka item show %s --json` to see it, "+
+			"then respond via `ostraka item turn %s --actor agent \"<content>\"` "+
+			"per the ostraka protocol.",
+		itemID, itemID, itemID)
+}
 
 const queueCapacity = 64
 
@@ -22,6 +36,7 @@ type enqueueMsg struct {
 type Supervisor struct {
 	root    string
 	harness Harness
+	store   *store.Store
 	queue   chan enqueueMsg
 	logger  *log.Logger
 }
@@ -31,12 +46,21 @@ type Supervisor struct {
 // — call Start for that.
 func New(root string) *Supervisor {
 	os.MkdirAll(supervisorDir(root), 0755) //nolint:errcheck
-	return &Supervisor{
+	s := &Supervisor{
 		root:    root,
 		harness: newClaudeHarness(),
 		queue:   make(chan enqueueMsg, queueCapacity),
 		logger:  newLogger(root),
 	}
+	// The store is only used to mark items as being worked on. A failure here
+	// is not fatal: dispatching without the marker is better than not
+	// dispatching at all, so nil is handled at the call sites.
+	if st, err := store.NewStore(root); err == nil {
+		s.store = st
+	} else {
+		s.logger.Printf("no store, status will not be marked during dispatch: %v", err)
+	}
+	return s
 }
 
 // Start launches the single worker goroutine that drains the queue serially,
@@ -64,6 +88,41 @@ func (s *Supervisor) run() {
 	}
 }
 
+// markAcknowledged flags an item as being worked on, but only from
+// pending-agent: any other status means the user has moved the item since it
+// was queued, and a stale dispatch should not drag it back.
+func (s *Supervisor) markAcknowledged(itemID string) {
+	if s.store == nil {
+		return
+	}
+	item, err := s.store.GetItem(itemID)
+	if err != nil {
+		s.logger.Printf("item %s: cannot read to mark acknowledged: %v", itemID, err)
+		return
+	}
+	if item.Status != models.StatusPendingAgent {
+		return
+	}
+	if _, err := s.store.SetStatus(itemID, models.StatusAgentAcknowledged); err != nil {
+		s.logger.Printf("item %s: cannot mark acknowledged: %v", itemID, err)
+	}
+}
+
+// revertAcknowledged clears the in-progress marker if it is still set. It is a
+// no-op when the agent already replied, since that advanced the status itself.
+func (s *Supervisor) revertAcknowledged(itemID string, to models.Status) {
+	if s.store == nil {
+		return
+	}
+	item, err := s.store.GetItem(itemID)
+	if err != nil || item.Status != models.StatusAgentAcknowledged {
+		return
+	}
+	if _, err := s.store.SetStatus(itemID, to); err != nil {
+		s.logger.Printf("item %s: cannot clear acknowledged marker: %v", itemID, err)
+	}
+}
+
 func (s *Supervisor) dispatch(msg enqueueMsg) {
 	sessionID, err := loadSessionID(s.root)
 	if err != nil {
@@ -77,11 +136,19 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		s.logger.Printf("item %s: dispatching (resuming session %s)", msg.itemID, sessionID)
 	}
 
-	result, err := s.harness.RunTurn(context.Background(), nudgePrompt, sessionID)
+	s.markAcknowledged(msg.itemID)
+
+	result, err := s.harness.RunTurn(context.Background(), nudgePrompt(msg.itemID), sessionID)
 	if err != nil {
 		s.logger.Printf("item %s: dispatch failed: %v", msg.itemID, err)
+		// Put it back in the queue's state so it doesn't sit forever showing
+		// as in-progress for a run that is already over.
+		s.revertAcknowledged(msg.itemID, models.StatusPendingAgent)
 		return
 	}
+	// A successful run whose agent never posted a turn leaves the marker
+	// behind — hand it back rather than showing work that isn't happening.
+	s.revertAcknowledged(msg.itemID, models.StatusPendingUser)
 	if result.SessionID != "" {
 		if saveErr := saveSessionID(s.root, result.SessionID); saveErr != nil {
 			s.logger.Printf("item %s: failed to persist session id %s: %v", msg.itemID, result.SessionID, saveErr)

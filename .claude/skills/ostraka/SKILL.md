@@ -63,9 +63,9 @@ The user answers via the TUI. Poll `--status pending-agent` to find answered ask
 ostraka item turn <id> --actor agent "Your response"
 ```
 
-An agent turn hands the item back automatically: `active` and `pending-agent`
-both become `pending-user`, so an answered item stops showing up in the
-pending-agent queue. Parked statuses (`backlog`, `done`, `archived`) are left
+An agent turn hands the item back automatically: `active`, `pending-agent` and
+`agent-acknowledged` all become `pending-user`, so an answered item stops
+showing up in the pending-agent queue. Parked statuses (`backlog`, `done`, `archived`) are left
 alone. You do not need to set the status yourself after replying.
 
 If you resolve an ask inline during chat, record it and close it:
@@ -102,7 +102,7 @@ ostraka item list [--channel inbox|asks|handoff] [--status <s>] [--json]
 ostraka item show <id> [--json]
 ostraka item add --channel <c> --title <title> --body <body> [--parent <id>] [--status <s>]
 ostraka item turn <id> --actor agent|user <content>
-ostraka item status <id> backlog|active|pending-user|pending-agent|done|archived
+ostraka item status <id> backlog|active|pending-user|pending-agent|agent-acknowledged|done|archived
 ostraka item rm <id> [-y]
 ```
 
@@ -114,4 +114,10 @@ ostraka item rm <id> [-y]
   crowds every other item off the screen; a multi-line title is rejected. Put the
   detail in `--body`, which has no length limit.
 - Statuses `done` and `archived` move the file to `.ostraka/ARCHIVE/`; other status changes are in-place.
+- `agent-acknowledged` is set by the supervisor while a dispatch is running and
+  cleared when it ends. It is a progress indicator, not something to set by hand.
+  Note that the item you were dispatched for is in this status, not
+  `pending-agent`, for the whole time you are running — so a `--status
+  pending-agent` search will not find it. The dispatch prompt names the item id
+  directly; use that.
 - If `.ostraka/` does not exist, run `ostraka init` first.

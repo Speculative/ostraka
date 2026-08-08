@@ -16,6 +16,7 @@ func TestDispatchableWakesOnlyLiveStatuses(t *testing.T) {
 		{models.StatusActive, true},
 		{models.StatusPendingUser, true},
 		{models.StatusPendingAgent, true},
+		{models.StatusAgentAcknowledged, true},
 		// Terminal: there is no one left to answer.
 		{models.StatusDone, false},
 		{models.StatusArchived, false},
@@ -47,7 +48,8 @@ func TestAllStatusesCoversEveryModelStatus(t *testing.T) {
 	// missing here is unreachable.
 	known := []models.Status{
 		models.StatusBacklog, models.StatusActive, models.StatusPendingUser,
-		models.StatusPendingAgent, models.StatusDone, models.StatusArchived,
+		models.StatusPendingAgent, models.StatusAgentAcknowledged,
+		models.StatusDone, models.StatusArchived,
 	}
 	if len(allStatuses) != len(known) {
 		t.Fatalf("allStatuses has %d entries, models defines %d", len(allStatuses), len(known))
@@ -136,5 +138,35 @@ func TestAwaitingAgentReadsTheLastTurn(t *testing.T) {
 		if got := awaitingAgent(models.Item{Turns: tc.turns}); got != tc.want {
 			t.Errorf("%s: awaitingAgent = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestStatusDotMarksOnlyLiveStates(t *testing.T) {
+	for _, tc := range []struct {
+		status models.Status
+		want   bool
+	}{
+		{models.StatusPendingUser, true},       // your turn
+		{models.StatusAgentAcknowledged, true}, // agent is on it
+		// Everything else is at rest: a dot on every row carries no signal.
+		{models.StatusBacklog, false},
+		{models.StatusActive, false},
+		{models.StatusPendingAgent, false},
+		{models.StatusDone, false},
+		{models.StatusArchived, false},
+	} {
+		if _, got := statusDot(tc.status); got != tc.want {
+			t.Errorf("statusDot(%q) marked = %v, want %v", tc.status, got, tc.want)
+		}
+	}
+}
+
+func TestStatusDotColoursDifferByOwner(t *testing.T) {
+	// The two marked states mean opposite things; sharing a colour would make
+	// "waiting on you" and "agent working" indistinguishable at a glance.
+	yours, _ := statusDot(models.StatusPendingUser)
+	theirs, _ := statusDot(models.StatusAgentAcknowledged)
+	if yours == theirs {
+		t.Errorf("both dots render as %q", yours)
 	}
 }

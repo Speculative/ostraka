@@ -174,6 +174,7 @@ func TestStatusAfterAgentTurn(t *testing.T) {
 	}{
 		{models.StatusPendingAgent, models.StatusPendingUser, true},
 		{models.StatusActive, models.StatusPendingUser, true},
+		{models.StatusAgentAcknowledged, models.StatusPendingUser, true},
 		// Parked states: an agent turn is not a request for the user to act.
 		{models.StatusBacklog, models.StatusBacklog, false},
 		{models.StatusPendingUser, models.StatusPendingUser, false},

@@ -33,6 +33,7 @@ var (
 	footerBg    = lipgloss.Color("235")
 	selectedBg  = lipgloss.Color("237")
 	pendingFg   = lipgloss.Color("11")
+	workingFg   = lipgloss.Color("10")
 	dimFg       = lipgloss.Color("8")
 
 	headerStyle = lipgloss.NewStyle().Bold(true).
@@ -46,7 +47,6 @@ var (
 			Background(headerBg)
 	footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Background(footerBg)
 	selectedStyle = lipgloss.NewStyle().Background(selectedBg).Bold(true)
-	pendingStyle  = lipgloss.NewStyle().Foreground(pendingFg)
 	dimStyle           = lipgloss.NewStyle().Foreground(dimFg)
 	scrollTrackStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	scrollThumbStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
@@ -188,6 +188,7 @@ var allStatuses = []models.Status{
 	models.StatusActive,
 	models.StatusPendingUser,
 	models.StatusPendingAgent,
+	models.StatusAgentAcknowledged,
 	models.StatusDone,
 	models.StatusArchived,
 }
@@ -198,7 +199,8 @@ var allStatuses = []models.Status{
 // not either — there is no one left to answer.
 func dispatchable(s models.Status) bool {
 	switch s {
-	case models.StatusActive, models.StatusPendingUser, models.StatusPendingAgent:
+	case models.StatusActive, models.StatusPendingUser, models.StatusPendingAgent,
+		models.StatusAgentAcknowledged:
 		return true
 	}
 	return false
@@ -466,6 +468,19 @@ func (m model) handleStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, loadItemsCmd(m.store, m.channel)
 	}
 	return m, nil
+}
+
+// statusDot gives the colour of an item's list marker, and whether it has one
+// at all. Only the two statuses that mean "something is happening" are marked:
+// a dot on every row would carry no information.
+func statusDot(s models.Status) (lipgloss.Color, bool) {
+	switch s {
+	case models.StatusPendingUser:
+		return pendingFg, true // your turn
+	case models.StatusAgentAcknowledged:
+		return workingFg, true // agent is on it
+	}
+	return "", false
 }
 
 // wakesAgent reports whether moving an item *into* this status is a request
@@ -774,7 +789,7 @@ func (m model) renderList() string {
 	lines := make([]string, len(m.items))
 	for i, item := range m.items {
 		isSelected := i == m.selected
-		isPending := item.Status == models.StatusPendingUser
+		dotFg, hasDot := statusDot(item.Status)
 
 		preview := item.Title
 		meta := fmt.Sprintf("%s [%s]", item.ID, item.Status)
@@ -796,20 +811,17 @@ func (m model) renderList() string {
 		var parts []string
 		for j, pl := range previewLines {
 			prefix := "  "
-			if j == 0 {
-				if isPending {
-					prefix = "● "
-				}
-				if isSelected && isPending {
-					// Apply pending colour directly in the style rather than via
+			if j == 0 && hasDot {
+				prefix = "● "
+				if isSelected {
+					// Apply the dot colour directly in the style rather than via
 					// an embedded ANSI string that would clobber the background.
 					parts = append(parts, lipgloss.NewStyle().Width(colW).Background(selectedBg).Bold(true).
-						Foreground(pendingFg).Render(prefix+pl))
-					continue
+						Foreground(dotFg).Render(prefix+pl))
+				} else {
+					parts = append(parts, rowLineSty.Render(
+						lipgloss.NewStyle().Foreground(dotFg).Render(prefix)+pl))
 				}
-			}
-			if j == 0 && isPending && !isSelected {
-				parts = append(parts, rowLineSty.Render(pendingStyle.Render(prefix)+pl))
 				continue
 			}
 			parts = append(parts, rowLineSty.Render(prefix+pl))

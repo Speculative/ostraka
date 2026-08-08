@@ -216,7 +216,7 @@ func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.I
 // and an agent turn is not a request for the user to do anything.
 func StatusAfterAgentTurn(current models.Status) (models.Status, bool) {
 	switch current {
-	case models.StatusActive, models.StatusPendingAgent:
+	case models.StatusActive, models.StatusPendingAgent, models.StatusAgentAcknowledged:
 		return models.StatusPendingUser, true
 	}
 	return current, false
