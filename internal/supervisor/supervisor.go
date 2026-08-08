@@ -138,7 +138,10 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 
 	s.markAcknowledged(msg.itemID)
 
-	result, err := s.harness.RunTurn(context.Background(), nudgePrompt(msg.itemID), sessionID)
+	live := newLiveLog(s.root, msg.itemID)
+	defer live.clear()
+
+	result, err := s.harness.RunTurn(context.Background(), nudgePrompt(msg.itemID), sessionID, live.append)
 	if err != nil {
 		s.logger.Printf("item %s: dispatch failed: %v", msg.itemID, err)
 		// Put it back in the queue's state so it doesn't sit forever showing

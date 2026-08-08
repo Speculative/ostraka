@@ -68,6 +68,14 @@ An agent turn hands the item back automatically: `active`, `pending-agent` and
 showing up in the pending-agent queue. Parked statuses (`backlog`, `done`, `archived`) are left
 alone. You do not need to set the status yourself after replying.
 
+### Progress updates during long turns
+
+The user watches your tool activity live in the TUI while you work, so routine
+progress needs no narration. When you go quiet for a long stretch — a big
+refactor, a long test run, a decision you are still weighing — send a short
+proactive update so the pane does not look stalled. Keep them to a sentence;
+the turn you post at the end is the real answer.
+
 If you resolve an ask inline during chat, record it and close it:
 
 ```bash

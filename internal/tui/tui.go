@@ -29,12 +29,12 @@ type errMsg error
 // ── styles ───────────────────────────────────────────────────────────────────
 
 var (
-	headerBg    = lipgloss.Color("18")
-	footerBg    = lipgloss.Color("235")
-	selectedBg  = lipgloss.Color("237")
-	pendingFg   = lipgloss.Color("11")
-	workingFg   = lipgloss.Color("10")
-	dimFg       = lipgloss.Color("8")
+	headerBg   = lipgloss.Color("18")
+	footerBg   = lipgloss.Color("235")
+	selectedBg = lipgloss.Color("237")
+	pendingFg  = lipgloss.Color("11")
+	workingFg  = lipgloss.Color("10")
+	dimFg      = lipgloss.Color("8")
 
 	headerStyle = lipgloss.NewStyle().Bold(true).
 			Foreground(lipgloss.Color("12")).
@@ -45,19 +45,20 @@ var (
 	headerTabStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("8")).
 			Background(headerBg)
-	footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Background(footerBg)
-	selectedStyle = lipgloss.NewStyle().Background(selectedBg).Bold(true)
-	dimStyle           = lipgloss.NewStyle().Foreground(dimFg)
-	scrollTrackStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	scrollThumbStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	newBelowStyle = lipgloss.NewStyle().Bold(true).
-			Foreground(lipgloss.Color("16")).
-			Background(pendingFg)
-	popupStyle = lipgloss.NewStyle().
+	footerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Background(footerBg)
+	selectedStyle    = lipgloss.NewStyle().Background(selectedBg).Bold(true)
+	dimStyle         = lipgloss.NewStyle().Foreground(dimFg)
+	scrollTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	scrollThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	newBelowStyle    = lipgloss.NewStyle().Bold(true).
+				Foreground(lipgloss.Color("16")).
+				Background(pendingFg)
+	liveHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(workingFg)
+	popupStyle      = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("12")).
 			Padding(0, 1)
-	borderStyle   = lipgloss.NewStyle().BorderRight(true).BorderStyle(lipgloss.NormalBorder())
+	borderStyle = lipgloss.NewStyle().BorderRight(true).BorderStyle(lipgloss.NormalBorder())
 )
 
 // ── watcher goroutine ────────────────────────────────────────────────────────
@@ -157,6 +158,9 @@ type model struct {
 	// convTurns is the turn count of the item currently rendered into conv,
 	// so a reload can tell "new turn arrived" from "same item, redrawn".
 	convTurns int
+	// convLive is the length of the live progress block currently rendered,
+	// so a reload can tell a growing in-flight run from a static redraw.
+	convLive int
 	// newBelow marks that a turn landed off-screen below the reader, who was
 	// scrolled up at the time and so was not auto-followed down to it.
 	newBelow bool
@@ -254,6 +258,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case itemsLoadedMsg:
 		prevID := m.selectedID()
 		prevTurns := m.convTurns
+		prevLive := m.convLive
 		// Sample before SetContent: appending lines can change the answer.
 		wasAtBottom := m.conv.AtBottom()
 
@@ -264,12 +269,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Only a genuinely new turn on the item already being read counts.
 		// A first load, or a reload that landed on a different item, has no
 		// "before" to compare against.
-		if !m.draft && prevID != "" && m.selectedID() == prevID && m.convTurns > prevTurns {
+		sameItem := !m.draft && prevID != "" && m.selectedID() == prevID
+		if sameItem && m.convTurns > prevTurns {
 			if wasAtBottom {
 				m.conv.GotoBottom()
 			} else {
 				m.newBelow = true
 			}
+		} else if sameItem && m.convLive > prevLive && wasAtBottom {
+			// Live progress follows the same way, but never raises the
+			// "new messages below" bar: a run emitting a line a second would
+			// leave it permanently lit and stop meaning anything.
+			m.conv.GotoBottom()
 		}
 		return m, nil
 
@@ -981,6 +992,7 @@ func (m *model) updateConv() {
 			m.conv.SetContent("")
 		}
 		m.convTurns = 0
+		m.convLive = 0
 		return
 	}
 	item := m.items[m.selected]
@@ -1005,6 +1017,26 @@ func (m *model) updateConv() {
 		sb.WriteString(fmt.Sprintf("\n\n%s\n%s  ·  %s\n\n%s",
 			turnRule, turn.Actor, ts, wrapText(turn.Content, w)))
 	}
+
+	// Live progress from an in-flight dispatch, appended below the last real
+	// turn. It is transient by construction: the supervisor deletes the log
+	// when the run ends, and the turn the agent posts takes its place.
+	live := ""
+	if item.Status == models.StatusAgentAcknowledged {
+		live = strings.TrimSpace(supervisor.ReadLive(m.store.Root, item.ID))
+	}
+	if live != "" {
+		// Body deliberately unstyled — the default foreground is the one
+		// colour guaranteed readable, since it is what every other line of
+		// the conversation already uses. Dimming it made the live feed
+		// invisible on darker terminals, and the green header already marks
+		// the block as transient without tinting the text under it.
+		sb.WriteString("\n\n" + turnRule + "\n" +
+			liveHeaderStyle.Render("agent  ·  working") + "\n\n" +
+			wrapText(live, w))
+	}
+	m.convLive = len(live)
+
 	m.conv.SetContent(sb.String())
 }
 
@@ -1179,11 +1211,16 @@ func (m model) pendingCount(ch models.Channel) int {
 // ── entry point ───────────────────────────────────────────────────────────────
 
 func Run(s *store.Store) error {
+	// Construct the supervisor first: it creates .ostraka/supervisor/, and the
+	// watcher only picks up subdirectories that exist when it starts. Without
+	// this ordering, a freshly initialised project would never see live
+	// progress, because the directory it is written to went unwatched.
+	sup := supervisor.New(s.Root)
+
 	watchCh, err := startWatcher(s.Root)
 	if err != nil {
 		return fmt.Errorf("watcher: %w", err)
 	}
-	sup := supervisor.New(s.Root)
 	sup.Start()
 	p := tea.NewProgram(newModel(s, watchCh, sup), tea.WithAltScreen())
 	_, err = p.Run()

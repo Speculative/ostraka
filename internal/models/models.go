@@ -27,8 +27,8 @@ const (
 	// reply: the supervisor sets it when a dispatch starts, so a turn that is
 	// being worked on is distinguishable from one still sitting in the queue.
 	StatusAgentAcknowledged Status = "agent-acknowledged"
-	StatusDone         Status = "done"
-	StatusArchived     Status = "archived"
+	StatusDone              Status = "done"
+	StatusArchived          Status = "archived"
 )
 
 const (

@@ -20,7 +20,7 @@ type fakeHarness struct {
 	err      error
 }
 
-func (f *fakeHarness) RunTurn(_ context.Context, _ string, sessionID string) (TurnResult, error) {
+func (f *fakeHarness) RunTurn(_ context.Context, _ string, sessionID string, _ func(string)) (TurnResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, sessionID)
@@ -130,7 +130,7 @@ type statusSpyHarness struct {
 	err    error
 }
 
-func (h *statusSpyHarness) RunTurn(_ context.Context, _ string, _ string) (TurnResult, error) {
+func (h *statusSpyHarness) RunTurn(_ context.Context, _ string, _ string, _ func(string)) (TurnResult, error) {
 	if item, err := h.st.GetItem(h.itemID); err == nil {
 		h.during = item.Status
 	}
@@ -225,4 +225,20 @@ func TestNudgePromptNamesTheItem(t *testing.T) {
 	if strings.Contains(got, "--status pending-agent") {
 		t.Errorf("prompt still sends the agent to a query that excludes the dispatched item: %q", got)
 	}
+}
+
+// liveSpyHarness writes a progress line, then reads back the live log from
+// inside the run — the only point at which it is supposed to exist.
+type liveSpyHarness struct {
+	root   string
+	itemID string
+	during string
+}
+
+func (h *liveSpyHarness) RunTurn(_ context.Context, _ string, _ string, onEvent func(string)) (TurnResult, error) {
+	if onEvent != nil {
+		onEvent("mid-run line")
+	}
+	h.during = ReadLive(h.root, h.itemID)
+	return TurnResult{SessionID: "s", ResultText: "ok"}, nil
 }
