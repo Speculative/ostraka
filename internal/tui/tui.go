@@ -22,7 +22,12 @@ import (
 
 // ── messages ─────────────────────────────────────────────────────────────────
 
-type itemsLoadedMsg []models.Item
+// itemsLoadedMsg carries the rows for a view plus the count it is suppressing,
+// so the list can report the hidden ones instead of dropping them silently.
+type itemsLoadedMsg struct {
+	items         []models.Item
+	hiddenBacklog int
+}
 type watchEventMsg struct{}
 type errMsg error
 
@@ -34,7 +39,11 @@ var (
 	selectedBg = lipgloss.Color("237")
 	pendingFg  = lipgloss.Color("11")
 	workingFg  = lipgloss.Color("10")
-	dimFg      = lipgloss.Color("8")
+	// 245, not 8. ANSI 8 ("bright black") is unreadably dark on some terminal
+	// themes — it is the colour that made both the live pane and the hidden-
+	// backlog marker invisible. 245 is the grey the item meta lines already
+	// use, so it is known to be legible here.
+	dimFg = lipgloss.Color("245")
 
 	headerStyle = lipgloss.NewStyle().Bold(true).
 			Foreground(lipgloss.Color("12")).
@@ -43,7 +52,7 @@ var (
 				Foreground(lipgloss.Color("15")).
 				Background(headerBg)
 	headerTabStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8")).
+			Foreground(dimFg).
 			Background(headerBg)
 	footerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Background(footerBg)
 	selectedStyle    = lipgloss.NewStyle().Background(selectedBg).Bold(true)
@@ -120,14 +129,18 @@ func waitForWatch(ch <-chan struct{}) tea.Cmd {
 	}
 }
 
-// loadItemsCmd loads items for the given channel in a bubbletea goroutine.
-func loadItemsCmd(s *store.Store, ch models.Channel) tea.Cmd {
+// loadItemsCmd loads the items for a view in a bubbletea goroutine. It reads
+// the whole store and filters in memory: a view is a question about status as
+// well as channel, and the store's one-status filter cannot express "every
+// live status" or "either terminal status".
+func loadItemsCmd(s *store.Store, v listView, showBacklog bool) tea.Cmd {
 	return func() tea.Msg {
-		items, err := s.ListItems(store.ListOpts{Channel: &ch})
+		items, err := s.ListItems(store.ListOpts{})
 		if err != nil {
 			return errMsg(err)
 		}
-		return itemsLoadedMsg(items)
+		shown, hidden := v.prepare(items, showBacklog)
+		return itemsLoadedMsg{items: shown, hiddenBacklog: hidden}
 	}
 }
 
@@ -138,10 +151,15 @@ type model struct {
 	watchCh <-chan struct{}
 	sup     *supervisor.Supervisor
 
-	channel  models.Channel
-	channels []models.Channel
-	items    []models.Item
-	selected int
+	view  listView
+	views []listView
+	// showBacklog reveals parked items in the channel views. Off by default:
+	// the list is meant to be what still needs someone.
+	showBacklog bool
+	// hiddenBacklog is how many items the current view is suppressing.
+	hiddenBacklog int
+	items         []models.Item
+	selected      int
 
 	conv  viewport.Model
 	input textarea.Model
@@ -230,19 +248,24 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Superviso
 	ti.Prompt = ""
 	ti.Placeholder = "new item title…"
 	return model{
-		store:    s,
-		watchCh:  watchCh,
-		sup:      sup,
-		channel:  models.ChannelAsks,
-		channels: []models.Channel{models.ChannelInbox, models.ChannelAsks, models.ChannelHandoff},
-		input:    ta,
-		title:    ti,
+		store:   s,
+		watchCh: watchCh,
+		sup:     sup,
+		view:    channelView(models.ChannelAsks),
+		views: []listView{
+			channelView(models.ChannelInbox),
+			channelView(models.ChannelAsks),
+			channelView(models.ChannelHandoff),
+			archiveView,
+		},
+		input: ta,
+		title: ti,
 	}
 }
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
-		loadItemsCmd(m.store, m.channel),
+		loadItemsCmd(m.store, m.view, m.showBacklog),
 		waitForWatch(m.watchCh),
 	)
 }
@@ -267,7 +290,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Sample before SetContent: appending lines can change the answer.
 		wasAtBottom := m.conv.AtBottom()
 
-		m.items = []models.Item(msg)
+		m.items = msg.items
+		m.hiddenBacklog = msg.hiddenBacklog
 		m.restoreSelection(prevID)
 		m.updateConv()
 
@@ -301,7 +325,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case watchEventMsg:
 		// Re-arm the watcher and reload current channel.
-		return m, tea.Batch(waitForWatch(m.watchCh), loadItemsCmd(m.store, m.channel))
+		return m, tea.Batch(waitForWatch(m.watchCh), loadItemsCmd(m.store, m.view, m.showBacklog))
 
 	case errMsg:
 		m.err = msg
@@ -362,18 +386,31 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.conv.PageUp()
 		m.syncNewBelow()
 	case "1":
-		return m.switchChannel(models.ChannelInbox)
+		return m.switchView(channelView(models.ChannelInbox))
 	case "2":
-		return m.switchChannel(models.ChannelAsks)
+		return m.switchView(channelView(models.ChannelAsks))
 	case "3":
-		return m.switchChannel(models.ChannelHandoff)
+		return m.switchView(channelView(models.ChannelHandoff))
+	case "4":
+		return m.switchView(archiveView)
+	case "b":
+		// Backlog is hidden by default, so this is also the only way back to an
+		// item parked there — it must stay reachable, not just tidy.
+		m.showBacklog = !m.showBacklog
+		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "r":
-		return m, loadItemsCmd(m.store, m.channel)
+		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "t":
 		if len(m.items) > 0 {
 			return m.openComposer()
 		}
 	case "a":
+		// The archive is a lifecycle state, not a channel, so there is nothing
+		// for a new item to be created *in*. Refuse rather than write an item
+		// with an empty channel, which has no directory to live in.
+		if m.view.archive {
+			return m, nil
+		}
 		// A synthetic row past the end of items; selected follows it there so
 		// the conversation pane clears to the draft hint.
 		m.draft = true
@@ -433,7 +470,10 @@ func (m model) handleTitleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // commitDraft writes the pending item from the title and the body just typed.
 func (m model) commitDraft(body string) model {
 	// New items start in backlog: created, but not yet the agent's problem.
-	item, err := m.store.CreateItem(m.channel, m.title.Value(), body, models.TypeThread, models.StatusBacklog, "")
+	// Which the default filter hides — so creating one reveals backlog, or the
+	// item you just wrote would disappear the moment you finished it.
+	m.showBacklog = true
+	item, err := m.store.CreateItem(m.view.channel, m.title.Value(), body, models.TypeThread, models.StatusBacklog, "")
 	if err != nil {
 		m.err = err
 		return m.cancelDraft()
@@ -487,7 +527,7 @@ func (m model) handleStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.mode = modeNav
-		return m, loadItemsCmd(m.store, m.channel)
+		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	}
 	return m, nil
 }
@@ -526,12 +566,12 @@ func awaitingAgent(item models.Item) bool {
 // reload refreshes items in place. The async loadItemsCmd is still the normal
 // path; this exists for the few spots that must see the new list immediately.
 func (m *model) reload() {
-	items, err := m.store.ListItems(store.ListOpts{Channel: &m.channel})
+	items, err := m.store.ListItems(store.ListOpts{})
 	if err != nil {
 		m.err = err
 		return
 	}
-	m.items = items
+	m.items, m.hiddenBacklog = m.view.prepare(items, m.showBacklog)
 }
 
 func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -548,7 +588,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeNav
 			m.input.Blur()
 			m = m.recalcLayout()
-			return m, loadItemsCmd(m.store, m.channel)
+			return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 		}
 		if content != "" && m.selected < len(m.items) {
 			item := m.items[m.selected]
@@ -568,7 +608,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Your own turn is never "new messages below" — go to the bottom now so
 		// the reload that follows sees AtBottom and auto-follows onto it.
 		m.conv.GotoBottom()
-		return m, loadItemsCmd(m.store, m.channel)
+		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "esc":
 		m.input.Blur()
 		if m.draft {
@@ -626,12 +666,12 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m model) switchChannel(ch models.Channel) (model, tea.Cmd) {
-	m.channel = ch
+func (m model) switchView(v listView) (model, tea.Cmd) {
+	m.view = v
 	m.selected = 0
 	m.items = nil
 	m.showSelected()
-	return m, loadItemsCmd(m.store, ch)
+	return m, loadItemsCmd(m.store, v, m.showBacklog)
 }
 
 // ── view ─────────────────────────────────────────────────────────────────────
@@ -731,14 +771,14 @@ func (m model) overlayStatusPopup(lines []string) []string {
 }
 
 func (m model) renderHeader() string {
-	tabs := make([]string, len(m.channels))
-	for i, ch := range m.channels {
-		label := strings.ToUpper(string(ch[0])) + string(ch[1:])
-		n := m.pendingCount(ch)
+	tabs := make([]string, len(m.views))
+	for i, v := range m.views {
+		label := v.label()
+		n := m.pendingCount(v)
 		if n > 0 {
 			label = fmt.Sprintf("%s (%d)", label, n)
 		}
-		if ch == m.channel {
+		if v == m.view {
 			tabs[i] = headerTabActiveStyle.Render(" [" + label + "] ")
 		} else {
 			tabs[i] = headerTabStyle.Render("  " + label + "  ")
@@ -770,7 +810,10 @@ func (m model) renderFooter() string {
 	case modeStatus:
 		text = "j/k select  enter apply  esc cancel"
 	default:
-		text = "q quit  j/k nav  a add  s status  t turn  1/2/3 channel  pgup/pgdn scroll  r refresh"
+		text = "q quit  j/k nav  a add  s status  t turn  1-4 view  b backlog  pgup/pgdn scroll  r refresh"
+		if m.showBacklog {
+			text = "q quit  j/k nav  a add  s status  t turn  1-4 view  b hide backlog  pgup/pgdn scroll  r refresh"
+		}
 	}
 
 	// Right-aligned scroll position, shown only when the conversation actually
@@ -798,7 +841,13 @@ func (m model) renderFooter() string {
 }
 
 func (m model) renderList() string {
+	marker := hiddenBacklogLabel(m.hiddenBacklog)
 	if len(m.items) == 0 && !m.draft {
+		// A view holding nothing but suppressed rows is not empty, and saying
+		// so would be a lie the toggle can't be discovered from.
+		if marker != "" {
+			return dimStyle.Render(hiddenBacklogRow(marker, m.listWidth()-2))
+		}
 		return dimStyle.Render("(empty)")
 	}
 	colW := m.listWidth() - 2 // panel uses Width(listW) with Padding(1), so content = listW-2
@@ -858,6 +907,11 @@ func (m model) renderList() string {
 		m.title.Width = max(1, colW-2)
 		lines = append(lines,
 			rowSty.Render("› "+m.title.View())+"\n"+metaSty.Render("  new item [backlog]"))
+	}
+	// Sits below the rows and is not selectable: selection indexes m.items,
+	// which this is deliberately not part of.
+	if marker != "" {
+		lines = append(lines, dimStyle.Render(hiddenBacklogRow(marker, colW)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1215,8 +1269,8 @@ func (m *model) restoreSelection(id string) {
 	}
 }
 
-func (m model) pendingCount(ch models.Channel) int {
-	if ch != m.channel {
+func (m model) pendingCount(v listView) int {
+	if v != m.view {
 		return 0 // only count for the currently loaded channel
 	}
 	n := 0
