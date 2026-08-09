@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestWrapTextPreservesShortLines(t *testing.T) {
@@ -84,4 +86,68 @@ func TestWrapTextNeverExceedsWidth(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestCurrentInputHeightUsesSoftWrappedRows(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.input.SetWidth(5)
+	m.input.SetValue("abcdefghijk")
+
+	visualLines := m.inputVisualLineCount()
+	if visualLines <= 1 {
+		t.Errorf("visual line count = %d, want soft wrapping", visualLines)
+	}
+	if got := m.currentInputHeight(); got != visualLines {
+		t.Errorf("input height = %d, want visual line count %d", got, visualLines)
+	}
+}
+
+func TestCurrentInputHeightCapsSoftWrappedRows(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.input.SetWidth(1)
+	m.input.SetValue(strings.Repeat("x", inputMaxHeight+3))
+
+	if got := m.inputVisualLineCount(); got <= inputMaxHeight {
+		t.Errorf("visual line count = %d, want more than max height %d", got, inputMaxHeight)
+	}
+	if got := m.currentInputHeight(); got != inputMaxHeight {
+		t.Errorf("input height = %d, want max %d", got, inputMaxHeight)
+	}
+}
+
+func TestEmptyComposerHeightDoesNotIncludeViewportPadding(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.mode = modeCompose
+	m.width = 100
+	m.height = 30
+	m = m.recalcLayout()
+
+	if got := m.inputVisualLineCount(); got != 1 {
+		t.Errorf("visual line count = %d, want one empty content row", got)
+	}
+	if got := m.input.Height(); got != inputMinHeight {
+		t.Errorf("composer height = %d, want minimum %d", got, inputMinHeight)
+	}
+}
+
+func TestSoftWrapGrowthReclaimsTextareaScrollOffset(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.mode = modeCompose
+	m.width = 40
+	m.height = 30
+	m = m.recalcLayout()
+	m.input.Focus()
+
+	for range 500 {
+		oldH := m.input.Height()
+		next, _ := m.handleInputKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+		m = next.(model)
+		if m.input.Height() > oldH {
+			if got := textareaViewport(&m.input).YOffset; got != 0 {
+				t.Errorf("textarea offset after growth = %d, want 0", got)
+			}
+			return
+		}
+	}
+	t.Fatal("input did not grow after soft wrapping")
 }

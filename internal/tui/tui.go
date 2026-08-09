@@ -680,7 +680,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	prevH := m.currentInputHeight()
-	actualLines := strings.Count(m.input.Value(), "\n") + 1
+	visualLines := m.inputVisualLineCount()
 	li := m.input.LineInfo()
 	cursorLine := m.input.Line()
 	atLineStart := li.RowOffset == 0 && li.ColumnOffset == 0
@@ -692,22 +692,30 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	//   Backspace → pre-shrink  (below max height only; at max height handled post-update)
 	switch msg.String() {
 	case "enter":
-		if actualLines >= prevH && prevH < inputMaxHeight {
+		if visualLines >= prevH && prevH < inputMaxHeight {
 			m = m.adjustInputHeight(prevH + 1)
 		}
 	case "backspace":
-		if atLineStart && cursorLine > 0 && actualLines > inputMinHeight && actualLines == prevH && prevH < inputMaxHeight {
+		if atLineStart && cursorLine > 0 && visualLines > inputMinHeight && visualLines == prevH && prevH < inputMaxHeight {
 			m = m.adjustInputHeight(prevH - 1)
 		}
 	}
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	newActualLines := strings.Count(m.input.Value(), "\n") + 1
+	newVisualLines := m.inputVisualLineCount()
 
-	if m.currentInputHeight() != prevH {
+	newH := m.currentInputHeight()
+	if newH != prevH {
 		m = m.recalcLayout()
-	} else if newActualLines < actualLines && prevH == inputMaxHeight {
+		if newH > prevH {
+			// A soft wrap is processed while the textarea still has its old
+			// height, so it scrolls down to keep the cursor visible. Growing the
+			// viewport afterwards must reclaim those newly visible rows or the
+			// first wrapped line remains needlessly hidden.
+			textareaScrollUp(&m.input, newH-prevH)
+		}
+	} else if newVisualLines < visualLines && prevH == inputMaxHeight {
 		// A line was deleted while at max height: the textarea's repositionView
 		// won't scroll up (cursor remains within the visible range), leaving an
 		// empty row at the bottom. Decrement the internal viewport YOffset directly.
@@ -1230,7 +1238,7 @@ func (m model) listWidth() int {
 }
 
 func (m model) currentInputHeight() int {
-	lines := strings.Count(m.input.Value(), "\n") + 1
+	lines := m.inputVisualLineCount()
 	if lines < inputMinHeight {
 		lines = inputMinHeight
 	}
@@ -1238,6 +1246,21 @@ func (m model) currentInputHeight() int {
 		lines = inputMaxHeight
 	}
 	return lines
+}
+
+// inputVisualLineCount asks textarea to populate its internal viewport, whose
+// content is already soft-wrapped at the input's current width. Counting raw
+// newlines here makes a long logical line look one row high until it contains
+// an explicit Enter, which leaves the composer scrolling instead of growing.
+func (m model) inputVisualLineCount() int {
+	_ = m.input.View()
+	// textarea.View appends Height() end-of-buffer rows so an empty input still
+	// fills its viewport. Those are render padding, not content. Including them
+	// here creates a feedback loop: increasing the composer makes the measured
+	// content taller, which increases the composer again.
+	// The rendered string terminates each row with a newline, and viewport splits
+	// that final delimiter into one additional empty line.
+	return max(1, textareaViewport(&m.input).TotalLineCount()-m.input.Height()-1)
 }
 
 // textareaViewport extracts the shared *viewport.Model from the textarea via
@@ -1322,11 +1345,17 @@ func (m model) recalcLayout() model {
 	if convW < 1 {
 		convW = 1
 	}
+	// Set the input width first: its visual row count is width-dependent.
+	// currentInputHeight then reads the textarea's wrapped viewport rather than
+	// the number of physical newline-delimited lines.
+	m.input.SetWidth(convW)
+	inputH := m.currentInputHeight()
+
 	mainH := m.height - 2 // subtract header and footer
 	var convH int
 	if m.mode == modeCompose {
 		// per-element padding: 1(top) + convH + 1(sep) + inputH + 1(bottom) = mainH
-		convH = mainH - m.currentInputHeight() - 3
+		convH = mainH - inputH - 3
 	} else {
 		// Padding(1) all sides: 1 + convH + 1 = mainH
 		convH = mainH - 2
@@ -1335,8 +1364,6 @@ func (m model) recalcLayout() model {
 		convH = 1
 	}
 	m.title.Width = m.titleWidth()
-	inputH := m.currentInputHeight()
-	m.input.SetWidth(convW)
 	m.input.SetHeight(inputH)
 	m.conv.Width = convW
 	m.updateConv()
