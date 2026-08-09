@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -20,6 +21,14 @@ type TurnResult struct {
 	DurationMs   int64
 	TotalCostUSD float64
 	NumTurns     int
+	Context      ContextUsage
+}
+
+// ContextUsage is the latest provider-authoritative context measurement.
+// Zero values mean that the provider did not report context usage.
+type ContextUsage struct {
+	UsedTokens   int64
+	WindowTokens int64
 }
 
 // Harness abstracts a coding-agent CLI harness (claude, future codex).
@@ -39,9 +48,8 @@ type claudeHarness struct {
 	bin string
 }
 
-// codexHarness drives the Codex CLI's JSONL exec interface. Unlike the
-// app-server this is deliberately one process per turn, matching the existing
-// Claude adapter and keeping v0's lifecycle simple.
+// codexHarness drives Codex through its local App Server protocol. Protocol
+// details stay inside the adapter; callers use the normal Harness contract.
 type codexHarness struct{ bin string }
 
 func newCodexHarness() *codexHarness { return &codexHarness{bin: "codex"} }
@@ -148,94 +156,239 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID string, o
 }
 
 func (h *codexHarness) RunTurn(ctx context.Context, prompt, sessionID string, onEvent func(string)) (TurnResult, error) {
-	args := []string{"exec"}
-	if sessionID != "" {
-		args = append(args, "resume", sessionID)
+	return h.runAppServer(ctx, prompt, sessionID, onEvent)
+}
+
+// appServerMessage is deliberately a small envelope. The App Server schema is
+// richer, but this adapter needs only request matching and a few event types.
+type appServerMessage struct {
+	ID     *int            `json:"id"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
+	Result json.RawMessage `json:"result"`
+	Error  *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID string, onEvent func(string)) (result TurnResult, err error) {
+	cmd := exec.CommandContext(ctx, h.bin, "app-server", "--stdio")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return result, fmt.Errorf("codex app-server: stdin pipe: %w", err)
 	}
-	args = append(args, "--json", "--dangerously-bypass-approvals-and-sandbox", prompt)
-	cmd := exec.CommandContext(ctx, h.bin, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return TurnResult{}, fmt.Errorf("codex: stdout pipe: %w", err)
+		return result, fmt.Errorf("codex app-server: stdout pipe: %w", err)
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return TurnResult{}, fmt.Errorf("codex: start: %w", err)
+		return result, fmt.Errorf("codex app-server: start: %w", err)
+	}
+	defer func() {
+		_ = stdin.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+
+	encoder := json.NewEncoder(stdin)
+	reader := bufio.NewReader(stdout)
+	send := func(id int, method string, params any) error {
+		return encoder.Encode(struct {
+			ID     int    `json:"id"`
+			Method string `json:"method"`
+			Params any    `json:"params"`
+		}{id, method, params})
+	}
+	next := func() (appServerMessage, error) {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil && len(line) == 0 {
+			return appServerMessage{}, readErr
+		}
+		var message appServerMessage
+		if unmarshalErr := json.Unmarshal([]byte(strings.TrimSpace(line)), &message); unmarshalErr != nil {
+			return appServerMessage{}, fmt.Errorf("invalid JSON-RPC output: %w", unmarshalErr)
+		}
+		return message, nil
+	}
+	waitForResponse := func(id int) (appServerMessage, error) {
+		for {
+			message, readErr := next()
+			if readErr != nil {
+				return appServerMessage{}, readErr
+			}
+			if message.Method != "" {
+				parseAppServerEvent(message, &result, onEvent)
+				continue
+			}
+			if message.ID != nil && *message.ID == id {
+				if message.Error != nil {
+					return appServerMessage{}, fmt.Errorf("%s", message.Error.Message)
+				}
+				return message, nil
+			}
+		}
 	}
 
-	var result TurnResult
-	var tail bytes.Buffer
-	r := bufio.NewReader(stdout)
+	if err := send(1, "initialize", appServerInitializeParams()); err != nil {
+		return result, fmt.Errorf("codex app-server: initialize: %w", err)
+	}
+	if _, err := waitForResponse(1); err != nil {
+		return result, appServerFailure(err, stderr.String())
+	}
+
+	var threadParams map[string]any
+	if sessionID == "" {
+		cwd, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			return result, fmt.Errorf("codex app-server: get working directory: %w", cwdErr)
+		}
+		threadParams = map[string]any{"cwd": cwd}
+	} else {
+		threadParams = map[string]any{"threadId": sessionID, "excludeTurns": true}
+	}
+	method := "thread/start"
+	if sessionID != "" {
+		method = "thread/resume"
+	}
+	if err := send(2, method, threadParams); err != nil {
+		return result, fmt.Errorf("codex app-server: %s: %w", method, err)
+	}
+	threadResponse, err := waitForResponse(2)
+	if err != nil {
+		return result, appServerFailure(err, stderr.String())
+	}
+	var thread struct {
+		Thread struct {
+			ID string `json:"id"`
+		} `json:"thread"`
+	}
+	if err := json.Unmarshal(threadResponse.Result, &thread); err != nil || thread.Thread.ID == "" {
+		return result, fmt.Errorf("codex app-server: %s returned no thread id", method)
+	}
+	result.SessionID = thread.Thread.ID
+
+	if err := send(3, "turn/start", appServerTurnParams(result.SessionID, prompt)); err != nil {
+		return result, fmt.Errorf("codex app-server: turn/start: %w", err)
+	}
+	if _, err := waitForResponse(3); err != nil {
+		return result, appServerFailure(err, stderr.String())
+	}
+
 	for {
-		line, readErr := r.ReadString('\n')
-		if len(line) > 0 {
-			if tail.Len() < 2000 {
-				tail.WriteString(line)
-			}
-			parseCodexLine(line, &result, onEvent)
-		}
+		message, readErr := next()
 		if readErr != nil {
-			if readErr != io.EOF {
-				stderr.WriteString("\nstdout read error: " + readErr.Error())
-			}
-			break
+			return result, appServerFailure(readErr, stderr.String())
 		}
+		if message.Method == "turn/completed" {
+			parseAppServerEvent(message, &result, onEvent)
+			return result, nil
+		}
+		parseAppServerEvent(message, &result, onEvent)
 	}
-	if err := cmd.Wait(); err != nil {
-		return result, fmt.Errorf("codex exited with error: %w (stderr=%q, stdout=%q)", err, truncate(stderr.String(), 500), truncate(tail.String(), 500))
-	}
-	if result.SessionID == "" {
-		return TurnResult{}, fmt.Errorf("codex: no thread.started event in output (stderr=%q, stdout=%q)", truncate(stderr.String(), 500), truncate(tail.String(), 500))
-	}
-	return result, nil
 }
 
-// Codex exec --json emits JSONL events. Keep the decoder intentionally loose:
-// unknown event types are safely ignored, so cosmetic CLI event additions do
-// not break dispatch. thread.started supplies the durable resume ID; completed
-// agent messages and tool calls are the useful parts of the live trace.
-func parseCodexLine(line string, result *TurnResult, onEvent func(string)) {
-	var event struct {
-		Type     string `json:"type"`
-		ThreadID string `json:"thread_id"`
-		Item     struct {
-			Type    string          `json:"type"`
-			Text    string          `json:"text"`
-			Command string          `json:"command"`
-			Name    string          `json:"name"`
-			Input   json.RawMessage `json:"input"`
-		} `json:"item"`
+// appServerInitializeParams declares the optional protocol features this
+// adapter uses. In particular, thread/resume.excludeTurns is experimental;
+// without advertising it, the server rejects every resumed session before a
+// turn can start.
+func appServerInitializeParams() map[string]any {
+	return map[string]any{
+		"clientInfo": map[string]string{"name": "ostraka", "version": "0"},
+		"capabilities": map[string]any{
+			"experimentalApi": true,
+		},
 	}
-	if json.Unmarshal([]byte(strings.TrimSpace(line)), &event) != nil {
-		return
+}
+
+// appServerTurnParams preserves the old exec adapter's noninteractive
+// behaviour. Ostraka already runs inside its own sandbox, and the TUI does
+// not implement App Server's approval-request protocol; accepting the default
+// on-request policy would otherwise leave a turn waiting forever.
+func appServerTurnParams(threadID, prompt string) map[string]any {
+	return map[string]any{
+		"threadId":       threadID,
+		"input":          []map[string]string{{"type": "text", "text": prompt}},
+		"approvalPolicy": "never",
+		"sandboxPolicy":  map[string]string{"type": "dangerFullAccess"},
 	}
-	if event.Type == "thread.started" && event.ThreadID != "" {
-		result.SessionID = event.ThreadID
-		return
+}
+
+func appServerFailure(err error, stderr string) error {
+	if stderr == "" {
+		return fmt.Errorf("codex app-server: %w", err)
 	}
-	if event.Type != "item.completed" || onEvent == nil {
-		return
-	}
-	switch event.Item.Type {
-	case "agent_message":
-		if text := strings.TrimSpace(event.Item.Text); text != "" {
-			result.ResultText = text
-			onEvent(text)
+	return fmt.Errorf("codex app-server: %w (stderr=%q)", err, truncate(stderr, 500))
+}
+
+// parseAppServerEvent translates the provider's notifications into the small
+// provider-neutral surface exposed by Harness. Unknown notifications are
+// intentionally ignored so App Server additions do not break dispatch.
+func parseAppServerEvent(message appServerMessage, result *TurnResult, onEvent func(string)) {
+	switch message.Method {
+	case "thread/tokenUsage/updated":
+		var params struct {
+			TokenUsage struct {
+				Total struct {
+					TotalTokens int64 `json:"totalTokens"`
+				} `json:"total"`
+				ModelContextWindow int64 `json:"modelContextWindow"`
+			} `json:"tokenUsage"`
 		}
-	case "command_execution":
-		if event.Item.Command != "" {
-			onEvent("⚒ shell  " + oneLine(event.Item.Command, 120))
+		if json.Unmarshal(message.Params, &params) == nil {
+			result.Context = ContextUsage{
+				UsedTokens:   params.TokenUsage.Total.TotalTokens,
+				WindowTokens: params.TokenUsage.ModelContextWindow,
+			}
 		}
-	case "mcp_tool_call", "web_search", "file_change":
-		name := event.Item.Name
-		if name == "" {
-			name = event.Item.Type
+	case "item/completed":
+		var params struct {
+			Item struct {
+				Type    string          `json:"type"`
+				Text    string          `json:"text"`
+				Command string          `json:"command"`
+				Name    string          `json:"name"`
+				Input   json.RawMessage `json:"input"`
+			} `json:"item"`
 		}
-		if summary := summarizeToolInput(event.Item.Input); summary != "" {
-			onEvent("⚒ " + name + "  " + summary)
-		} else {
-			onEvent("⚒ " + name)
+		if json.Unmarshal(message.Params, &params) != nil {
+			return
+		}
+		switch params.Item.Type {
+		case "agentMessage":
+			if text := strings.TrimSpace(params.Item.Text); text != "" {
+				result.ResultText = text
+				if onEvent != nil {
+					onEvent(text)
+				}
+			}
+		case "commandExecution":
+			if params.Item.Command != "" && onEvent != nil {
+				onEvent("⚒ shell  " + oneLine(params.Item.Command, 120))
+			}
+		default:
+			if params.Item.Name == "" || onEvent == nil {
+				return
+			}
+			if summary := summarizeToolInput(params.Item.Input); summary != "" {
+				onEvent("⚒ " + params.Item.Name + "  " + summary)
+			} else {
+				onEvent("⚒ " + params.Item.Name)
+			}
+		}
+	case "turn/completed":
+		var params struct {
+			Turn struct {
+				DurationMs int64  `json:"durationMs"`
+				Status     string `json:"status"`
+			} `json:"turn"`
+		}
+		if json.Unmarshal(message.Params, &params) == nil {
+			result.DurationMs = params.Turn.DurationMs
+			result.IsError = params.Turn.Status != "" && params.Turn.Status != "completed"
 		}
 	}
 }

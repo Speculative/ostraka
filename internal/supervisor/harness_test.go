@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -122,29 +123,84 @@ func TestTruncateCountsRunesNotBytes(t *testing.T) {
 	}
 }
 
-func TestParseCodexLineTracksThreadAndLiveTrace(t *testing.T) {
+func TestParseAppServerEventTracksUsageAndCompletedItems(t *testing.T) {
 	var result TurnResult
 	var got []string
-	parseCodexLine(`{"type":"thread.started","thread_id":"thread-123"}`, &result, func(s string) { got = append(got, s) })
-	parseCodexLine(`{"type":"item.completed","item":{"type":"command_execution","command":"go test ./..."}}`, &result, func(s string) { got = append(got, s) })
-	parseCodexLine(`{"type":"item.completed","item":{"type":"agent_message","text":"All tests pass."}}`, &result, func(s string) { got = append(got, s) })
+	onEvent := func(s string) { got = append(got, s) }
 
-	if result.SessionID != "thread-123" {
-		t.Errorf("session = %q, want thread-123", result.SessionID)
+	parseAppServerEvent(appServerMessage{
+		Method: "thread/tokenUsage/updated",
+		Params: json.RawMessage(`{"tokenUsage":{"total":{"totalTokens":15019},"modelContextWindow":258400}}`),
+	}, &result, onEvent)
+	parseAppServerEvent(appServerMessage{
+		Method: "item/completed",
+		Params: json.RawMessage(`{"item":{"type":"commandExecution","command":"go test ./..."}}`),
+	}, &result, onEvent)
+	parseAppServerEvent(appServerMessage{
+		Method: "item/completed",
+		Params: json.RawMessage(`{"item":{"type":"agentMessage","text":"  All tests pass.  "}}`),
+	}, &result, onEvent)
+	parseAppServerEvent(appServerMessage{
+		Method: "turn/completed",
+		Params: json.RawMessage(`{"turn":{"status":"completed","durationMs":1200}}`),
+	}, &result, onEvent)
+
+	if result.Context != (ContextUsage{UsedTokens: 15019, WindowTokens: 258400}) {
+		t.Errorf("context = %+v", result.Context)
 	}
-	if result.ResultText != "All tests pass." {
-		t.Errorf("result = %q", result.ResultText)
+	if result.ResultText != "All tests pass." || result.DurationMs != 1200 || result.IsError {
+		t.Errorf("result = %+v", result)
 	}
 	if len(got) != 2 || !strings.Contains(got[0], "go test ./...") || got[1] != "All tests pass." {
 		t.Errorf("live trace = %q", got)
 	}
 }
 
-func TestParseCodexLineIgnoresUnknownEvents(t *testing.T) {
+func TestParseAppServerEventMarksFailedTurn(t *testing.T) {
 	result := TurnResult{}
-	parseCodexLine(`{"type":"turn.started"}`, &result, nil)
-	parseCodexLine(`not json`, &result, nil)
-	if result.SessionID != "" || result.ResultText != "" {
-		t.Errorf("unknown event changed result: %+v", result)
+	parseAppServerEvent(appServerMessage{
+		Method: "turn/completed",
+		Params: json.RawMessage(`{"turn":{"status":"failed"}}`),
+	}, &result, nil)
+	if !result.IsError {
+		t.Error("failed turn was not marked as an error")
+	}
+}
+
+func TestAppServerInitializeParamsEnablesExperimentalAPI(t *testing.T) {
+	b, err := json.Marshal(appServerInitializeParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var params struct {
+		Capabilities struct {
+			ExperimentalAPI bool `json:"experimentalApi"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(b, &params); err != nil {
+		t.Fatal(err)
+	}
+	if !params.Capabilities.ExperimentalAPI {
+		t.Fatal("initialize request must enable experimentalApi for thread/resume.excludeTurns")
+	}
+}
+
+func TestAppServerTurnParamsUseNonInteractivePolicy(t *testing.T) {
+	b, err := json.Marshal(appServerTurnParams("thread-123", "hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var params struct {
+		ThreadID       string `json:"threadId"`
+		ApprovalPolicy string `json:"approvalPolicy"`
+		SandboxPolicy  struct {
+			Type string `json:"type"`
+		} `json:"sandboxPolicy"`
+	}
+	if err := json.Unmarshal(b, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.ThreadID != "thread-123" || params.ApprovalPolicy != "never" || params.SandboxPolicy.Type != "dangerFullAccess" {
+		t.Errorf("turn params = %s", b)
 	}
 }
