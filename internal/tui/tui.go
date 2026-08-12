@@ -249,6 +249,11 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Superviso
 	ta.Prompt = ""      // remove default "┃ " prompt
 	ta.SetWidth(40)     // recalculate promptWidth=0 (will be overridden in recalcLayout)
 	ta.SetHeight(inputMinHeight)
+	// Match the word-navigation shortcuts terminals and editors commonly send.
+	// Bubbles' textarea defaults to the Alt variants only.
+	ta.KeyMap.WordBackward.SetKeys("alt+left", "ctrl+left", "alt+b")
+	ta.KeyMap.WordForward.SetKeys("alt+right", "ctrl+right", "alt+f")
+	ta.KeyMap.DeleteWordBackward.SetKeys("alt+backspace", "ctrl+w")
 	// Ctrl+V invokes Bubbles' host-clipboard helper, which is unavailable in
 	// sandboxed/container sessions. Terminal bracketed paste (for example
 	// Ctrl+Shift+V) remains supported and does not need any clipboard utility.
@@ -264,6 +269,7 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Superviso
 	// from selectedBg (237), making the draft hint look blank except under the
 	// cursor. Use the same legible grey as item metadata instead.
 	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(dimFg)
+	ti.KeyMap.DeleteWordBackward.SetKeys("alt+backspace", "ctrl+w")
 	ti.KeyMap.Paste.SetEnabled(false)
 	return model{
 		store:   s,

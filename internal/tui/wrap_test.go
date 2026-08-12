@@ -173,3 +173,25 @@ func TestBracketedPasteAddsMultilineComposerContent(t *testing.T) {
 		t.Errorf("composer height = %d, want at least %d", got.input.Height(), inputMinHeight)
 	}
 }
+
+func TestEditorWordShortcutBindings(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	for name, keys := range map[string][]string{
+		"word backward":     m.input.KeyMap.WordBackward.Keys(),
+		"word forward":      m.input.KeyMap.WordForward.Keys(),
+		"body delete word":  m.input.KeyMap.DeleteWordBackward.Keys(),
+		"title delete word": m.title.KeyMap.DeleteWordBackward.Keys(),
+	} {
+		joined := strings.Join(keys, ",")
+		want := "ctrl+w"
+		if name == "word backward" {
+			want = "ctrl+left"
+		}
+		if name == "word forward" {
+			want = "ctrl+right"
+		}
+		if !strings.Contains(joined, want) {
+			t.Errorf("%s bindings %q do not include %q", name, joined, want)
+		}
+	}
+}
