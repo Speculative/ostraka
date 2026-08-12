@@ -256,6 +256,10 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Superviso
 	ti := textinput.New()
 	ti.Prompt = ""
 	ti.Placeholder = "new item title…"
+	// textinput's default placeholder colour (240) is almost indistinguishable
+	// from selectedBg (237), making the draft hint look blank except under the
+	// cursor. Use the same legible grey as item metadata instead.
+	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(dimFg)
 	return model{
 		store:   s,
 		watchCh: watchCh,
@@ -990,11 +994,11 @@ func (m model) renderList() string {
 	// The draft is a synthetic row: it has no file behind it yet, so it is
 	// rendered from the title input rather than from an item.
 	if m.draft {
-		rowSty := lipgloss.NewStyle().Width(colW).Background(selectedBg).Bold(true)
+		rowSty := lipgloss.NewStyle().Background(selectedBg).Bold(true)
 		metaSty := lipgloss.NewStyle().Width(colW).Background(selectedBg).Foreground(lipgloss.Color("245"))
 		m.title.Width = m.titleWidth()
 		lines = append(lines,
-			rowSty.Render("› "+m.title.View())+"\n"+metaSty.Render("  new item [backlog]"))
+			renderDraftTitle(rowSty, colW, m.title.View())+"\n"+metaSty.Render("  new item [backlog]"))
 	}
 	// Sits below the rows and is not selectable: selection indexes m.items,
 	// which this is deliberately not part of.
@@ -1002,6 +1006,28 @@ func (m model) renderList() string {
 		lines = append(lines, dimStyle.Render(hiddenBacklogRow(marker, colW)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderDraftTitle paints the part of the draft row after textinput explicitly.
+// textinput's cursor renderer closes its ANSI style when the cursor is visible;
+// relying on a parent style with Width then left the trailing cells unpainted
+// until the cursor blinked off.
+func renderDraftTitle(style lipgloss.Style, width int, title string) string {
+	prefix := "› "
+	pad := max(0, width-lipgloss.Width(prefix+title))
+	// textinput emits a reset after its cursor. Render each text segment in its
+	// own selected style so that reset cannot erase the row background for the
+	// rest of the input or its trailing fill.
+	return renderStyledANSI(style, prefix+title) + style.Render(strings.Repeat(" ", pad))
+}
+
+func renderStyledANSI(style lipgloss.Style, text string) string {
+	const reset = "\x1b[0m"
+	parts := strings.Split(text, reset)
+	for i, part := range parts {
+		parts[i] = style.Render(part)
+	}
+	return strings.Join(parts, reset)
 }
 
 // previewMaxLines caps how much of an item's body the list will show. Bodies

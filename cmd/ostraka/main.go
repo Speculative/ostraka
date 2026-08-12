@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -241,24 +242,60 @@ var itemShowCmd = &cobra.Command{
 
 // ── item turn ────────────────────────────────────────────────────────────────
 
-var turnFlags struct{ actor string }
+var turnFlags struct {
+	actor        string
+	contentStdin bool
+}
 
 func addItemTurnFlags() {
 	itemTurnCmd.Flags().StringVarP(&turnFlags.actor, "actor", "a", "", "user|agent (required)")
+	itemTurnCmd.Flags().BoolVar(&turnFlags.contentStdin, "content-stdin", false, "read turn content from standard input")
 	itemTurnCmd.MarkFlagRequired("actor")
 }
 
 var itemTurnCmd = &cobra.Command{
-	Use:   "turn <id> <content>",
+	Use:   "turn <id> <content> | turn <id> --content-stdin",
 	Short: "Append a turn to an item",
-	Args:  cobra.ExactArgs(2),
+	Args: func(cmd *cobra.Command, args []string) error {
+		if turnFlags.contentStdin {
+			if len(args) != 1 {
+				return fmt.Errorf("--content-stdin requires exactly one argument: <id>")
+			}
+			return nil
+		}
+		if len(args) != 2 {
+			return fmt.Errorf("requires <id> and <content>, or <id> with --content-stdin")
+		}
+		return nil
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		content, err := turnContent(cmd.InOrStdin(), args, turnFlags.contentStdin)
+		if err != nil {
+			return err
+		}
 		s := mustStore()
-		if _, err := s.AddTurn(args[0], models.Actor(turnFlags.actor), args[1]); err != nil {
+		if _, err := s.AddTurn(args[0], models.Actor(turnFlags.actor), content); err != nil {
 			die(err)
 		}
 		return nil
 	},
+}
+
+func turnContent(stdin io.Reader, args []string, contentStdin bool) (string, error) {
+	var content string
+	if contentStdin {
+		data, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", fmt.Errorf("read turn content from stdin: %w", err)
+		}
+		content = string(data)
+	} else {
+		content = args[1]
+	}
+	if strings.TrimSpace(content) == "" {
+		return "", fmt.Errorf("turn content must not be blank")
+	}
+	return content, nil
 }
 
 // ── item status ──────────────────────────────────────────────────────────────

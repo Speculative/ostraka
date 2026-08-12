@@ -294,6 +294,42 @@ func TestTitleInputFitsTheDraftRow(t *testing.T) {
 	}
 }
 
+func TestRenderDraftTitlePaintsTrailingCells(t *testing.T) {
+	style := lipgloss.NewStyle().Background(selectedBg).Bold(true)
+	// Simulate textinput's visible cursor, including the reset it emits after
+	// the cursor cell. The fill must appear after that reset, not inside a
+	// parent style that the reset can cancel.
+	title := "draft\x1b[0m"
+	got := renderDraftTitle(style, 20, title)
+	if width := lipgloss.Width(got); width != 20 {
+		t.Fatalf("draft title width = %d, want 20", width)
+	}
+	if want := title + strings.Repeat(" ", 13); got != "› "+want {
+		t.Errorf("trailing fill did not follow the cursor reset: got %q, want %q", got, "› "+want)
+	}
+}
+
+func TestRenderStyledANSIPreservesStyleAfterReset(t *testing.T) {
+	style := lipgloss.NewStyle().Background(selectedBg).Bold(true)
+	got := renderStyledANSI(style, "before\x1b[0mafter")
+	if want := "before\x1b[0mafter"; got != want {
+		t.Errorf("renderStyledANSI() = %q, want %q", got, want)
+	}
+}
+
+func TestNewModelUsesALegibleDraftPlaceholder(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	if got := m.title.Placeholder; got != "new item title…" {
+		t.Errorf("draft placeholder = %q", got)
+	}
+	// The textinput default is ANSI colour 240, which is too close to the
+	// selected-row background (237). The configured style uses the legible
+	// metadata grey instead.
+	if got := m.title.PlaceholderStyle.GetForeground(); got != dimFg {
+		t.Errorf("placeholder foreground = %v, want %v", got, dimFg)
+	}
+}
+
 // mkItem builds a minimal inbox item for the selection tests below.
 func mkItem(id string, st models.Status) models.Item {
 	return models.Item{ID: id, Channel: models.ChannelInbox, Status: st, Created: t0, Title: id}
