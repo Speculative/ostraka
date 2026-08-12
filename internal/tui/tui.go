@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 	"unsafe"
 
 	"ostraka/internal/models"
@@ -30,6 +31,8 @@ type itemsLoadedMsg struct {
 }
 type watchEventMsg struct{}
 type errMsg error
+type draftCheckpointMsg struct{ sequence int }
+type draftSafetyMsg struct{}
 
 // ── styles ───────────────────────────────────────────────────────────────────
 
@@ -165,6 +168,11 @@ type model struct {
 	input textarea.Model
 	title textinput.Model
 	mode  uiMode
+	// draftItemID is the item whose body is currently being composed. It is
+	// separate from selected so switching views cannot make a checkpoint land
+	// on the wrong item.
+	draftItemID   string
+	draftSequence int
 
 	// draft marks an unsaved new item occupying a synthetic last row of the
 	// list while its title is typed. selected points one past the real items
@@ -198,6 +206,8 @@ type model struct {
 const (
 	inputMinHeight = 2
 	inputMaxHeight = 8
+	draftDebounce  = 2 * time.Second
+	draftSafety    = 10 * time.Second
 )
 
 // uiMode is which widget owns the keyboard. Everything except modeNav is a
@@ -362,6 +372,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg
 		return m, nil
 
+	case draftCheckpointMsg:
+		if m.mode == modeCompose && !m.draft && msg.sequence == m.draftSequence {
+			m.checkpointTurnDraft()
+		}
+		return m, nil
+
+	case draftSafetyMsg:
+		if m.mode == modeCompose && !m.draft {
+			m.checkpointTurnDraft()
+			return m, draftSafetyCheckpoint()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		// A bracketed paste is content, never a command. In particular, pasted
 		// q, esc, or ctrl+s must not quit or submit the editor. Bubble Tea's
@@ -493,9 +516,20 @@ func sessionProviderIndex(provider supervisor.Provider) int {
 // openComposer focuses the turn textarea for the selected item.
 func (m model) openComposer() (tea.Model, tea.Cmd) {
 	m.mode = modeCompose
+	m.draftItemID = m.selectedID()
 	m.input.Reset()
+	if content, err := m.store.LoadDraft(m.draftItemID); err != nil {
+		m.err = err
+	} else {
+		m.input.SetValue(content)
+		m.input.CursorEnd()
+	}
 	m = m.recalcLayout()
-	return m, m.input.Focus()
+	return m, tea.Batch(m.input.Focus(), draftSafetyCheckpoint())
+}
+
+func draftSafetyCheckpoint() tea.Cmd {
+	return tea.Tick(draftSafety, func(time.Time) tea.Msg { return draftSafetyMsg{} })
 }
 
 func statusIndex(s models.Status) int {
@@ -678,6 +712,9 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if content != "" && m.selected < len(m.items) {
 			item := m.items[m.selected]
 			m.store.AddTurn(item.ID, models.ActorUser, content) //nolint:errcheck
+			if err := m.store.ClearDraft(m.draftItemID); err != nil {
+				m.err = err
+			}
 			// Whether a turn wakes the agent is a property of the item's
 			// status, not of the keystroke: advancing to pending-agent and
 			// enqueueing are the same decision, so they move together. A
@@ -688,6 +725,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.mode = modeNav
+		m.draftItemID = ""
 		m.input.Blur()
 		m = m.recalcLayout()
 		// Your own turn is never "new messages below" — go to the bottom now so
@@ -695,12 +733,24 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.conv.GotoBottom()
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "esc":
+		m.checkpointTurnDraft()
 		m.input.Blur()
 		if m.draft {
 			// Abandoning the body abandons the whole unwritten item.
 			m = m.cancelDraft()
 		}
 		m.mode = modeNav
+		m.draftItemID = ""
+		m = m.recalcLayout()
+		return m, nil
+	case "ctrl+c":
+		if err := m.store.ClearDraft(m.draftItemID); err != nil {
+			m.err = err
+		}
+		m.input.Reset()
+		m.input.Blur()
+		m.mode = modeNav
+		m.draftItemID = ""
 		m = m.recalcLayout()
 		return m, nil
 	case "pgdown":
@@ -738,6 +788,13 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	if !m.draft {
+		m.draftSequence++
+		sequence := m.draftSequence
+		cmd = tea.Batch(cmd, tea.Tick(draftDebounce, func(time.Time) tea.Msg {
+			return draftCheckpointMsg{sequence: sequence}
+		}))
+	}
 	newVisualLines := m.inputVisualLineCount()
 
 	newH := m.currentInputHeight()
@@ -757,6 +814,15 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		textareaScrollUp(&m.input, 1)
 	}
 	return m, cmd
+}
+
+func (m *model) checkpointTurnDraft() {
+	if m.draftItemID == "" {
+		return
+	}
+	if err := m.store.SaveDraft(m.draftItemID, m.input.Value()); err != nil {
+		m.err = err
+	}
 }
 
 func (m model) switchView(v listView) (model, tea.Cmd) {

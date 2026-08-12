@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"ostraka/internal/models"
+	"ostraka/internal/store"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -193,5 +196,58 @@ func TestEditorWordShortcutBindings(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("%s bindings %q do not include %q", name, joined, want)
 		}
+	}
+}
+
+func TestTurnDraftRestoresAndCtrlCClearsIt(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "draft target", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveDraft(item.ID, "saved\ndraft"); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(s, nil, nil)
+	m.items = []models.Item{item}
+	next, _ := m.openComposer()
+	got := next.(model)
+	if got.input.Value() != "saved\ndraft" {
+		t.Fatalf("restored draft = %q", got.input.Value())
+	}
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	got = next.(model)
+	if got.mode != modeNav {
+		t.Errorf("mode after ctrl+c = %v, want navigation", got.mode)
+	}
+	if content, err := s.LoadDraft(item.ID); err != nil || content != "" {
+		t.Errorf("draft after ctrl+c = %q, %v; want empty, nil", content, err)
+	}
+}
+
+func TestEscapeCheckpointsTurnDraft(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "draft target", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(s, nil, nil)
+	m.items = []models.Item{item}
+	next, _ := m.openComposer()
+	got := next.(model)
+	got.input.SetValue("keep this")
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got = next.(model)
+	if got.mode != modeNav {
+		t.Errorf("mode after esc = %v, want navigation", got.mode)
+	}
+	if content, err := s.LoadDraft(item.ID); err != nil || content != "keep this" {
+		t.Errorf("draft after esc = %q, %v; want %q, nil", content, err, "keep this")
 	}
 }
