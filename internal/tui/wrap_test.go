@@ -151,3 +151,25 @@ func TestSoftWrapGrowthReclaimsTextareaScrollOffset(t *testing.T) {
 	}
 	t.Fatal("input did not grow after soft wrapping")
 }
+
+func TestBracketedPasteAddsMultilineComposerContent(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.mode = modeCompose
+	m.width = 80
+	m.height = 30
+	m = m.recalcLayout()
+	m.input.Focus()
+
+	paste := "first line\nq\nctrl+s is text, not a command\nlast line"
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	got := next.(model)
+	if got.mode != modeCompose {
+		t.Fatalf("paste changed mode to %v, want compose", got.mode)
+	}
+	if got.input.Value() != paste {
+		t.Errorf("pasted content = %q, want %q", got.input.Value(), paste)
+	}
+	if got.input.Height() < inputMinHeight {
+		t.Errorf("composer height = %d, want at least %d", got.input.Height(), inputMinHeight)
+	}
+}

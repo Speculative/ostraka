@@ -328,6 +328,9 @@ func TestNewModelUsesALegibleDraftPlaceholder(t *testing.T) {
 	if got := m.title.PlaceholderStyle.GetForeground(); got != dimFg {
 		t.Errorf("placeholder foreground = %v, want %v", got, dimFg)
 	}
+	if m.input.KeyMap.Paste.Enabled() || m.title.KeyMap.Paste.Enabled() {
+		t.Error("host clipboard shortcut must be disabled; terminal bracketed paste is supported instead")
+	}
 }
 
 // mkItem builds a minimal inbox item for the selection tests below.

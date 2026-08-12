@@ -249,6 +249,10 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Superviso
 	ta.Prompt = ""      // remove default "┃ " prompt
 	ta.SetWidth(40)     // recalculate promptWidth=0 (will be overridden in recalcLayout)
 	ta.SetHeight(inputMinHeight)
+	// Ctrl+V invokes Bubbles' host-clipboard helper, which is unavailable in
+	// sandboxed/container sessions. Terminal bracketed paste (for example
+	// Ctrl+Shift+V) remains supported and does not need any clipboard utility.
+	ta.KeyMap.Paste.SetEnabled(false)
 	// Inline(true) is hardcoded in computedCursorLine(); clear the background so
 	// the cursor line doesn't show a 1-char-wide highlight on an empty textarea.
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
@@ -260,6 +264,7 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Superviso
 	// from selectedBg (237), making the draft hint look blank except under the
 	// cursor. Use the same legible grey as item metadata instead.
 	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(dimFg)
+	ti.KeyMap.Paste.SetEnabled(false)
 	return model{
 		store:   s,
 		watchCh: watchCh,
@@ -280,6 +285,11 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Superviso
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
+		// Bubble Tea enables this by default, but requesting it explicitly is
+		// important to the TUI contract: terminals then send a whole paste as
+		// one KeyMsg marked Paste instead of dribbling its bytes through the
+		// global key bindings.
+		tea.EnableBracketedPaste,
 		loadItemsCmd(m.store, m.view, m.showBacklog),
 		waitForWatch(m.watchCh),
 	)
@@ -347,6 +357,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// A bracketed paste is content, never a command. In particular, pasted
+		// q, esc, or ctrl+s must not quit or submit the editor. Bubble Tea's
+		// KeyMsg.String protects bindings by wrapping pasted text, but routing it
+		// directly keeps that guarantee local to Ostraka as well.
+		if msg.Paste {
+			switch m.mode {
+			case modeCompose:
+				return m.handleInputKey(msg)
+			case modeTitle:
+				var cmd tea.Cmd
+				m.title, cmd = m.title.Update(msg)
+				return m, cmd
+			}
+			return m, nil
+		}
 		switch m.mode {
 		case modeCompose:
 			return m.handleInputKey(msg)
