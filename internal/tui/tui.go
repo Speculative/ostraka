@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -70,6 +71,14 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("12")).
 			Padding(0, 1)
+	// The confirmation is the one popup that reports a consequence rather than
+	// offering a choice, so it is drawn heavier than the selectors: a thick
+	// border in the pending amber, and a blank line of padding so the warning
+	// is not sitting against the frame.
+	confirmStyle = lipgloss.NewStyle().
+			Border(lipgloss.ThickBorder()).
+			BorderForeground(pendingFg).
+			Padding(1, 3)
 	borderStyle = lipgloss.NewStyle().BorderRight(true).BorderStyle(lipgloss.NormalBorder())
 )
 
@@ -220,6 +229,7 @@ const (
 	modeTitle
 	modeStatus
 	modeSession
+	modeQuit
 )
 
 // allStatuses is the selector's running order, coarsest lifecycle first.
@@ -410,6 +420,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleStatusKey(msg)
 		case modeSession:
 			return m.handleSessionKey(msg)
+		case modeQuit:
+			return m.handleQuitKey(msg)
 		}
 		return m.handleNavKey(msg)
 	}
@@ -439,6 +451,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
+		// Quitting now kills the running turn rather than leaving it to die
+		// whenever it next writes to a stdout nobody is reading, so the agent's
+		// work is genuinely lost — worth one keystroke of confirmation.
+		if _, busy := m.busyDispatch(); busy {
+			m.mode = modeQuit
+			return m, nil
+		}
 		return m, tea.Quit
 	case "j", "down":
 		if m.selected < len(m.items)-1 {
@@ -649,6 +668,20 @@ func (m model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeNav
 	}
 	return m, nil
+}
+
+// handleQuitKey answers the confirmation shown when quitting would kill a
+// running turn. Confirmation is deliberately an explicit y rather than any key
+// or a second q, since the keystroke that reaches it is one the user pressed
+// expecting to leave, not to decide anything.
+func (m model) handleQuitKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		return m, tea.Quit
+	default:
+		m.mode = modeNav
+		return m, nil
+	}
 }
 
 // statusDot gives the colour of an item's list marker, and whether it has one
@@ -878,7 +911,14 @@ func (m model) View() string {
 	}
 	mainRow := lipgloss.JoinHorizontal(lipgloss.Top, listPanel, convPanel)
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, mainRow, footer)
+	frame := lipgloss.JoinVertical(lipgloss.Left, header, mainRow, footer)
+	if m.mode == modeQuit {
+		// Over the finished frame, not inside a pane: the question is about the
+		// whole session, and centring it in the reading pane put it off-centre
+		// on the screen, which is where the user is actually looking.
+		frame = overlayCentered(frame, m.quitConfirmBox(), m.width)
+	}
+	return frame
 }
 
 // renderConv renders the conversation viewport, overlaying a "new messages
@@ -895,6 +935,9 @@ func (m model) renderConv() string {
 		lines[len(lines)-1] = newBelowStyle.Width(m.conv.Width).Align(lipgloss.Center).
 			Render("↓ new messages below ↓")
 	}
+	// The quit confirmation is not overlaid here: it belongs to the whole
+	// application rather than the conversation, so View places it over the
+	// composed frame instead.
 	if m.mode == modeStatus {
 		lines = m.overlayStatusPopup(lines)
 	} else if m.mode == modeSession {
@@ -918,9 +961,19 @@ func (m model) overlaySessionPopup(lines []string) []string {
 		active += " (none)"
 	}
 	box := popupStyle.Render("agent session · current " + active + "\n" + strings.Join(rows, "\n"))
-	pad := lipgloss.NewStyle().Width(m.conv.Width)
+	return overlayBox(lines, box, m.conv.Width)
+}
+
+// overlayBox draws a rendered popup over the top rows of the conversation.
+// Each popup row replaces a whole line rather than being spliced into one —
+// the underlying content is styled, and cutting a line mid-way would mean
+// slicing ANSI sequences. Whole-row replacement is the cheap version, and it
+// still reads as a floating box.
+func overlayBox(lines []string, box string, width int) []string {
+	const topRow = 1 // one row of breathing space above the popup
+	pad := lipgloss.NewStyle().Width(width)
 	for i, boxLine := range strings.Split(box, "\n") {
-		row := 1 + i
+		row := topRow + i
 		if row >= len(lines) {
 			break
 		}
@@ -929,11 +982,80 @@ func (m model) overlaySessionPopup(lines []string) []string {
 	return lines
 }
 
-// overlayStatusPopup draws the status selector over the top rows of the
-// conversation. Each popup row replaces a whole line rather than being spliced
-// into one — the underlying content is styled, and cutting a line mid-way
-// would mean slicing ANSI sequences. Whole-row replacement is the cheap
-// version, and it still reads as a floating box.
+// busyDispatch reports the item being worked on right now. Tests build models
+// without a supervisor, and "nobody is working" is the honest answer for one.
+func (m model) busyDispatch() (string, bool) {
+	if m.sup == nil {
+		return "", false
+	}
+	return m.sup.Busy()
+}
+
+// quitConfirmBox renders the confirmation, naming the item by id. The id
+// rather than the title: the busy item is not necessarily the selected one,
+// and naming it is what makes the warning checkable.
+func (m model) quitConfirmBox() string {
+	itemID, _ := m.busyDispatch()
+	box := confirmStyle.Render(
+		lipgloss.NewStyle().Bold(true).Render("a turn is running on "+itemID) + "\n" +
+			"quitting stops it and loses its work\n\n" +
+			dimStyle.Render("y quit anyway   any other key stay"))
+	if lipgloss.Width(box) > m.width {
+		// A frame wider than the screen wraps, and a wrapped border reads as a
+		// broken box rather than a narrow one. Drop to the short wording and
+		// the selectors' padding, which is the widest thing that still fits.
+		box = confirmStyle.Padding(0, 1).Render(
+			lipgloss.NewStyle().Bold(true).Render("stop the running turn?") + "\n" +
+				dimStyle.Render("y quit   other stay"))
+	}
+	return box
+}
+
+// overlayCentered draws a rendered box in the middle of a composed frame,
+// leaving the rest of the frame visible around it. Unlike the pane popups,
+// which replace whole rows, this splices each box row into the row underneath
+// it — a modal that blanked full-width bands through the list and the borders
+// would read as a rendering fault rather than as a box on top.
+//
+// Both cuts are ANSI-aware: the frame's rows carry styling, and slicing them
+// by byte or rune would cut a colour sequence in half and bleed it across the
+// rest of the line.
+func overlayCentered(frame, box string, width int) string {
+	rows := strings.Split(frame, "\n")
+	boxRows := strings.Split(box, "\n")
+	boxW := lipgloss.Width(box)
+
+	top := (len(rows) - len(boxRows)) / 2
+	left := (width - boxW) / 2
+	if top < 0 {
+		top = 0
+	}
+	if left < 0 {
+		left = 0
+	}
+
+	for i, boxRow := range boxRows {
+		row := top + i
+		if row >= len(rows) {
+			break
+		}
+		under := rows[row]
+		before := ansi.Truncate(under, left, "")
+		// Pad a short row out to the box, so a frame row that ends early does
+		// not pull the box left of centre.
+		if w := lipgloss.Width(before); w < left {
+			before += strings.Repeat(" ", left-w)
+		}
+		after := ansi.TruncateLeft(under, left+boxW, "")
+		rows[row] = before + ansiReset + boxRow + ansiReset + after
+	}
+	return strings.Join(rows, "\n")
+}
+
+// ansiReset closes any style the frame had open where the box interrupts it,
+// and again where the frame resumes, so neither bleeds into the other.
+const ansiReset = "\x1b[0m"
+
 func (m model) overlayStatusPopup(lines []string) []string {
 	rows := make([]string, len(allStatuses))
 	for i, s := range allStatuses {
@@ -944,17 +1066,7 @@ func (m model) overlayStatusPopup(lines []string) []string {
 		rows[i] = sty.Render(marker + string(s))
 	}
 	box := popupStyle.Render("set status\n" + strings.Join(rows, "\n"))
-
-	const topRow = 1 // one row of breathing space above the popup
-	pad := lipgloss.NewStyle().Width(m.conv.Width)
-	for i, boxLine := range strings.Split(box, "\n") {
-		row := topRow + i
-		if row >= len(lines) {
-			break
-		}
-		lines[row] = pad.Render(boxLine)
-	}
-	return lines
+	return overlayBox(lines, box, m.conv.Width)
 }
 
 func (m model) renderHeader() string {
@@ -998,6 +1110,8 @@ func (m model) renderFooter() string {
 		text = "j/k select  enter apply  esc cancel"
 	case modeSession:
 		text = "j/k select  enter start fresh session  esc cancel"
+	case modeQuit:
+		text = "y quit and stop the running turn  any other key stay"
 	default:
 		text = "q quit  j/k nav  a add  s status  S session  t turn  1-4 view  b backlog  pgup/pgdn scroll  r refresh"
 		if m.showBacklog {
@@ -1547,6 +1661,10 @@ func Run(s *store.Store) error {
 	// this ordering, a freshly initialised project would never see live
 	// progress, because the directory it is written to went unwatched.
 	sup := supervisor.New(s.Root)
+	// Shutdown, not a bare return: an agent turn started here must not outlive
+	// the process that started it, or the next run comes up unable to tell a
+	// dead dispatch's leftovers from a live one's.
+	defer sup.Shutdown()
 
 	watchCh, err := startWatcher(s.Root)
 	if err != nil {

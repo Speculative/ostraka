@@ -36,6 +36,17 @@ func TestParseClaudeStreamLineTracksResolvedModelAndLiveContext(t *testing.T) {
 	}
 }
 
+func TestParseClaudeStreamLineTakesTheSessionIDFromTheFirstEvent(t *testing.T) {
+	// A turn stopped before its result event still has to be resumable, and
+	// the init event is where the id first appears.
+	var result TurnResult
+	parseClaudeStreamLine(`{"type":"system","subtype":"init","session_id":"abc-123","model":"claude-sonnet-5"}`, &result, nil)
+
+	if result.SessionID != "abc-123" {
+		t.Errorf("session id = %q, want abc-123", result.SessionID)
+	}
+}
+
 func TestClaudeResultUsesPrimaryModelContextWindow(t *testing.T) {
 	// A helper model must not replace the primary model's context window.
 	var result TurnResult

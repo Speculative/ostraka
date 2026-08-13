@@ -30,6 +30,26 @@ func ReadLive(root, itemID string) string {
 	return string(b)
 }
 
+// sweepLive removes every live progress log under root. Only safe to call when
+// no dispatch can be running — the logs are per-dispatch state, and one that
+// outlived its run is indistinguishable on disk from one still being written.
+// It returns the ids whose logs were removed so the caller can report them.
+func sweepLive(root string) []string {
+	matches, err := filepath.Glob(filepath.Join(supervisorDir(root), "live-*.txt"))
+	if err != nil {
+		return nil
+	}
+	var swept []string
+	for _, path := range matches {
+		if err := os.Remove(path); err != nil {
+			continue
+		}
+		name := filepath.Base(path)
+		swept = append(swept, strings.TrimSuffix(strings.TrimPrefix(name, "live-"), ".txt"))
+	}
+	return swept
+}
+
 // liveLog appends progress lines for one dispatch. Every write is a full
 // rewrite of an append-only buffer: readers get whole lines rather than a
 // partially-flushed file, which matters because the TUI reloads on any write.

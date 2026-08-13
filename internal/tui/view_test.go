@@ -10,7 +10,9 @@ import (
 	"ostraka/internal/store"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func item(ch models.Channel, st models.Status, created time.Time, turns ...time.Time) models.Item {
@@ -314,6 +316,120 @@ func TestRenderStyledANSIPreservesStyleAfterReset(t *testing.T) {
 	got := renderStyledANSI(style, "before\x1b[0mafter")
 	if want := "before\x1b[0mafter"; got != want {
 		t.Errorf("renderStyledANSI() = %q, want %q", got, want)
+	}
+}
+
+// blankFrame stands in for a composed application frame: uniform rows, so any
+// row the box did not touch is recognisable by its filler.
+func blankFrame(width, height int, filler string) string {
+	rows := make([]string, height)
+	for i := range rows {
+		rows[i] = strings.Repeat(filler, width)
+	}
+	return strings.Join(rows, "\n")
+}
+
+func TestQuitConfirmationIsCenteredOnTheWholeFrame(t *testing.T) {
+	// Centred on the screen, not on the reading pane: the pane is offset by the
+	// item list, so centring inside it lands visibly left of centre.
+	const width, height = 100, 30
+	box := lipgloss.NewStyle().Border(lipgloss.ThickBorder()).Render("stop?")
+	boxW, boxH := lipgloss.Width(box), lipgloss.Height(box)
+
+	out := overlayCentered(blankFrame(width, height, "·"), box, width)
+
+	rows := strings.Split(out, "\n")
+	if len(rows) != height {
+		t.Fatalf("overlay changed the frame height: %d, want %d", len(rows), height)
+	}
+	var first, last = -1, -1
+	for i, row := range rows {
+		if strings.Contains(row, "┏") || strings.Contains(row, "┃") || strings.Contains(row, "┗") {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first < 0 {
+		t.Fatal("box was not drawn")
+	}
+	if above, below := first, height-1-last; above-below > 1 || below-above > 1 {
+		t.Errorf("not vertically centred: %d rows above, %d below", above, below)
+	}
+	// The filler either side of the box says where it sits horizontally. Count
+	// columns rather than bytes: the filler and the border are both multi-byte.
+	left := 0
+	for _, r := range ansi.Strip(rows[first]) {
+		if r == '┏' {
+			break
+		}
+		left++
+	}
+	right := width - left - boxW
+	if left-right > 1 || right-left > 1 {
+		t.Errorf("not horizontally centred: %d columns left, %d right", left, right)
+	}
+	if boxH != last-first+1 {
+		t.Errorf("box occupies %d rows, want %d", last-first+1, boxH)
+	}
+}
+
+func TestQuitConfirmationLeavesTheFrameAroundItIntact(t *testing.T) {
+	// A modal that blanked full-width bands through the list and the borders
+	// would read as a rendering fault rather than as a box on top.
+	const width, height = 100, 30
+	box := lipgloss.NewStyle().Border(lipgloss.ThickBorder()).Render("stop?")
+
+	out := overlayCentered(blankFrame(width, height, "·"), box, width)
+
+	for i, row := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(row); w != width {
+			t.Fatalf("row %d is %d columns wide, want %d", i, w, width)
+		}
+		if !strings.HasPrefix(row, "·") || !strings.HasSuffix(row, "·") {
+			t.Errorf("row %d lost the frame beside the box: %q", i, row)
+		}
+	}
+}
+
+func TestQuitConfirmationShrinksRatherThanWrapping(t *testing.T) {
+	// A frame wider than the screen wraps, and a wrapped border reads as broken.
+	m := newModel(nil, nil, nil)
+	m.width = 30
+
+	if w := lipgloss.Width(m.quitConfirmBox()); w > m.width {
+		t.Errorf("box is %d columns wide on a %d-column screen", w, m.width)
+	}
+}
+
+func TestQuitConfirmationTakesOnlyY(t *testing.T) {
+	// The key that lands here was pressed to leave, not to answer a question,
+	// so anything but an explicit yes has to mean "stay".
+	m := newModel(nil, nil, nil)
+	m.mode = modeQuit
+
+	if _, cmd := m.handleQuitKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}); cmd == nil {
+		t.Error("y did not quit")
+	}
+	next, cmd := m.handleQuitKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if cmd != nil {
+		t.Error("an unrelated key quit")
+	}
+	if next.(model).mode != modeNav {
+		t.Error("an unrelated key left the confirmation up")
+	}
+}
+
+func TestQuitWithoutASupervisorDoesNotAskFirst(t *testing.T) {
+	// No supervisor means no turn to lose; q must still just quit.
+	m := newModel(nil, nil, nil)
+	next, cmd := m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if cmd == nil {
+		t.Error("q did not quit")
+	}
+	if next.(model).mode != modeNav {
+		t.Error("q opened a confirmation with no dispatch running")
 	}
 }
 

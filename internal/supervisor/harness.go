@@ -81,9 +81,10 @@ type claudeModelUsage struct {
 
 // streamEnvelope is the outer shape shared by every stream-json line.
 type streamEnvelope struct {
-	Type    string `json:"type"`
-	Model   string `json:"model"`
-	Message struct {
+	Type      string `json:"type"`
+	Model     string `json:"model"`
+	SessionID string `json:"session_id"`
+	Message   struct {
 		Model   string         `json:"model"`
 		Content []contentBlock `json:"content"`
 		Usage   claudeUsage    `json:"usage"`
@@ -128,6 +129,7 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID string, o
 	}
 
 	cmd := exec.CommandContext(ctx, h.bin, args...)
+	detachProcessGroup(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return TurnResult{}, fmt.Errorf("claude: stdout pipe: %w", err)
@@ -166,7 +168,11 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID string, o
 	runErr := cmd.Wait()
 
 	if !sawResult {
-		return TurnResult{}, fmt.Errorf("claude: no result event in output (run err=%v, stderr=%q, stdout=%q)",
+		// The telemetry gathered so far still goes back, even though the turn
+		// did not finish. A turn stopped part-way — Shutdown cancelling it, the
+		// agent dying — has a real session behind it, and its id is the only
+		// way to resume the work it did before it stopped.
+		return telemetry, fmt.Errorf("claude: no result event in output (run err=%v, stderr=%q, stdout=%q)",
 			runErr, truncate(stderr.String(), 500), truncate(tail.String(), 500))
 	}
 
@@ -223,6 +229,7 @@ type appServerMessage struct {
 
 func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID string, onEvent func(string)) (result TurnResult, err error) {
 	cmd := exec.CommandContext(ctx, h.bin, "app-server", "--stdio")
+	detachProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return result, fmt.Errorf("codex app-server: stdin pipe: %w", err)
@@ -465,6 +472,11 @@ func parseClaudeStreamLine(line string, result *TurnResult, onEvent func(string)
 		return claudeJSONResult{}, false
 	}
 	if result != nil {
+		// Claude stamps every event with the session id, so an interrupted turn
+		// still leaves us able to resume it.
+		if env.SessionID != "" {
+			result.SessionID = env.SessionID
+		}
 		switch env.Type {
 		case "system":
 			// The init event's top-level model is the resolved session model.

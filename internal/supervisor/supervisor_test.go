@@ -41,11 +41,16 @@ func newTestSupervisor(t *testing.T, h Harness) *Supervisor {
 	if err := os.MkdirAll(supervisorDir(root), 0755); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	return &Supervisor{
 		root:    root,
 		harness: h,
 		queue:   make(chan enqueueMsg, queueCapacity),
 		logger:  newLogger(root),
+		ctx:     ctx,
+		cancel:  cancel,
+		done:    make(chan struct{}),
 	}
 }
 
@@ -115,7 +120,7 @@ func TestDispatchErrorIsLoggedNotFatal(t *testing.T) {
 		t.Errorf("expected log to record dispatch failure, got: %s", logBytes)
 	}
 
-	// No session should have been persisted since the harness call failed.
+	// A failed run that never reached a session id has nothing to persist.
 	if _, err := os.Stat(sessionPath(s.root)); !os.IsNotExist(err) {
 		t.Errorf("expected no session file after a failed dispatch, stat err=%v", err)
 	}
@@ -150,12 +155,17 @@ func newStoreBackedSupervisor(t *testing.T, h Harness) (*Supervisor, *store.Stor
 	if err := os.MkdirAll(supervisorDir(root), 0755); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	return &Supervisor{
 		root:    root,
 		harness: h,
 		store:   st,
 		queue:   make(chan enqueueMsg, queueCapacity),
 		logger:  newLogger(root),
+		ctx:     ctx,
+		cancel:  cancel,
+		done:    make(chan struct{}),
 	}, st
 }
 
@@ -214,6 +224,149 @@ func TestDispatchLeavesNonPendingAgentItemsAlone(t *testing.T) {
 	}
 }
 
+func TestDispatchDiscardsAStaleLiveLogBeforeAcknowledging(t *testing.T) {
+	spy := &liveSpyHarness{}
+	s, st := newStoreBackedSupervisor(t, spy)
+	item, _ := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusPendingAgent, "")
+	spy.root, spy.itemID = s.root, item.ID
+	// A log left behind by a run that never cleared it.
+	if err := os.WriteFile(livePath(s.root, item.ID), []byte("output from a dead run\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s.dispatch(enqueueMsg{itemID: item.ID})
+
+	// The item is acknowledged for the whole run, so the pane would have
+	// rendered whatever was readable before this run emitted its first line.
+	if spy.before != "" {
+		t.Errorf("stale log was still readable at the start of the run: %q", spy.before)
+	}
+	if _, err := os.Stat(livePath(s.root, item.ID)); !os.IsNotExist(err) {
+		t.Errorf("live log outlived the dispatch, stat err=%v", err)
+	}
+}
+
+func TestNewRecoversFromAnInterruptedDispatch(t *testing.T) {
+	// Through New rather than the recovery method directly: the guarantee is
+	// that a supervisor is never constructed on top of a dead run's state.
+	root := filepath.Join(t.TempDir(), ".ostraka")
+	st, err := store.NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupted, _ := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusAgentAcknowledged, "")
+	untouched, _ := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusPendingUser, "")
+	if err := os.MkdirAll(supervisorDir(root), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(livePath(root, interrupted.ID), []byte("half a run\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(root)
+
+	// The trace and the marker have to go together: either one left behind on
+	// its own still renders as a run in progress.
+	if got := ReadLive(s.root, interrupted.ID); got != "" {
+		t.Errorf("orphaned live log survived: %q", got)
+	}
+	after, _ := st.GetItem(interrupted.ID)
+	if after.Status != models.StatusPendingAgent {
+		t.Errorf("interrupted item: got %q want %q", after.Status, models.StatusPendingAgent)
+	}
+	// Recovery is for interrupted dispatches only; nothing else moves.
+	other, _ := st.GetItem(untouched.ID)
+	if other.Status != models.StatusPendingUser {
+		t.Errorf("unrelated item: got %q want %q", other.Status, models.StatusPendingUser)
+	}
+}
+
+// blockingHarness parks inside the run until its context is cancelled, which
+// is what an agent mid-turn looks like from the supervisor's side.
+type blockingHarness struct {
+	running   chan struct{}
+	once      sync.Once
+	cancelled bool
+	sessionID string
+}
+
+func (h *blockingHarness) RunTurn(ctx context.Context, _ string, _ string, _ func(string)) (TurnResult, error) {
+	h.once.Do(func() { close(h.running) })
+	<-ctx.Done()
+	h.cancelled = true
+	// A cancelled turn still knows its session: the id arrives on the stream's
+	// first event, not with the result.
+	return TurnResult{SessionID: h.sessionID}, ctx.Err()
+}
+
+func TestShutdownStopsAnInFlightTurn(t *testing.T) {
+	fh := &blockingHarness{running: make(chan struct{})}
+	s := newTestSupervisor(t, fh)
+	s.Start()
+	s.Enqueue("item-1")
+
+	select {
+	case <-fh.running:
+	case <-time.After(2 * time.Second):
+		t.Fatal("harness never started")
+	}
+	if id, busy := s.Busy(); !busy || id != "item-1" {
+		t.Errorf("Busy() = %q, %v; want item-1, true", id, busy)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.Shutdown()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown did not return; the worker outlived the process that owns it")
+	}
+	if !fh.cancelled {
+		t.Error("the turn was not cancelled")
+	}
+	if _, busy := s.Busy(); busy {
+		t.Error("still reports a dispatch in flight after shutdown")
+	}
+	s.Shutdown() // idempotent: a second call must not block or panic
+}
+
+func TestShutdownIsSafeWithoutStart(t *testing.T) {
+	// Constructed then abandoned — Run returns this way when the watcher fails.
+	s := newTestSupervisor(t, &fakeHarness{})
+	done := make(chan struct{})
+	go func() {
+		s.Shutdown()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown blocked waiting for a worker that was never started")
+	}
+}
+
+func TestInterruptedTurnStillPersistsItsSession(t *testing.T) {
+	// The turn did happen, so the resume cursor has to advance to it. Leaving
+	// it behind rewinds the thread past whatever the agent managed to do.
+	fh := &blockingHarness{running: make(chan struct{}), sessionID: "session-partial"}
+	s := newTestSupervisor(t, fh)
+	s.Start()
+	s.Enqueue("item-1")
+	<-fh.running
+	s.Shutdown()
+
+	sf, err := loadSession(s.root)
+	if err != nil {
+		t.Fatalf("no session persisted after an interrupted turn: %v", err)
+	}
+	if sf.SessionID != "session-partial" {
+		t.Errorf("session id = %q, want session-partial", sf.SessionID)
+	}
+}
+
 func TestNudgePromptNamesTheItem(t *testing.T) {
 	// The prompt must not send the agent hunting via a status query: dispatch
 	// marks the item agent-acknowledged, so a pending-agent search finds
@@ -227,15 +380,18 @@ func TestNudgePromptNamesTheItem(t *testing.T) {
 	}
 }
 
-// liveSpyHarness writes a progress line, then reads back the live log from
-// inside the run — the only point at which it is supposed to exist.
+// liveSpyHarness reads the live log from inside the run, both before it emits
+// anything and after — the run is the only point at which the log is supposed
+// to exist, and the gap before the first event is where a stale one shows.
 type liveSpyHarness struct {
 	root   string
 	itemID string
+	before string
 	during string
 }
 
 func (h *liveSpyHarness) RunTurn(_ context.Context, _ string, _ string, onEvent func(string)) (TurnResult, error) {
+	h.before = ReadLive(h.root, h.itemID)
 	if onEvent != nil {
 		onEvent("mid-run line")
 	}
