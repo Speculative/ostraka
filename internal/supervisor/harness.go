@@ -15,7 +15,11 @@ import (
 
 // TurnResult is the outcome of one harness turn.
 type TurnResult struct {
-	SessionID    string
+	SessionID string
+	// Model is the provider's resolved primary model for this turn. It is
+	// reported rather than inferred from a requested alias because a provider
+	// may fall back or use helper models during a turn.
+	Model        string
 	ResultText   string
 	IsError      bool
 	DurationMs   int64
@@ -59,20 +63,44 @@ func newClaudeHarness() *claudeHarness {
 }
 
 type claudeJSONResult struct {
-	Result       string  `json:"result"`
-	SessionID    string  `json:"session_id"`
-	TotalCostUSD float64 `json:"total_cost_usd"`
-	DurationMs   int64   `json:"duration_ms"`
-	NumTurns     int     `json:"num_turns"`
-	IsError      bool    `json:"is_error"`
+	Result       string                      `json:"result"`
+	SessionID    string                      `json:"session_id"`
+	TotalCostUSD float64                     `json:"total_cost_usd"`
+	DurationMs   int64                       `json:"duration_ms"`
+	NumTurns     int                         `json:"num_turns"`
+	IsError      bool                        `json:"is_error"`
+	ModelUsage   map[string]claudeModelUsage `json:"modelUsage"`
+}
+
+// claudeModelUsage is the per-model summary in Claude Code's terminating
+// stream-json result. A turn can include helper/subagent models, so callers
+// must select the resolved primary model rather than summing these windows.
+type claudeModelUsage struct {
+	ContextWindow int64 `json:"contextWindow"`
 }
 
 // streamEnvelope is the outer shape shared by every stream-json line.
 type streamEnvelope struct {
 	Type    string `json:"type"`
+	Model   string `json:"model"`
 	Message struct {
+		Model   string         `json:"model"`
 		Content []contentBlock `json:"content"`
+		Usage   claudeUsage    `json:"usage"`
 	} `json:"message"`
+}
+
+// claudeUsage is the live context footprint returned with every assistant
+// response. Cache reads and writes count as input context in Claude Code.
+type claudeUsage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+}
+
+func (u claudeUsage) contextTokens() int64 {
+	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 }
 
 type contentBlock struct {
@@ -112,6 +140,7 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID string, o
 
 	var raw claudeJSONResult
 	var sawResult bool
+	var telemetry TurnResult
 	var tail bytes.Buffer // kept only for the error message when parsing fails
 
 	// bufio.Reader rather than Scanner: a single tool_result line can exceed
@@ -123,7 +152,7 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID string, o
 			if tail.Len() < 2000 {
 				tail.WriteString(line)
 			}
-			if res, ok := parseStreamLine(line, onEvent); ok {
+			if res, ok := parseClaudeStreamLine(line, &telemetry, onEvent); ok {
 				raw, sawResult = res, true
 			}
 		}
@@ -143,16 +172,37 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID string, o
 
 	result := TurnResult{
 		SessionID:    raw.SessionID,
+		Model:        telemetry.Model,
 		ResultText:   raw.Result,
 		IsError:      raw.IsError,
 		DurationMs:   raw.DurationMs,
 		TotalCostUSD: raw.TotalCostUSD,
 		NumTurns:     raw.NumTurns,
+		Context:      telemetry.Context,
 	}
+	applyClaudeResultTelemetry(&result, raw)
 	if runErr != nil {
 		return result, fmt.Errorf("claude exited with error: %w (stderr=%q)", runErr, truncate(stderr.String(), 500))
 	}
 	return result, nil
+}
+
+func applyClaudeResultTelemetry(result *TurnResult, raw claudeJSONResult) {
+	// modelUsage is a result-only field, whereas Claude emits the primary
+	// model and current token footprint earlier in the stream. Join them here
+	// once both are known. Older Claude versions may omit either signal.
+	if usage, ok := raw.ModelUsage[result.Model]; ok {
+		result.Context.WindowTokens = usage.ContextWindow
+	} else if len(raw.ModelUsage) == 1 {
+		// A one-model turn is unambiguous even if an older init event omitted
+		// its model field.
+		for model, usage := range raw.ModelUsage {
+			if result.Model == "" {
+				result.Model = model
+			}
+			result.Context.WindowTokens = usage.ContextWindow
+		}
+	}
 }
 
 func (h *codexHarness) RunTurn(ctx context.Context, prompt, sessionID string, onEvent func(string)) (TurnResult, error) {
@@ -397,6 +447,13 @@ func parseAppServerEvent(message appServerMessage, result *TurnResult, onEvent f
 // content through onEvent. It returns the final result payload once the
 // terminating "result" event arrives.
 func parseStreamLine(line string, onEvent func(string)) (claudeJSONResult, bool) {
+	return parseClaudeStreamLine(line, nil, onEvent)
+}
+
+// parseClaudeStreamLine translates Claude Code's stream-json protocol into
+// the provider-neutral result surface. result is optional to keep the parser
+// convenient for callers that only need the terminating result payload.
+func parseClaudeStreamLine(line string, result *TurnResult, onEvent func(string)) (claudeJSONResult, bool) {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return claudeJSONResult{}, false
@@ -406,6 +463,23 @@ func parseStreamLine(line string, onEvent func(string)) (claudeJSONResult, bool)
 		// Non-JSON noise on stdout is not fatal — the result event is what
 		// matters, and dropping a garbled progress line costs nothing.
 		return claudeJSONResult{}, false
+	}
+	if result != nil {
+		switch env.Type {
+		case "system":
+			// The init event's top-level model is the resolved session model.
+			if env.Model != "" {
+				result.Model = env.Model
+			}
+		case "assistant":
+			// The message-level model reflects a fallback if one occurred.
+			if env.Message.Model != "" {
+				result.Model = env.Message.Model
+			}
+			if used := env.Message.Usage.contextTokens(); used > 0 {
+				result.Context.UsedTokens = used
+			}
+		}
 	}
 
 	if env.Type == "result" {

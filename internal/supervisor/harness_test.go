@@ -21,6 +21,36 @@ func TestParseStreamLineReturnsResult(t *testing.T) {
 	}
 }
 
+func TestParseClaudeStreamLineTracksResolvedModelAndLiveContext(t *testing.T) {
+	var result TurnResult
+	parseClaudeStreamLine(`{"type":"system","subtype":"init","model":"claude-sonnet-5"}`, &result, nil)
+	parseClaudeStreamLine(`{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":8500,"output_tokens":1200,"cache_creation_input_tokens":5000,"cache_read_input_tokens":2000}}}`, &result, nil)
+
+	if result.Model != "claude-sonnet-5" {
+		t.Errorf("model = %q", result.Model)
+	}
+	// Claude Code's context meter is input-only: cache writes and reads count,
+	// while output tokens do not.
+	if result.Context.UsedTokens != 15500 {
+		t.Errorf("used tokens = %d, want 15500", result.Context.UsedTokens)
+	}
+}
+
+func TestClaudeResultUsesPrimaryModelContextWindow(t *testing.T) {
+	// A helper model must not replace the primary model's context window.
+	var result TurnResult
+	parseClaudeStreamLine(`{"type":"system","subtype":"init","model":"claude-sonnet-5"}`, &result, nil)
+	parseClaudeStreamLine(`{"type":"assistant","message":{"usage":{"input_tokens":100}}}`, &result, nil)
+	raw, ok := parseClaudeStreamLine(`{"type":"result","session_id":"s","modelUsage":{"claude-sonnet-5":{"contextWindow":1000000},"claude-haiku-4-5":{"contextWindow":200000}}}`, &result, nil)
+	if !ok {
+		t.Fatal("result event was not recognised")
+	}
+	applyClaudeResultTelemetry(&result, raw)
+	if result.Context.WindowTokens != 1000000 {
+		t.Errorf("primary context window = %d, want 1000000", result.Context.WindowTokens)
+	}
+}
+
 func TestParseStreamLineIgnoresNonResultEvents(t *testing.T) {
 	// Anything that is not the terminating result must not be mistaken for it,
 	// or the turn would end early with a zero session id.
