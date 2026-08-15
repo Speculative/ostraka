@@ -1,13 +1,12 @@
 ---
 name: ostraka
-version: "1"
-description: >
-  Protocol for structured agent↔user communication via ostraka.
-  Load this skill at session start when a `.ostraka/` directory exists in
-  the project root, or when the user mentions ostraka, asks, inbox, or handoff.
+description: Protocol for structured agent-user communication through Ostraka. Use when a project has a `.ostraka/` directory or the user mentions Ostraka, asks, inbox, handoff, or an Ostraka item ID.
+compatibility: Requires the Ostraka CLI; use the repository-local Go command when working in the Ostraka repository.
+metadata:
+  version: "1"
 ---
 
-# ostraka agent protocol
+# Ostraka protocol
 
 ostraka is a structured side-channel between you and the user. Three channels:
 - **inbox** — tasks the user has assigned to you
@@ -16,30 +15,29 @@ ostraka is a structured side-channel between you and the user. Three channels:
 
 All access is through the `ostraka` CLI. Never read or write `.ostraka/` files directly.
 
-## Which binary
+## Choose the CLI command
 
-When working *on* the ostraka repo itself, build and use the local tree rather than
-any `ostraka` already on PATH — otherwise you exercise a stale build instead of your
-own changes:
+Use `<cli>` below as a placeholder for the appropriate command. When working in
+the Ostraka repository (`cmd/ostraka` and `go.mod` are in the project root), use:
 
 ```bash
-go build -o /tmp/ostraka ./cmd/ostraka && OSTRAKA=/tmp/ostraka
+go run ./cmd/ostraka <arguments>
 ```
 
-Use `$OSTRAKA` in place of `ostraka` for every command below. In any other project,
-use `ostraka` from PATH.
+Otherwise, use `ostraka <arguments>` from `PATH`. Do not use a stale globally
+installed binary when working on the Ostraka repository.
 
 ## Session start
 
 ```bash
 # Read your assignments
-ostraka item list --channel inbox --status active --json
+<cli> item list --channel inbox --status active --json
 
 # Check for any asks that the user has answered since last session
-ostraka item list --channel asks --status pending-agent --json
+<cli> item list --channel asks --status pending-agent --json
 
 # Open a session handoff item (keep this ID for the rest of the session)
-HANDOFF=$(ostraka item add --channel handoff \
+HANDOFF=$(<cli> item add --channel handoff \
   --title "Session open" \
   --body "What this session is picking up.")
 ```
@@ -49,10 +47,10 @@ HANDOFF=$(ostraka item add --channel handoff \
 When you have a question, decision, or test checklist for the user:
 
 ```bash
-ID=$(ostraka item add --channel asks \
+ID=$(<cli> item add --channel asks \
   --title "One-line summary of the question" \
   --body "The question in full, with the context needed to answer it.")
-ostraka item status "$ID" pending-user
+<cli> item status "$ID" pending-user
 ```
 
 The user answers via the TUI. Poll `--status pending-agent` to find answered asks at the start of your next turn.
@@ -60,7 +58,7 @@ The user answers via the TUI. Poll `--status pending-agent` to find answered ask
 ## Adding a turn to an existing thread
 
 ```bash
-ostraka item turn <id> --actor agent "Your response"
+<cli> item turn <id> --actor agent "Your response"
 ```
 
 An agent turn hands the item back automatically: `active`, `pending-agent` and
@@ -68,19 +66,26 @@ An agent turn hands the item back automatically: `active`, `pending-agent` and
 showing up in the pending-agent queue. Parked statuses (`backlog`, `done`, `archived`) are left
 alone. You do not need to set the status yourself after replying.
 
-### Progress updates during long turns
+### Dispatch lifecycle
 
-The user watches your tool activity live in the TUI while you work, so routine
-progress needs no narration. When you go quiet for a long stretch — a big
-refactor, a long test run, a decision you are still weighing — send a short
-proactive update so the pane does not look stalled. Keep them to a sentence;
-the turn you post at the end is the real answer.
+When a dispatch prompt embeds the latest user turn, address that turn directly.
+Otherwise, read the item with `<cli> item show <id> --json` before replying.
+
+Treat the agent item turn as the final action of a dispatch: it moves the item
+to `pending-user`, ends the live dispatch, and replaces the live trace with
+the durable response. Complete all work, validation, and normal progress
+reporting before posting it.
+
+Do not post progress turns while the Ostraka TUI shows the live harness trace.
+Use the final item turn for the substantive summary. Post an interim turn only
+when there is no visible live trace and the user would otherwise experience a
+long silent interval; that turn ends the current dispatch.
 
 If you resolve an ask inline during chat, record it and close it:
 
 ```bash
-ostraka item turn <id> --actor agent "Resolved: went with X because..."
-ostraka item status <id> done
+<cli> item turn <id> --actor agent "Resolved: went with X because..."
+<cli> item status <id> done
 ```
 
 ## Forking a thread
@@ -88,30 +93,30 @@ ostraka item status <id> done
 If you want to spin off a sub-question from an existing item, quote the relevant context in the new item's body and link back via `--parent`:
 
 ```bash
-CHILD=$(ostraka item add --channel asks --parent <parent-id> \
+CHILD=$(<cli> item add --channel asks --parent <parent-id> \
   --title "One-line summary of the sub-question" \
   --body "> [quote of relevant excerpt]
 
 Sub-question here")
-ostraka item status "$CHILD" pending-user
+<cli> item status "$CHILD" pending-user
 ```
 
 ## Session end
 
 ```bash
-ostraka item turn "$HANDOFF" --actor agent "Summary of work this session: ..."
-ostraka item status "$HANDOFF" done
+<cli> item turn "$HANDOFF" --actor agent "Summary of work this session: ..."
+<cli> item status "$HANDOFF" done
 ```
 
 ## CLI quick reference
 
 ```
-ostraka item list [--channel inbox|asks|handoff] [--status <s>] [--json]
-ostraka item show <id> [--json]
-ostraka item add --channel <c> --title <title> --body <body> [--parent <id>] [--status <s>]
-ostraka item turn <id> --actor agent|user <content>
-ostraka item status <id> backlog|active|pending-user|pending-agent|agent-acknowledged|done|archived
-ostraka item rm <id> [-y]
+<cli> item list [--channel inbox|asks|handoff] [--status <s>] [--json]
+<cli> item show <id> [--json]
+<cli> item add --channel <c> --title <title> --body <body> [--parent <id>] [--status <s>]
+<cli> item turn <id> --actor agent|user <content>
+<cli> item status <id> backlog|active|pending-user|pending-agent|agent-acknowledged|done|archived
+<cli> item rm <id> [-y]
 ```
 
 ## Notes
@@ -128,4 +133,4 @@ ostraka item rm <id> [-y]
   `pending-agent`, for the whole time you are running — so a `--status
   pending-agent` search will not find it. The dispatch prompt names the item id
   directly; use that.
-- If `.ostraka/` does not exist, run `ostraka init` first.
+- If `.ostraka/` does not exist, run `<cli> init` first.
