@@ -16,14 +16,16 @@ import (
 type fakeHarness struct {
 	mu       sync.Mutex
 	calls    []string // sessionID seen per call, in order
+	prompts  []string // prompts seen per call, in order
 	sessions []string // sessionID to return per call, in order
 	err      error
 }
 
-func (f *fakeHarness) RunTurn(_ context.Context, _ string, sessionID string, _ func(string)) (TurnResult, error) {
+func (f *fakeHarness) RunTurn(_ context.Context, prompt string, sessionID string, _ func(string)) (TurnResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, sessionID)
+	f.prompts = append(f.prompts, prompt)
 	if f.err != nil {
 		return TurnResult{}, f.err
 	}
@@ -367,16 +369,49 @@ func TestInterruptedTurnStillPersistsItsSession(t *testing.T) {
 	}
 }
 
-func TestNudgePromptNamesTheItem(t *testing.T) {
+func TestNudgePromptIncludesLatestUserTurn(t *testing.T) {
+	got := nudgePrompt("20260808-054612", "Please implement this.")
+	if !strings.Contains(got, "Please implement this.") {
+		t.Errorf("prompt does not include the latest user turn: %q", got)
+	}
+	if strings.Contains(got, "item show") {
+		t.Errorf("prompt still makes the agent reread an included user turn: %q", got)
+	}
+}
+
+func TestNudgePromptFallsBackToShowingTheItem(t *testing.T) {
 	// The prompt must not send the agent hunting via a status query: dispatch
 	// marks the item agent-acknowledged, so a pending-agent search finds
 	// nothing by the time the agent runs.
-	got := nudgePrompt("20260808-054612")
+	got := nudgePrompt("20260808-054612", "")
 	if !strings.Contains(got, "20260808-054612") {
 		t.Errorf("prompt does not name the item: %q", got)
 	}
 	if strings.Contains(got, "--status pending-agent") {
 		t.Errorf("prompt still sends the agent to a query that excludes the dispatched item: %q", got)
+	}
+}
+
+func TestDispatchIncludesFinalUserTurnInNudge(t *testing.T) {
+	fh := &fakeHarness{}
+	s, st := newStoreBackedSupervisor(t, fh)
+	item, err := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddTurn(item.ID, models.ActorUser, "Please work on this now."); err != nil {
+		t.Fatal(err)
+	}
+
+	s.dispatch(enqueueMsg{itemID: item.ID})
+
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	if len(fh.prompts) != 1 {
+		t.Fatalf("expected one prompt, got %d", len(fh.prompts))
+	}
+	if !strings.Contains(fh.prompts[0], "Please work on this now.") {
+		t.Errorf("dispatch prompt does not include the final user turn: %q", fh.prompts[0])
 	}
 }
 

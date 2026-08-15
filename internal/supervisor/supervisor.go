@@ -11,18 +11,44 @@ import (
 	"ostraka/internal/store"
 )
 
-// nudgePrompt names the item directly. It used to say "run `item list
-// --status pending-agent`", which stopped working the moment dispatch began
-// marking items agent-acknowledged: by the time the agent ran, the item it
-// was dispatched for no longer matched the query it was told to run. The
-// supervisor already knows the id, so telling the agent beats making it search.
-func nudgePrompt(itemID string) string {
+// nudgePrompt includes the final user turn when one triggered the dispatch.
+// That lets the agent respond immediately instead of spending its first tool
+// call rereading the item. The item-show fallback still covers initial and
+// stale dispatches, where no final user turn is available.
+func nudgePrompt(itemID, userTurn string) string {
+	if userTurn != "" {
+		return fmt.Sprintf(
+			"There is new activity in ostraka on item %s. "+
+				"The latest user turn is included below; respond to it directly.\n\n"+
+				"--- latest user turn ---\n%s\n--- end latest user turn ---\n\n"+
+				"Respond via `ostraka item turn %s --actor agent \"<content>\"` per the ostraka protocol.",
+			itemID, userTurn, itemID)
+	}
 	return fmt.Sprintf(
 		"There is new activity in ostraka on item %s. "+
 			"Run `ostraka item show %s --json` to see it, "+
 			"then respond via `ostraka item turn %s --actor agent \"<content>\"` "+
 			"per the ostraka protocol.",
 		itemID, itemID, itemID)
+}
+
+func (s *Supervisor) latestUserTurn(itemID string) string {
+	if s.store == nil {
+		return ""
+	}
+	item, err := s.store.GetItem(itemID)
+	if err != nil {
+		s.logger.Printf("item %s: cannot read latest user turn: %v", itemID, err)
+		return ""
+	}
+	if len(item.Turns) == 0 {
+		return ""
+	}
+	latest := item.Turns[len(item.Turns)-1]
+	if latest.Actor != models.ActorUser {
+		return ""
+	}
+	return latest.Content
 }
 
 const queueCapacity = 64
@@ -299,7 +325,8 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	s.setBusy(msg.itemID)
 	defer s.setBusy("")
 
-	result, err := s.harnessFor(sf.Provider).RunTurn(s.runContext(), nudgePrompt(msg.itemID), sf.SessionID, live.append)
+	prompt := nudgePrompt(msg.itemID, s.latestUserTurn(msg.itemID))
+	result, err := s.harnessFor(sf.Provider).RunTurn(s.runContext(), prompt, sf.SessionID, live.append)
 	if err != nil {
 		s.logger.Printf("item %s: dispatch failed: %v", msg.itemID, err)
 		// Put it back in the queue's state so it doesn't sit forever showing
