@@ -8,6 +8,7 @@ import (
 	"ostraka/internal/store"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestWrapTextPreservesShortLines(t *testing.T) {
@@ -249,5 +250,103 @@ func TestEscapeCheckpointsTurnDraft(t *testing.T) {
 	}
 	if content, err := s.LoadDraft(item.ID); err != nil || content != "keep this" {
 		t.Errorf("draft after esc = %q, %v; want %q, nil", content, err, "keep this")
+	}
+}
+
+func TestPendingTurnDraftShowsCollapsedComposer(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "draft target", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveDraft(item.ID, "saved draft\nwith more content"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(s, nil, nil)
+	m.items = []models.Item{item}
+	m.width = 100
+	m.height = 30
+	m.refreshPendingDraft()
+	m = m.recalcLayout()
+
+	if m.mode != modeNav {
+		t.Fatalf("mode = %v, want navigation", m.mode)
+	}
+	if m.pendingDraftItemID != item.ID {
+		t.Fatalf("pending draft item = %q, want %q", m.pendingDraftItemID, item.ID)
+	}
+	if !m.composerVisible() {
+		t.Fatal("saved draft composer is not visible")
+	}
+	if got := m.input.Height(); got != inputMinHeight {
+		t.Errorf("collapsed composer height = %d, want %d", got, inputMinHeight)
+	}
+	if got := m.input.Value(); got != "saved draft\nwith more content" {
+		t.Errorf("preview content = %q", got)
+	}
+}
+
+func TestEscapeLeavesTurnDraftComposerCollapsed(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "draft target", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(s, nil, nil)
+	m.items = []models.Item{item}
+	m.width = 100
+	m.height = 30
+	next, _ := m.openComposer()
+	m = next.(model)
+	m.input.SetValue("keep this draft")
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
+
+	if m.mode != modeNav {
+		t.Fatalf("mode after esc = %v, want navigation", m.mode)
+	}
+	if !m.composerVisible() {
+		t.Fatal("saved draft composer disappeared after esc")
+	}
+	if got := m.input.Height(); got != inputMinHeight {
+		t.Errorf("composer height after esc = %d, want %d", got, inputMinHeight)
+	}
+}
+
+func TestDismissingTallTurnDraftKeepsFrameHeight(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "draft target", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(s, nil, &fakeSupervisor{})
+	m.items = []models.Item{item}
+	m.width = 100
+	m.height = 30
+	next, _ := m.openComposer()
+	m = next.(model)
+	m.input.SetValue(strings.Repeat("a tall draft line\n", inputMaxHeight+3))
+	m = m.recalcLayout()
+	if got := m.input.Height(); got != inputMaxHeight {
+		t.Fatalf("active tall composer height = %d, want %d", got, inputMaxHeight)
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
+	if got := m.input.Height(); got != inputMinHeight {
+		t.Fatalf("dismissed composer height = %d, want %d", got, inputMinHeight)
+	}
+	if got := lipgloss.Height(m.View()); got != m.height {
+		t.Fatalf("dismissed frame height = %d, want terminal height %d", got, m.height)
 	}
 }

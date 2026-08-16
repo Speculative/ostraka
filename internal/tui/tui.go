@@ -238,8 +238,9 @@ type model struct {
 	// draftItemID is the item whose body is currently being composed. It is
 	// separate from selected so switching views cannot make a checkpoint land
 	// on the wrong item.
-	draftItemID   string
-	draftSequence int
+	draftItemID        string
+	draftSequence      int
+	pendingDraftItemID string
 
 	// draft marks an unsaved new item occupying a synthetic last row of the
 	// list while its title is typed. selected points one past the real items
@@ -466,7 +467,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.items = msg.items
 			m.hiddenBacklog = msg.hiddenBacklog
 		}
+		wasComposerVisible := m.composerVisible()
 		m.restoreSelection(prevID)
+		m.refreshPendingDraft()
+		if wasComposerVisible != m.composerVisible() {
+			m = m.recalcLayout()
+		}
 		m.updateConv()
 
 		// A load that brings a different conversation into the pane parks it
@@ -769,6 +775,11 @@ func (m model) openComposer() (tea.Model, tea.Cmd) {
 	} else {
 		m.input.SetValue(content)
 		m.input.CursorEnd()
+		if content != "" {
+			m.pendingDraftItemID = m.draftItemID
+		} else {
+			m.pendingDraftItemID = ""
+		}
 	}
 	m = m.recalcLayout()
 	return m, tea.Batch(m.input.Focus(), draftSafetyCheckpoint())
@@ -1072,6 +1083,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if err := m.store.ClearDraft(m.draftItemID); err != nil {
 				m.err = err
 			}
+			m.pendingDraftItemID = ""
 			// Whether a turn wakes the agent is a property of the item's
 			// status, not of the keystroke: advancing to pending-agent and
 			// enqueueing are the same decision, so they move together. A
@@ -1112,6 +1124,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := m.store.ClearDraft(m.draftItemID); err != nil {
 			m.err = err
 		}
+		m.pendingDraftItemID = ""
 		m.input.Reset()
 		m.input.Blur()
 		m.mode = modeNav
@@ -1185,8 +1198,15 @@ func (m *model) checkpointTurnDraft() {
 	if m.draftItemID == "" {
 		return
 	}
-	if err := m.store.SaveDraft(m.draftItemID, m.input.Value()); err != nil {
+	content := m.input.Value()
+	if err := m.store.SaveDraft(m.draftItemID, content); err != nil {
 		m.err = err
+		return
+	}
+	if content == "" {
+		m.pendingDraftItemID = ""
+	} else {
+		m.pendingDraftItemID = m.draftItemID
 	}
 }
 
@@ -1277,7 +1297,7 @@ func (m model) View() string {
 	convScrollbar := renderScrollbar(m.conv.Height, m.conv.TotalLineCount(), m.conv.YOffset)
 	convWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, m.renderConv(), convScrollbar)
 	var convPanel string
-	if m.mode == modeCompose {
+	if m.composerVisible() {
 		// Per-element padding so the separator spans the full column width,
 		// giving │──────── instead of │ ──────── at the corner. Scrollbar
 		// occupies the 1-char right padding slot, mirroring the input below.
@@ -1288,7 +1308,11 @@ func (m model) View() string {
 		// internal *viewport.Model pointer), then read the live TotalLineCount.
 		taView := m.input.View()
 		tvp := textareaViewport(&m.input)
-		scrollbar := renderScrollbar(m.currentInputHeight(), tvp.TotalLineCount(), tvp.YOffset)
+		// Use the textarea's actual viewport height. In navigation mode a saved
+		// draft is deliberately collapsed to inputMinHeight even when its body
+		// would normally measure several visual rows; using currentInputHeight
+		// here would expand the rendered scrollbar and shift the whole frame.
+		scrollbar := renderScrollbar(m.input.Height(), tvp.TotalLineCount(), tvp.YOffset)
 		// Scrollbar occupies the 1-char right padding slot; overall width = convAreaW.
 		inputBlock := lipgloss.NewStyle().Padding(0, 0, 1, 1).Render(
 			lipgloss.JoinHorizontal(lipgloss.Top, taView, scrollbar),
@@ -2107,9 +2131,46 @@ func wrapLine(line string, width int) []string {
 // content. Opening an item at the top means scrolling past the entire history
 // to reach the part that changed, which is almost never what the reader wants.
 func (m *model) showSelected() {
+	wasComposerVisible := m.composerVisible()
+	m.refreshPendingDraft()
+	if wasComposerVisible != m.composerVisible() {
+		*m = m.recalcLayout()
+	}
 	m.updateConv()
 	m.conv.GotoBottom()
 	m.newBelow = false
+}
+
+// refreshPendingDraft keeps a saved turn visible after the editor is closed
+// and when a reload or a restart selects the item containing it. The textarea
+// is also the collapsed preview, but it is never focused in this state, so
+// navigation remains active until the user presses t to edit it.
+func (m *model) refreshPendingDraft() {
+	if m.mode == modeCompose || m.store == nil {
+		return
+	}
+	id := m.selectedID()
+	m.pendingDraftItemID = ""
+	if id == "" {
+		return
+	}
+	content, err := m.store.LoadDraft(id)
+	if err != nil {
+		m.err = err
+		return
+	}
+	if content == "" {
+		return
+	}
+	m.pendingDraftItemID = id
+	m.input.Reset()
+	m.input.SetValue(content)
+	m.input.CursorEnd()
+}
+
+func (m model) composerVisible() bool {
+	return m.mode == modeCompose ||
+		(m.pendingDraftItemID != "" && m.pendingDraftItemID == m.selectedID())
 }
 
 // syncNewBelow retires the "new messages below" marker once the reader has
@@ -2360,10 +2421,15 @@ func (m model) recalcLayout() model {
 	// the number of physical newline-delimited lines.
 	m.input.SetWidth(convW)
 	inputH := m.currentInputHeight()
+	if m.composerVisible() && m.mode != modeCompose {
+		// A saved draft is a collapsed preview in navigation mode. Its full
+		// body is restored when t reopens the editor.
+		inputH = inputMinHeight
+	}
 
 	mainH := m.height - 2 // subtract header and footer
 	var convH int
-	if m.mode == modeCompose {
+	if m.composerVisible() {
 		// per-element padding: 1(top) + convH + 1(sep) + inputH + 1(bottom) = mainH
 		convH = mainH - inputH - 3
 	} else {

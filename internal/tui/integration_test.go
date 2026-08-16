@@ -326,6 +326,25 @@ func TestProgramStartupShowsBacklogWhenTheInboxFits(t *testing.T) {
 	}
 }
 
+func TestProgramStartupShowsSavedDraftInCollapsedComposer(t *testing.T) {
+	tm, _, output := newIntegrationProgram(t, func(s *store.Store) {
+		writeIntegrationItem(t, s, "20260816-120001", "Draft target", models.StatusActive)
+		if err := s.SaveDraft("20260816-120001", "saved draft body"); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	output.waitFor(t, tm, func(got []byte) bool {
+		return bytes.Contains(got, []byte("saved draft body"))
+	})
+	output.finish(t, tm)
+
+	grid := terminalGrid(t, output.all)
+	if !strings.Contains(grid, "saved draft body") {
+		t.Fatalf("startup grid does not show the saved draft:\n%s", grid)
+	}
+}
+
 func TestProgramBacklogToggleRevealsHiddenItems(t *testing.T) {
 	tm, sup, output := newIntegrationProgram(t, func(s *store.Store) {
 		writeIntegrationItem(t, s, "20260816-120001", "Live item one", models.StatusActive)
