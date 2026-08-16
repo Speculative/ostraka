@@ -891,11 +891,14 @@ func (m model) View() string {
 		Height(mainH)
 	listPanel := listPanelStyle.Width(listW).Render(listContent)
 	convAreaW := m.width - (m.listWidth() + 1)
+	convScrollbar := renderScrollbar(m.conv.Height, m.conv.TotalLineCount(), m.conv.YOffset)
+	convWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, m.renderConv(), convScrollbar)
 	var convPanel string
 	if m.mode == modeCompose {
 		// Per-element padding so the separator spans the full column width,
-		// giving │──────── instead of │ ──────── at the corner.
-		viewportBlock := lipgloss.NewStyle().Padding(1, 1, 0, 1).Render(m.renderConv())
+		// giving │──────── instead of │ ──────── at the corner. Scrollbar
+		// occupies the 1-char right padding slot, mirroring the input below.
+		viewportBlock := lipgloss.NewStyle().Padding(1, 0, 0, 1).Render(convWithScrollbar)
 		sep := strings.Repeat("─", convAreaW)
 
 		// Render textarea first (its View() updates the shared viewport via the
@@ -909,7 +912,7 @@ func (m model) View() string {
 		)
 		convPanel = lipgloss.JoinVertical(lipgloss.Left, viewportBlock, sep, inputBlock)
 	} else {
-		convPanel = lipgloss.NewStyle().Padding(1).Render(m.renderConv())
+		convPanel = lipgloss.NewStyle().Padding(1, 0, 1, 1).Render(convWithScrollbar)
 	}
 	mainRow := lipgloss.JoinHorizontal(lipgloss.Top, listPanel, convPanel)
 
