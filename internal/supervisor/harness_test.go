@@ -173,7 +173,7 @@ func TestParseAppServerEventTracksUsageAndCompletedItems(t *testing.T) {
 
 	parseAppServerEvent(appServerMessage{
 		Method: "thread/tokenUsage/updated",
-		Params: json.RawMessage(`{"tokenUsage":{"total":{"totalTokens":15019},"modelContextWindow":258400}}`),
+		Params: json.RawMessage(`{"tokenUsage":{"last":{"totalTokens":15019},"total":{"totalTokens":150190},"modelContextWindow":258400}}`),
 	}, &result, onEvent)
 	parseAppServerEvent(appServerMessage{
 		Method: "item/completed",
@@ -196,6 +196,30 @@ func TestParseAppServerEventTracksUsageAndCompletedItems(t *testing.T) {
 	}
 	if len(got) != 2 || !strings.Contains(got[0], "go test ./...") || got[1] != "All tests pass." {
 		t.Errorf("live trace = %q", got)
+	}
+}
+
+func TestParseAppServerEventUsesLastUsageNotCumulativeTotal(t *testing.T) {
+	var result TurnResult
+	parseAppServerEvent(appServerMessage{
+		Method: "thread/tokenUsage/updated",
+		Params: json.RawMessage(`{"tokenUsage":{"last":{"totalTokens":94000},"total":{"totalTokens":2682109},"modelContextWindow":258400}}`),
+	}, &result, nil)
+
+	if result.Context != (ContextUsage{UsedTokens: 94000, WindowTokens: 258400}) {
+		t.Fatalf("context = %+v, want latest context usage rather than cumulative total", result.Context)
+	}
+}
+
+func TestParseAppServerEventDoesNotUseImpossibleCumulativeFallback(t *testing.T) {
+	var result TurnResult
+	parseAppServerEvent(appServerMessage{
+		Method: "thread/tokenUsage/updated",
+		Params: json.RawMessage(`{"tokenUsage":{"total":{"totalTokens":2682109},"modelContextWindow":258400}}`),
+	}, &result, nil)
+
+	if result.Context != (ContextUsage{WindowTokens: 258400}) {
+		t.Fatalf("context = %+v, want no impossible cumulative usage", result.Context)
 	}
 }
 

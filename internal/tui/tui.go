@@ -280,14 +280,22 @@ type model struct {
 	// scrolled up at the time and so was not auto-followed down to it.
 	newBelow bool
 	// projectPane is 0 for item views, 1 for user instructions, and 2 for the
-	// agent-curated brief. Project documents deliberately use the existing
-	// reader/editor rather than becoming synthetic conversation items.
+	// agent-curated brief. Project documents use the existing reader/editor,
+	// while the brief also exposes its immutable history in the list pane.
 	projectPane    int
+	projectEntries []projectEntry
 	editingProject bool
 
 	width  int
 	height int
 	err    error
+}
+
+type projectEntry struct {
+	title    string
+	meta     string
+	content  string
+	editable bool
 }
 
 const (
@@ -490,9 +498,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case watchEventMsg:
-		// Re-arm the watcher. Project documents are independent of item
-		// reloads, so leave their pane alone while they are open.
+		// Re-arm the watcher and refresh project documents too: the CLI can
+		// replace the brief while the TUI is open.
 		if m.projectPane != 0 {
+			if !m.editingProject {
+				m.showProjectContext()
+			}
 			return m, waitForWatch(m.watchCh)
 		}
 		return m, tea.Batch(waitForWatch(m.watchCh), loadItemsCmd(m.store, m.view, m.showBacklog))
@@ -611,28 +622,57 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.projectPane != 0 {
 		switch msg.String() {
-		case "1", "2":
-			m.projectPane = 0
+		case "1":
+			return m.switchView(channelView(models.ChannelInbox))
+		case "2":
+			return m.switchView(archiveView)
+		case "j", "down":
+			if m.selected < len(m.projectEntries)-1 {
+				m.selected++
+				m.showSelectedProjectEntry()
+			}
+			return m, nil
+		case "k", "up":
+			if m.selected > 0 {
+				m.selected--
+				m.showSelectedProjectEntry()
+			}
+			return m, nil
 		case "3":
 			return m, nil
 		case "tab":
 			m.projectPane = 3 - m.projectPane
 			m.showProjectContext()
 			return m, nil
+		case "r":
+			m.showProjectContext()
+			return m, nil
+		case "pgdown":
+			m.conv.PageDown()
+			m.syncNewBelow()
+			return m, nil
+		case "pgup":
+			m.conv.PageUp()
+			m.syncNewBelow()
+			return m, nil
 		case "e":
+			if m.selected < 0 || m.selected >= len(m.projectEntries) || !m.projectEntries[m.selected].editable {
+				return m, nil
+			}
 			m.editingProject = true
 			m.mode = modeCompose
 			m.input.Reset()
-			if m.projectPane == 1 {
-				v, _ := m.store.ProjectInstructions()
-				m.input.SetValue(v)
-			} else {
-				v, _ := m.store.ProjectBrief()
-				m.input.SetValue(v)
-			}
+			m.input.SetValue(m.projectEntries[m.selected].content)
 			m.input.CursorEnd()
 			m = m.recalcLayout()
 			return m, m.input.Focus()
+		case "q", "ctrl+c":
+			// Let the common quit handling below process these keys.
+		default:
+			// Item actions have no meaning while a project document is open.
+			// In particular, do not let "a" create a draft against an empty
+			// project list or let "s" open a status selector for no item.
+			return m, nil
 		}
 	}
 	switch msg.String() {
@@ -1152,6 +1192,7 @@ func (m *model) checkpointTurnDraft() {
 
 func (m model) switchView(v listView) (model, tea.Cmd) {
 	m.projectPane = 0
+	m.projectEntries = nil
 	m.view = v
 	m.selected = 0
 	m.items = nil
@@ -1162,19 +1203,49 @@ func (m model) switchView(v listView) (model, tea.Cmd) {
 func (m *model) showProjectContext() {
 	m.items = nil
 	m.selected = 0
-	m.convItemID = ""
-	var title, content string
+	m.listOffset = 0
+	m.projectEntries = nil
+	m.err = nil
+	if m.store == nil {
+		m.updateConv()
+		return
+	}
+	var content string
 	if m.projectPane == 1 {
-		title = "User-owned project instructions"
-		content, _ = m.store.ProjectInstructions()
+		content, m.err = m.store.ProjectInstructions()
+		m.projectEntries = []projectEntry{{
+			title:    "Current instructions",
+			meta:     "user-owned",
+			content:  content,
+			editable: true,
+		}}
 	} else {
-		title = "Agent-curated project brief"
-		content, _ = m.store.ProjectBrief()
+		content, m.err = m.store.ProjectBrief()
+		m.projectEntries = []projectEntry{{
+			title:    "Current brief",
+			meta:     "agent-curated",
+			content:  content,
+			editable: true,
+		}}
+		if m.err == nil {
+			var history []store.ProjectBriefVersion
+			history, m.err = m.store.ProjectBriefHistory()
+			for _, version := range history {
+				m.projectEntries = append(m.projectEntries, projectEntry{
+					title:   "Version " + version.Created.Format("2006-01-02"),
+					meta:    "previous · " + version.Created.Format("15:04"),
+					content: version.Content,
+				})
+			}
+		}
 	}
-	if content == "" {
-		content = "(empty)"
-	}
-	m.conv.SetContent(wrapText(title+"\n\n"+content, m.conv.Width))
+	m.updateConv()
+}
+
+func (m *model) showSelectedProjectEntry() {
+	m.updateConv()
+	m.conv.GotoBottom()
+	m.newBelow = false
 }
 
 // ── view ─────────────────────────────────────────────────────────────────────
@@ -1459,7 +1530,7 @@ func (m model) renderHeader() string {
 		if n > 0 {
 			label = fmt.Sprintf("%s (%d)", label, n)
 		}
-		if v == m.view {
+		if m.projectPane == 0 && v == m.view {
 			tabs[i] = headerTabActiveStyle.Render(" [" + label + "] ")
 		} else {
 			tabs[i] = headerTabStyle.Render("  " + label + "  ")
@@ -1512,7 +1583,7 @@ func (m model) renderFooter() string {
 		text = "y quit and stop the running turn  any other key stay"
 	default:
 		if m.projectPane != 0 {
-			text = "tab switch document  e edit  1-3 view  q quit"
+			text = "j/k versions  tab switch document  e edit  1-3 view  q quit"
 			break
 		}
 		text = "q quit  j/k nav  a add  s status  S session  t turn  1-3 view  b backlog  pgup/pgdn scroll  r refresh"
@@ -1584,6 +1655,9 @@ func (m model) renderAgentInfo(itemID string) string {
 }
 
 func (m model) renderList(availH int) (content, scrollbar string) {
+	if m.projectPane != 0 {
+		return m.renderProjectList(availH)
+	}
 	marker := hiddenBacklogLabel(m.hiddenBacklog)
 	if len(m.items) == 0 && !m.draft {
 		// A view holding nothing but suppressed rows is not empty, and saying
@@ -1672,6 +1746,37 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 	return strings.Join(lines, "\n"), listScrollbar(availH, total, offset)
 }
 
+func (m model) renderProjectList(availH int) (content, scrollbar string) {
+	if len(m.projectEntries) == 0 {
+		return dimStyle.Render("(empty)"), listScrollbar(availH, 1, 0)
+	}
+	colW := m.listWidth() - 2
+	textW := colW - badgeW
+	rows := make([]string, len(m.projectEntries))
+	for i, entry := range m.projectEntries {
+		selected := i == m.selected
+		rowStyle := lipgloss.NewStyle().Width(colW)
+		metaStyle := lipgloss.NewStyle().Width(colW).Foreground(lipgloss.Color("245"))
+		if selected {
+			rowStyle = rowStyle.Background(selectedBg).Bold(true)
+			metaStyle = metaStyle.Background(selectedBg)
+		}
+		preview := truncateLines(wordWrap(entry.title, textW), previewMaxLines, textW)
+		parts := make([]string, 0, len(preview)+1)
+		for j, line := range preview {
+			prefix := "  "
+			if j == 0 {
+				prefix = "● "
+			}
+			parts = append(parts, rowStyle.Render(prefix+line))
+		}
+		parts = append(parts, metaStyle.Render("  "+entry.meta))
+		rows[i] = strings.Join(parts, "\n")
+	}
+	window, offset, total := windowListRows(rows, m.listOffset, m.selected, availH)
+	return strings.Join(window, "\n"), listScrollbar(availH, total, offset)
+}
+
 // listScrollbar guards renderScrollbar against a non-positive height, which
 // would otherwise ask strings.Repeat for a negative count.
 func listScrollbar(availH, total, offset int) string {
@@ -1750,6 +1855,13 @@ func windowListRows(rows []string, start, selected, availH int) (window []string
 // keep listOffset in sync on every keystroke without paying for lipgloss
 // styling each time.
 func (m model) listRowHeights() []int {
+	if m.projectPane != 0 {
+		heights := make([]int, len(m.projectEntries))
+		for i, entry := range m.projectEntries {
+			heights[i] = m.projectRowHeight(entry)
+		}
+		return heights
+	}
 	heights := make([]int, 0, len(m.items)+1)
 	for _, it := range m.items {
 		heights = append(heights, m.listRowHeight(it))
@@ -1758,6 +1870,12 @@ func (m model) listRowHeights() []int {
 		heights = append(heights, 2)
 	}
 	return heights
+}
+
+func (m model) projectRowHeight(entry projectEntry) int {
+	colW := m.listWidth() - 2
+	textW := colW - badgeW
+	return len(truncateLines(wordWrap(entry.title, textW), previewMaxLines, textW)) + 1
 }
 
 // listRowHeight is the number of screen rows a list item occupies. Keeping it
@@ -2003,6 +2121,10 @@ func (m *model) syncNewBelow() {
 }
 
 func (m *model) updateConv() {
+	if m.projectPane != 0 {
+		m.updateProjectConv()
+		return
+	}
 	if len(m.items) == 0 || m.selected >= len(m.items) {
 		if m.draft {
 			m.conv.SetContent(wrapText(
@@ -2064,6 +2186,30 @@ func (m *model) updateConv() {
 	m.convLive = len(live)
 
 	m.conv.SetContent(sb.String())
+}
+
+func (m *model) updateProjectConv() {
+	if len(m.projectEntries) == 0 || m.selected >= len(m.projectEntries) {
+		m.conv.SetContent("")
+		m.convTurns = 0
+		m.convLive = 0
+		m.convItemID = ""
+		return
+	}
+	entry := m.projectEntries[m.selected]
+	title := "User-owned project instructions"
+	if m.projectPane == 2 {
+		title = "Agent-curated project brief"
+	}
+	content := entry.content
+	if content == "" {
+		content = "(empty)"
+	}
+	m.conv.SetContent(wrapText(title+"\n\n"+entry.title+"\n"+entry.meta+"\n"+
+		strings.Repeat("─", clampRule(m.conv.Width, 40))+"\n\n"+content, m.conv.Width))
+	m.convTurns = 0
+	m.convLive = 0
+	m.convItemID = "project-" + strings.ToLower(strings.ReplaceAll(entry.title, " ", "-"))
 }
 
 // clampRule returns the rule width: the preferred length, or the pane width

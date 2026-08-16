@@ -10,7 +10,7 @@ import (
 func TestAgentOrientationIncludesExactReplyCommand(t *testing.T) {
 	command := "go run ./cmd/ostraka item turn <item-id> --actor agent --content-stdin"
 	got := AgentOrientation(command)
-	for _, want := range []string{command, "real multiline content", "ends this dispatch"} {
+	for _, want := range []string{command, "real multiline content", "ends this dispatch", "project brief replace --content-stdin", "complete replacement"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("orientation missing %q: %q", want, got)
 		}

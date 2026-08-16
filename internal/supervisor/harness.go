@@ -569,6 +569,13 @@ func parseAppServerEvent(message appServerMessage, result *TurnResult, onEvent f
 	case "thread/tokenUsage/updated":
 		var params struct {
 			TokenUsage struct {
+				// total is cumulative across the thread. last is the
+				// provider's current context-window measurement for the
+				// latest turn; using total here makes a long-lived thread
+				// appear to have exhausted its window after enough turns.
+				Last struct {
+					TotalTokens int64 `json:"totalTokens"`
+				} `json:"last"`
 				Total struct {
 					TotalTokens int64 `json:"totalTokens"`
 				} `json:"total"`
@@ -576,8 +583,17 @@ func parseAppServerEvent(message appServerMessage, result *TurnResult, onEvent f
 			} `json:"tokenUsage"`
 		}
 		if json.Unmarshal(message.Params, &params) == nil {
+			used := params.TokenUsage.Last.TotalTokens
+			// Older protocol versions may omit last. A cumulative value is
+			// safe as a compatibility fallback only when it fits in the
+			// advertised window; otherwise it would recreate the false 0%
+			// reading this field selection is meant to prevent.
+			if used == 0 && params.TokenUsage.Total.TotalTokens > 0 &&
+				(params.TokenUsage.ModelContextWindow <= 0 || params.TokenUsage.Total.TotalTokens <= params.TokenUsage.ModelContextWindow) {
+				used = params.TokenUsage.Total.TotalTokens
+			}
 			result.Context = ContextUsage{
-				UsedTokens:   params.TokenUsage.Total.TotalTokens,
+				UsedTokens:   used,
 				WindowTokens: params.TokenUsage.ModelContextWindow,
 			}
 		}

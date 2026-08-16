@@ -661,6 +661,78 @@ func TestProjectContextUsesTheThirdViewKey(t *testing.T) {
 	}
 }
 
+func TestProjectContextHasOneActiveTab(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.width = 120
+	m.view = archiveView
+	m.projectPane = 2
+
+	header := ansi.Strip(m.renderHeader())
+	if got := strings.Count(header, "["); got != 1 {
+		t.Fatalf("project context header has %d active tabs, want 1: %q", got, header)
+	}
+	if !strings.Contains(header, "[Project Context]") {
+		t.Fatalf("project context was not the active tab: %q", header)
+	}
+}
+
+func TestProjectBriefContextListsCurrentAndPreviousVersions(t *testing.T) {
+	st, err := store.NewStore(filepath.Join(t.TempDir(), ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceProjectBrief("first brief"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceProjectBrief("current brief"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(st, nil, nil)
+	m.projectPane = 2
+	m.conv.Width = 80
+	m.conv.Height = 20
+	m.showProjectContext()
+	if len(m.projectEntries) != 2 {
+		t.Fatalf("project entries = %d, want current plus one previous version", len(m.projectEntries))
+	}
+	if m.projectEntries[0].content != "current brief" || !m.projectEntries[0].editable {
+		t.Fatalf("current entry = %+v", m.projectEntries[0])
+	}
+	if m.projectEntries[1].content != "first brief" || m.projectEntries[1].editable {
+		t.Fatalf("history entry = %+v", m.projectEntries[1])
+	}
+
+	next, _ := m.handleNavKey(tea.KeyMsg{Type: tea.KeyDown})
+	got := next.(model)
+	if got.selected != 1 || !strings.Contains(got.conv.View(), "first brief") {
+		t.Fatalf("selecting history did not show it: selected=%d view=%q", got.selected, got.conv.View())
+	}
+}
+
+func TestProjectBriefHistoryIsReadOnly(t *testing.T) {
+	st, err := store.NewStore(filepath.Join(t.TempDir(), ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceProjectBrief("first brief"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceProjectBrief("current brief"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(st, nil, nil)
+	m.projectPane = 2
+	m.showProjectContext()
+	m.selected = 1
+	next, cmd := m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	got := next.(model)
+	if got.mode != modeNav || cmd != nil {
+		t.Fatalf("history entry opened editor: mode=%v cmd=%v", got.mode, cmd)
+	}
+}
+
 func TestProjectContextIgnoresQueuedItemReloads(t *testing.T) {
 	m := model{
 		view:        channelView(models.ChannelInbox),
