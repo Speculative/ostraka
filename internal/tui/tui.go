@@ -49,6 +49,21 @@ type modelsLoadedMsg struct {
 	err      error
 }
 
+// supervisorClient is the small part of the agent supervisor the TUI needs.
+// Keeping the UI against this seam lets the program-level teatest suite drive
+// real user flows without starting a provider process.
+type supervisorClient interface {
+	Enqueue(string)
+	Session(string) (supervisor.Provider, string, string, string, time.Time)
+	SessionIsStale(string) bool
+	LastTurnInfo(string) (supervisor.TurnInfo, bool)
+	PreferredModel(supervisor.Provider) string
+	PreferredEffort(supervisor.Provider) string
+	StartNewSession(string, supervisor.Provider, string, string) error
+	AvailableModels(context.Context, supervisor.Provider) ([]supervisor.ModelOption, error)
+	Busy() (string, bool)
+}
+
 // ── styles ───────────────────────────────────────────────────────────────────
 
 var (
@@ -184,7 +199,7 @@ const modelDiscoveryTimeout = 15 * time.Second
 
 // loadModelsCmd fetches provider's model list in a bubbletea goroutine, so
 // spawning Codex's app-server subprocess cannot freeze the UI.
-func loadModelsCmd(sup *supervisor.Supervisor, provider supervisor.Provider) tea.Cmd {
+func loadModelsCmd(sup supervisorClient, provider supervisor.Provider) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), modelDiscoveryTimeout)
 		defer cancel()
@@ -198,7 +213,7 @@ func loadModelsCmd(sup *supervisor.Supervisor, provider supervisor.Provider) tea
 type model struct {
 	store   *store.Store
 	watchCh <-chan struct{}
-	sup     *supervisor.Supervisor
+	sup     supervisorClient
 
 	view  listView
 	views []listView
@@ -327,7 +342,7 @@ func dispatchable(s models.Status) bool {
 	return false
 }
 
-func newModel(s *store.Store, watchCh <-chan struct{}, sup *supervisor.Supervisor) model {
+func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) model {
 	ta := textarea.New()
 	ta.Placeholder = "Add turn… (ctrl+s to submit, esc to cancel)"
 	ta.ShowLineNumbers = false
