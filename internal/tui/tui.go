@@ -1138,19 +1138,11 @@ func (m model) renderFooter() string {
 		}
 	}
 
-	// Right-aligned scroll position, shown only when the conversation actually
-	// overflows — otherwise there is nothing to tell the reader.
-	var right string
-	if m.conv.TotalLineCount() > m.conv.Height {
-		switch {
-		case m.conv.AtTop():
-			right = "top "
-		case m.conv.AtBottom():
-			right = "bot "
-		default:
-			right = fmt.Sprintf("%3.0f%% ", m.conv.ScrollPercent()*100)
-		}
-	}
+	// Right-aligned agent/context info for the selected item: the model and
+	// remaining context % from its most recent turn. This is process-memory
+	// only (supervisor.TurnInfo) — it goes blank again after a restart, since
+	// there is no way to rederive it without running another turn.
+	right := m.renderAgentInfo(m.selectedID())
 
 	// The hint text grows with the keymap; drop it rather than overflow the row.
 	if len(text)+len(right) > m.width {
@@ -1160,6 +1152,26 @@ func (m model) renderFooter() string {
 		text += strings.Repeat(" ", pad)
 	}
 	return footerStyle.Render(text + right)
+}
+
+// renderAgentInfo formats the model and remaining context % from itemID's
+// most recent turn, or "" if none has run yet this process.
+func (m model) renderAgentInfo(itemID string) string {
+	if itemID == "" || m.sup == nil {
+		return ""
+	}
+	info, ok := m.sup.LastTurnInfo(itemID)
+	if !ok {
+		return ""
+	}
+	if info.Context.WindowTokens <= 0 {
+		return info.Model + " "
+	}
+	remaining := 100 - info.Context.UsedTokens*100/info.Context.WindowTokens
+	if remaining < 0 {
+		remaining = 0
+	}
+	return fmt.Sprintf("%s %d%% left ", info.Model, remaining)
 }
 
 func (m model) renderList() string {

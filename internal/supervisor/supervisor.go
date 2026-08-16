@@ -69,6 +69,9 @@ type Supervisor struct {
 	logger  *log.Logger
 	session sessionGuard
 
+	turnInfoMu sync.Mutex
+	turnInfo   map[string]TurnInfo
+
 	// A dispatch runs under this context, so Shutdown can end an agent turn
 	// that is still in flight. Without it the agent outlives the process that
 	// dispatched it, and how long it survives depends on when it next writes
@@ -136,6 +139,32 @@ func (s *Supervisor) Session(itemID string) (Provider, string, time.Time) {
 		return ProviderClaude, "", time.Time{}
 	}
 	return sf.Provider, sf.SessionID, sf.UpdatedAt
+}
+
+// TurnInfo is the model and context-window usage from an item's most recent
+// dispatch. It lives in process memory only, never on disk: it is only ever
+// a byproduct of a live turn, so a stale session cannot rederive it anyway.
+type TurnInfo struct {
+	Model   string
+	Context ContextUsage
+}
+
+// LastTurnInfo returns itemID's most recent TurnInfo, if a turn has run for
+// it since this process started.
+func (s *Supervisor) LastTurnInfo(itemID string) (TurnInfo, bool) {
+	s.turnInfoMu.Lock()
+	defer s.turnInfoMu.Unlock()
+	info, ok := s.turnInfo[itemID]
+	return info, ok
+}
+
+func (s *Supervisor) setTurnInfo(itemID string, info TurnInfo) {
+	s.turnInfoMu.Lock()
+	defer s.turnInfoMu.Unlock()
+	if s.turnInfo == nil {
+		s.turnInfo = make(map[string]TurnInfo)
+	}
+	s.turnInfo[itemID] = info
 }
 
 // SessionIsStale reports whether a provider's documented cache-reuse window
@@ -336,6 +365,9 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 
 	prompt := nudgePrompt(msg.itemID, s.latestUserTurn(msg.itemID))
 	result, err := s.harnessFor(sf.Provider).RunTurn(s.runContext(), prompt, sf.SessionID, live.append)
+	if result.Model != "" {
+		s.setTurnInfo(msg.itemID, TurnInfo{Model: result.Model, Context: result.Context})
+	}
 	if err != nil {
 		s.logger.Printf("item %s: dispatch failed: %v", msg.itemID, err)
 		// Put it back in the queue's state so it doesn't sit forever showing
@@ -352,8 +384,9 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	// behind — hand it back rather than showing work that isn't happening.
 	s.revertAcknowledged(msg.itemID, models.StatusPendingUser)
 	s.persistSession(msg.itemID, sf, result.SessionID)
-	s.logger.Printf("item %s: dispatch complete (session=%s is_error=%v duration_ms=%d cost_usd=%.4f num_turns=%d)",
-		msg.itemID, result.SessionID, result.IsError, result.DurationMs, result.TotalCostUSD, result.NumTurns)
+	s.logger.Printf("item %s: dispatch complete (session=%s is_error=%v duration_ms=%d cost_usd=%.4f num_turns=%d model=%s context_used=%d context_window=%d)",
+		msg.itemID, result.SessionID, result.IsError, result.DurationMs, result.TotalCostUSD, result.NumTurns,
+		result.Model, result.Context.UsedTokens, result.Context.WindowTokens)
 }
 
 // persistSession advances the resume cursor, but only if the session it was
