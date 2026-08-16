@@ -1,8 +1,8 @@
 # ostraka
 
-TUI and file-backed `.notes/` protocol for coding agent sessions — structured
-inbox, asks, and handoff channels so multi-part decisions, test checklists,
-and cross-session pending items don't get lost in chat scroll.
+TUI and file-backed `.notes/` protocol for coding agent sessions — a structured
+inbox so multi-part work and cross-session pending items don't get lost in chat
+scroll.
 
 The TUI dispatches turns through Claude Code by default. Each item keeps its
 own provider session and resume cursor, so unrelated work never shares agent

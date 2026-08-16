@@ -25,7 +25,7 @@ func main() {
 
 var rootCmd = &cobra.Command{
 	Use:   "ostraka",
-	Short: "ostraka — structured inbox/asks/handoff for coding agent sessions",
+	Short: "ostraka — structured inbox for coding agent sessions",
 }
 
 func init() {
@@ -220,7 +220,7 @@ var addFlags struct {
 
 func addItemAddFlags() {
 	f := itemAddCmd.Flags()
-	f.StringVarP(&addFlags.channel, "channel", "c", "", "inbox|asks|handoff (required)")
+	f.StringVarP(&addFlags.channel, "channel", "c", "", "inbox (required)")
 	f.StringVar(&addFlags.title, "title", "", "single-line label for list views (required)")
 	f.StringVar(&addFlags.body, "body", "", "opening description, any length (required)")
 	f.StringVarP(&addFlags.itype, "type", "t", "thread", "thread|doc")

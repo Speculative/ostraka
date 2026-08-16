@@ -8,9 +8,7 @@ type Status string
 type Actor string
 
 const (
-	ChannelInbox   Channel = "inbox"
-	ChannelAsks    Channel = "asks"
-	ChannelHandoff Channel = "handoff"
+	ChannelInbox Channel = "inbox"
 )
 
 const (
@@ -36,7 +34,12 @@ const (
 	ActorAgent Actor = "agent"
 )
 
-var Channels = []Channel{ChannelInbox, ChannelAsks, ChannelHandoff}
+var Channels = []Channel{ChannelInbox}
+
+// ValidChannel reports whether channel is part of the supported item schema.
+func ValidChannel(channel Channel) bool {
+	return channel == ChannelInbox
+}
 
 var TerminalStatuses = map[Status]bool{
 	StatusDone:     true,

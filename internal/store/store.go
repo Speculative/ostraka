@@ -14,9 +14,7 @@ import (
 )
 
 var channelDirs = map[models.Channel]string{
-	models.ChannelInbox:   "INBOX",
-	models.ChannelAsks:    "ASKS",
-	models.ChannelHandoff: "HANDOFF",
+	models.ChannelInbox: "INBOX",
 }
 
 const archiveDir = "ARCHIVE"
@@ -28,6 +26,13 @@ type ListOpts struct {
 
 type Store struct {
 	Root string
+}
+
+func ValidateChannel(channel models.Channel) error {
+	if !models.ValidChannel(channel) {
+		return fmt.Errorf("unsupported channel %q (only inbox is supported)", channel)
+	}
+	return nil
 }
 
 func FindRoot(start string) (string, error) {
@@ -108,6 +113,11 @@ func (s *Store) itemPath(item models.Item) string {
 const listRetries = 2
 
 func (s *Store) ListItems(opts ListOpts) ([]models.Item, error) {
+	if opts.Channel != nil {
+		if err := ValidateChannel(*opts.Channel); err != nil {
+			return nil, err
+		}
+	}
 	for attempt := 0; ; attempt++ {
 		items, unstable, err := s.listOnce(opts)
 		if err != nil {
@@ -193,6 +203,9 @@ func (s *Store) GetItem(id string) (models.Item, error) {
 }
 
 func (s *Store) CreateItem(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent string) (models.Item, error) {
+	if err := ValidateChannel(channel); err != nil {
+		return models.Item{}, err
+	}
 	if err := ValidateTitle(title); err != nil {
 		return models.Item{}, err
 	}

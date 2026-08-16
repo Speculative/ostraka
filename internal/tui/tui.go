@@ -124,15 +124,11 @@ func startWatcher(root string) (<-chan struct{}, error) {
 		w.Close()
 		return nil, err
 	}
-	// Also watch all immediate subdirectories (INBOX, ASKS, HANDOFF, ARCHIVE).
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		w.Close()
-		return nil, err
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			w.Add(filepath.Join(root, e.Name()))
+	// Only watch the supported item locations. Legacy channel directories may
+	// remain on disk, but they are no longer part of the store schema or TUI.
+	for _, name := range []string{"INBOX", "ARCHIVE"} {
+		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+			w.Add(filepath.Join(root, name))
 		}
 	}
 
@@ -376,13 +372,10 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) mod
 		store:   s,
 		watchCh: watchCh,
 		sup:     sup,
-		// Opens on inbox: it is the channel with the work in it. Asks is where
-		// the agent puts questions, so it is empty until there is one.
+		// Opens on inbox: it is the channel with the work in it.
 		view: channelView(models.ChannelInbox),
 		views: []listView{
 			channelView(models.ChannelInbox),
-			channelView(models.ChannelAsks),
-			channelView(models.ChannelHandoff),
 			archiveView,
 		},
 		input: ta,
@@ -604,9 +597,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.projectPane != 0 {
 		switch msg.String() {
-		case "1", "2", "3", "4":
+		case "1", "2":
 			m.projectPane = 0
-		case "tab", "5":
+		case "3":
+			return m, nil
+		case "tab":
 			m.projectPane = 3 - m.projectPane
 			m.showProjectContext()
 			return m, nil
@@ -655,12 +650,8 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "1":
 		return m.switchView(channelView(models.ChannelInbox))
 	case "2":
-		return m.switchView(channelView(models.ChannelAsks))
-	case "3":
-		return m.switchView(channelView(models.ChannelHandoff))
-	case "4":
 		return m.switchView(archiveView)
-	case "5":
+	case "3":
 		m.projectPane = 1
 		m.showProjectContext()
 	case "b":
@@ -1507,17 +1498,17 @@ func (m model) renderFooter() string {
 		text = "y quit and stop the running turn  any other key stay"
 	default:
 		if m.projectPane != 0 {
-			text = "tab switch document  e edit  1-4 item views  q quit"
+			text = "tab switch document  e edit  1-3 view  q quit"
 			break
 		}
-		text = "q quit  j/k nav  a add  s status  S session  t turn  1-4 view  b backlog  pgup/pgdn scroll  r refresh"
+		text = "q quit  j/k nav  a add  s status  S session  t turn  1-3 view  b backlog  pgup/pgdn scroll  r refresh"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-			text = "q quit  j/k nav  a add  s status  S fresh context recommended  t turn  1-4 view  b backlog  pgup/pgdn scroll  r refresh"
+			text = "q quit  j/k nav  a add  s status  S fresh context recommended  t turn  1-3 view  b backlog  pgup/pgdn scroll  r refresh"
 		}
 		if m.showBacklog {
-			text = "q quit  j/k nav  a add  s status  S session  t turn  1-4 view  b hide backlog  pgup/pgdn scroll  r refresh"
+			text = "q quit  j/k nav  a add  s status  S session  t turn  1-3 view  b hide backlog  pgup/pgdn scroll  r refresh"
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-				text = "q quit  j/k nav  a add  s status  S fresh context recommended  t turn  1-4 view  b hide backlog  pgup/pgdn scroll  r refresh"
+				text = "q quit  j/k nav  a add  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  pgup/pgdn scroll  r refresh"
 			}
 		}
 	}
@@ -2095,7 +2086,7 @@ func (m model) currentInputHeight() int {
 	return lines
 }
 
-// inputVisualLineCount asks textarea to populate its internal viewport, whose
+// inputVisualLineCount lets textarea populate its internal viewport, whose
 // content is already soft-wrapped at the input's current width. Counting raw
 // newlines here makes a long logical line look one row high until it contains
 // an explicit Enter, which leaves the composer scrolling instead of growing.

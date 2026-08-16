@@ -1,6 +1,8 @@
 package store_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,9 +19,41 @@ func newTestStore(t *testing.T) *store.Store {
 	return s
 }
 
+func TestOnlyInboxChannelIsSupported(t *testing.T) {
+	s := newTestStore(t)
+	if len(models.Channels) != 1 || models.Channels[0] != models.ChannelInbox {
+		t.Fatalf("supported channels = %v, want only inbox", models.Channels)
+	}
+	for _, channel := range []models.Channel{"asks", "handoff", "other"} {
+		if _, err := s.CreateItem(channel, "title", "body", models.TypeThread, models.StatusActive, ""); err == nil {
+			t.Errorf("CreateItem accepted unsupported channel %q", channel)
+		}
+	}
+	if _, err := s.CreateItem(models.ChannelInbox, "title", "body", models.TypeThread, models.StatusActive, ""); err != nil {
+		t.Fatalf("CreateItem rejected inbox: %v", err)
+	}
+}
+
+func TestNewStoreCreatesOnlySupportedItemDirectories(t *testing.T) {
+	root := t.TempDir()
+	if _, err := store.NewStore(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"INBOX", "ARCHIVE"} {
+		if info, err := os.Stat(filepath.Join(root, name)); err != nil || !info.IsDir() {
+			t.Errorf("supported directory %s missing", name)
+		}
+	}
+	for _, name := range []string{"ASKS", "HANDOFF"} {
+		if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
+			t.Errorf("unsupported directory %s was created", name)
+		}
+	}
+}
+
 func TestCreateAndGet(t *testing.T) {
 	s := newTestStore(t)
-	item, err := s.CreateItem(models.ChannelAsks, "hello", "hello", models.TypeThread, models.StatusActive, "")
+	item, err := s.CreateItem(models.ChannelInbox, "hello", "hello", models.TypeThread, models.StatusActive, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,24 +68,24 @@ func TestCreateAndGet(t *testing.T) {
 	if got.Body != "hello" {
 		t.Errorf("Body: got %q want %q", got.Body, "hello")
 	}
-	if got.Channel != models.ChannelAsks {
-		t.Errorf("Channel: got %q want %q", got.Channel, models.ChannelAsks)
+	if got.Channel != models.ChannelInbox {
+		t.Errorf("Channel: got %q want %q", got.Channel, models.ChannelInbox)
 	}
 }
 
 func TestListItems(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateItem(models.ChannelAsks, "ask 1", "ask 1", models.TypeThread, models.StatusActive, "")
-	s.CreateItem(models.ChannelAsks, "ask 2", "ask 2", models.TypeThread, models.StatusPendingUser, "")
+	s.CreateItem(models.ChannelInbox, "inbox 3", "inbox 3", models.TypeThread, models.StatusActive, "")
+	s.CreateItem(models.ChannelInbox, "inbox 2", "inbox 2", models.TypeThread, models.StatusPendingUser, "")
 	s.CreateItem(models.ChannelInbox, "inbox 1", "inbox 1", models.TypeThread, models.StatusActive, "")
 
-	ch := models.ChannelAsks
+	ch := models.ChannelInbox
 	items, err := s.ListItems(store.ListOpts{Channel: &ch})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 2 {
-		t.Errorf("want 2 asks, got %d", len(items))
+	if len(items) != 3 {
+		t.Errorf("want 3 inbox items, got %d", len(items))
 	}
 
 	st := models.StatusPendingUser
@@ -67,7 +101,7 @@ func TestListItems(t *testing.T) {
 func TestListSortedByCreated(t *testing.T) {
 	s := newTestStore(t)
 	for _, body := range []string{"first", "second", "third"} {
-		s.CreateItem(models.ChannelHandoff, body, body, models.TypeThread, models.StatusActive, "")
+		s.CreateItem(models.ChannelInbox, body, body, models.TypeThread, models.StatusActive, "")
 		time.Sleep(time.Millisecond) // ensure distinct timestamps
 	}
 	items, err := s.ListItems(store.ListOpts{})
@@ -84,7 +118,7 @@ func TestListSortedByCreated(t *testing.T) {
 
 func TestAddTurn(t *testing.T) {
 	s := newTestStore(t)
-	item, _ := s.CreateItem(models.ChannelAsks, "question", "question", models.TypeThread, models.StatusActive, "")
+	item, _ := s.CreateItem(models.ChannelInbox, "question", "question", models.TypeThread, models.StatusActive, "")
 
 	updated, err := s.AddTurn(item.ID, models.ActorAgent, "my answer")
 	if err != nil {
@@ -106,7 +140,7 @@ func TestAddTurn(t *testing.T) {
 
 func TestSetStatus(t *testing.T) {
 	s := newTestStore(t)
-	item, _ := s.CreateItem(models.ChannelAsks, "q", "q", models.TypeThread, models.StatusActive, "")
+	item, _ := s.CreateItem(models.ChannelInbox, "q", "q", models.TypeThread, models.StatusActive, "")
 
 	_, err := s.SetStatus(item.ID, models.StatusPendingUser)
 	if err != nil {
@@ -121,7 +155,7 @@ func TestSetStatus(t *testing.T) {
 
 func TestSetStatusArchives(t *testing.T) {
 	s := newTestStore(t)
-	item, _ := s.CreateItem(models.ChannelAsks, "q", "q", models.TypeThread, models.StatusActive, "")
+	item, _ := s.CreateItem(models.ChannelInbox, "q", "q", models.TypeThread, models.StatusActive, "")
 
 	if _, err := s.SetStatus(item.ID, models.StatusDone); err != nil {
 		t.Fatal(err)
@@ -139,7 +173,7 @@ func TestSetStatusArchives(t *testing.T) {
 
 func TestDeleteItem(t *testing.T) {
 	s := newTestStore(t)
-	item, _ := s.CreateItem(models.ChannelAsks, "q", "q", models.TypeThread, models.StatusActive, "")
+	item, _ := s.CreateItem(models.ChannelInbox, "q", "q", models.TypeThread, models.StatusActive, "")
 
 	if err := s.DeleteItem(item.ID); err != nil {
 		t.Fatal(err)
@@ -159,8 +193,8 @@ func TestGetNotFound(t *testing.T) {
 func TestIDCollisionHandled(t *testing.T) {
 	s := newTestStore(t)
 	// Create two items rapidly; IDs should be unique
-	a, _ := s.CreateItem(models.ChannelAsks, "a", "a", models.TypeThread, models.StatusActive, "")
-	b, _ := s.CreateItem(models.ChannelAsks, "b", "b", models.TypeThread, models.StatusActive, "")
+	a, _ := s.CreateItem(models.ChannelInbox, "a", "a", models.TypeThread, models.StatusActive, "")
+	b, _ := s.CreateItem(models.ChannelInbox, "b", "b", models.TypeThread, models.StatusActive, "")
 	if a.ID == b.ID {
 		t.Errorf("ID collision: both got %q", a.ID)
 	}
@@ -191,7 +225,7 @@ func TestStatusAfterAgentTurn(t *testing.T) {
 
 func TestAddTurnHandsBackOnAgentTurn(t *testing.T) {
 	s := newTestStore(t)
-	item, _ := s.CreateItem(models.ChannelAsks, "q", "q", models.TypeThread, models.StatusPendingAgent, "")
+	item, _ := s.CreateItem(models.ChannelInbox, "q", "q", models.TypeThread, models.StatusPendingAgent, "")
 
 	got, err := s.AddTurn(item.ID, models.ActorAgent, "answered")
 	if err != nil {
@@ -215,7 +249,7 @@ func TestAddTurnLeavesUserTurnsAlone(t *testing.T) {
 	// User-turn status logic belongs to the caller: the TUI decides whether a
 	// turn dispatches, and a backlog item must stay quiet.
 	s := newTestStore(t)
-	item, _ := s.CreateItem(models.ChannelAsks, "q", "q", models.TypeThread, models.StatusBacklog, "")
+	item, _ := s.CreateItem(models.ChannelInbox, "q", "q", models.TypeThread, models.StatusBacklog, "")
 
 	got, err := s.AddTurn(item.ID, models.ActorUser, "note to self")
 	if err != nil {

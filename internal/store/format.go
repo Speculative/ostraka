@@ -86,6 +86,10 @@ func ParseItem(path string) (models.Item, error) {
 	if err := yaml.Unmarshal([]byte(yamlBlock), &fm); err != nil {
 		return models.Item{}, fmt.Errorf("bad frontmatter in %s: %w", path, err)
 	}
+	channel := models.Channel(fm.Channel)
+	if err := ValidateChannel(channel); err != nil {
+		return models.Item{}, fmt.Errorf("bad channel in %s: %w", path, err)
+	}
 
 	created, err := time.Parse(time.RFC3339Nano, fm.Created)
 	if err != nil {
@@ -138,7 +142,7 @@ func ParseItem(path string) (models.Item, error) {
 
 	return models.Item{
 		ID:      fm.ID,
-		Channel: models.Channel(fm.Channel),
+		Channel: channel,
 		Type:    itemType,
 		Status:  status,
 		Created: created,
@@ -150,6 +154,9 @@ func ParseItem(path string) (models.Item, error) {
 }
 
 func WriteItem(item models.Item, path string) error {
+	if err := ValidateChannel(item.Channel); err != nil {
+		return err
+	}
 	fm := frontmatter{
 		ID:      item.ID,
 		Channel: string(item.Channel),

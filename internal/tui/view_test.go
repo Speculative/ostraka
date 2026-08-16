@@ -40,8 +40,8 @@ func TestChannelViewExcludesTerminalItems(t *testing.T) {
 
 func TestChannelViewExcludesOtherChannels(t *testing.T) {
 	v := channelView(models.ChannelInbox)
-	if v.includes(item(models.ChannelAsks, models.StatusActive, t0), true) {
-		t.Error("an asks item appeared in the inbox view")
+	if v.includes(item(models.Channel("other"), models.StatusActive, t0), true) {
+		t.Error("an item from another channel appeared in the inbox view")
 	}
 }
 
@@ -70,14 +70,12 @@ func TestBacklogToggleDoesNotAffectLiveStatuses(t *testing.T) {
 	}
 }
 
-func TestArchiveViewTakesTerminalItemsFromEveryChannel(t *testing.T) {
-	for _, ch := range []models.Channel{models.ChannelInbox, models.ChannelAsks, models.ChannelHandoff} {
-		if !archiveView.includes(item(ch, models.StatusArchived, t0), false) {
-			t.Errorf("archived %s item missing from the archive", ch)
-		}
-		if archiveView.includes(item(ch, models.StatusActive, t0), true) {
-			t.Errorf("live %s item leaked into the archive", ch)
-		}
+func TestArchiveViewTakesTerminalItemsFromInbox(t *testing.T) {
+	if !archiveView.includes(item(models.ChannelInbox, models.StatusArchived, t0), false) {
+		t.Error("archived inbox item missing from the archive")
+	}
+	if archiveView.includes(item(models.ChannelInbox, models.StatusActive, t0), true) {
+		t.Error("live inbox item leaked into the archive")
 	}
 }
 
@@ -146,7 +144,7 @@ func TestUnknownStatusSortsLast(t *testing.T) {
 
 func TestPrepareFiltersAndSortsTogether(t *testing.T) {
 	all := []models.Item{
-		item(models.ChannelAsks, models.StatusActive, t0),                              // wrong channel
+		item(models.Channel("other"), models.StatusActive, t0),                         // wrong channel
 		item(models.ChannelInbox, models.StatusArchived, t0),                           // terminal
 		item(models.ChannelInbox, models.StatusBacklog, t0),                            // hidden
 		item(models.ChannelInbox, models.StatusPendingUser, t0),                        // keep
@@ -170,9 +168,9 @@ func TestPrepareFiltersAndSortsTogether(t *testing.T) {
 
 func TestPrepareCountsOnlyBacklogAsHidden(t *testing.T) {
 	all := []models.Item{
-		item(models.ChannelAsks, models.StatusBacklog, t0),   // other channel
-		item(models.ChannelInbox, models.StatusArchived, t0), // terminal
-		item(models.ChannelInbox, models.StatusBacklog, t0),  // the only one
+		item(models.Channel("other"), models.StatusBacklog, t0), // other channel
+		item(models.ChannelInbox, models.StatusArchived, t0),    // terminal
+		item(models.ChannelInbox, models.StatusBacklog, t0),     // the only one
 	}
 	if _, hidden := channelView(models.ChannelInbox).prepare(all, false); hidden != 1 {
 		t.Errorf("hidden = %d, want 1", hidden)
@@ -283,8 +281,6 @@ func TestViewLabels(t *testing.T) {
 		want string
 	}{
 		{channelView(models.ChannelInbox), "Inbox"},
-		{channelView(models.ChannelAsks), "Asks"},
-		{channelView(models.ChannelHandoff), "Handoff"},
 		{archiveView, "Archive"},
 	} {
 		if got := tc.view.label(); got != tc.want {
@@ -625,6 +621,43 @@ func TestNewModelUsesALegibleDraftPlaceholder(t *testing.T) {
 	}
 	if m.input.KeyMap.Paste.Enabled() || m.title.KeyMap.Paste.Enabled() {
 		t.Error("host clipboard shortcut must be disabled; terminal bracketed paste is supported instead")
+	}
+}
+
+func TestFooterUsesThreeViewKeyRange(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.width = 200
+	got := m.renderFooter()
+	if !strings.Contains(got, "1-3 view") {
+		t.Errorf("footer does not advertise the three-view key range: %q", got)
+	}
+	if strings.Contains(got, "1-4") {
+		t.Errorf("footer still advertises the removed fourth view: %q", got)
+	}
+}
+
+func TestProjectContextUsesTheThirdViewKey(t *testing.T) {
+	st, err := store.NewStore(filepath.Join(t.TempDir(), ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(st, nil, nil)
+	m.conv.Width = 80
+
+	next, _ := m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	got := next.(model)
+	if got.projectPane != 1 {
+		t.Fatalf("key 3 opened project pane %d, want 1", got.projectPane)
+	}
+
+	next, _ = got.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	if next.(model).projectPane != 1 {
+		t.Error("key 3 left the project context while it was selected")
+	}
+
+	next, _ = got.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
+	if next.(model).projectPane != 1 {
+		t.Error("removed key 5 still changed the project context")
 	}
 }
 

@@ -9,10 +9,8 @@ import (
 	"ostraka/internal/models"
 )
 
-// listView is what the item list is showing. The three channels are one kind
-// of view; the archive is another. Archive is a lifecycle state rather than a
-// channel, so it spans all three — an archived ask and an archived inbox item
-// end up in the same place, which is the point of retiring them.
+// listView is what the item list is showing. The inbox is one kind of view;
+// the archive is another. Archive is a lifecycle state rather than a channel.
 type listView struct {
 	channel models.Channel
 	archive bool

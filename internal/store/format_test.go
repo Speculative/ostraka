@@ -26,7 +26,7 @@ func TestParseRoundTrip(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	item := models.Item{
 		ID:      "20240101-120000",
-		Channel: models.ChannelAsks,
+		Channel: models.ChannelInbox,
 		Type:    models.TypeThread,
 		Status:  models.StatusActive,
 		Created: now,
@@ -101,7 +101,7 @@ func TestParseWithParent(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	item := models.Item{
 		ID:      "20240101-120001",
-		Channel: models.ChannelAsks,
+		Channel: models.ChannelInbox,
 		Type:    models.TypeThread,
 		Status:  models.StatusActive,
 		Created: now,
@@ -123,11 +123,26 @@ func TestParseWithParent(t *testing.T) {
 	}
 }
 
+func TestParseRejectsUnsupportedChannel(t *testing.T) {
+	path := writeTemp(t, `---
+id: 20240101-120000
+channel: asks
+type: thread
+status: active
+created: 2024-01-01T12:00:00Z
+---
+old ask
+`)
+	if _, err := store.ParseItem(path); err == nil {
+		t.Fatal("ParseItem accepted an unsupported channel")
+	}
+}
+
 func TestParseMultilineTurnContent(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	item := models.Item{
 		ID:      "20240101-120000",
-		Channel: models.ChannelHandoff,
+		Channel: models.ChannelInbox,
 		Type:    models.TypeThread,
 		Status:  models.StatusActive,
 		Created: now,
