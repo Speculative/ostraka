@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ostraka/internal/models"
+	"ostraka/internal/prompt"
 	"ostraka/internal/store"
 )
 
@@ -432,11 +433,15 @@ func TestNudgePromptIncludesLatestUserTurn(t *testing.T) {
 }
 
 func TestBootstrapPromptIncludesItemAndExactReplyCommand(t *testing.T) {
-	got := bootstrapPrompt("item-1", "instructions", "brief", "full item context", "ostraka item turn item-1 --actor agent --content-stdin")
+	command := "ostraka item turn item-1 --actor agent --content-stdin"
+	got := bootstrapPrompt("item-1", "instructions", "brief", "full item context", command)
 	for _, want := range []string{"full item context", "instructions", "brief", "ostraka item turn item-1 --actor agent --content-stdin", "final Ostraka item reply"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("bootstrap prompt missing %q: %q", want, got)
 		}
+	}
+	if !strings.Contains(got, prompt.AgentOrientation(command)) {
+		t.Errorf("bootstrap prompt does not contain shared orientation: %q", got)
 	}
 }
 

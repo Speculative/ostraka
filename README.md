@@ -12,8 +12,6 @@ after one hour, which is Claude Code's documented cache TTL. Codex's App
 Server uses the GPT-5.6 30-minute cache-reuse window. Both are recommendations:
 providers may retain cache entries longer.
 
-## Agent skill
-
-The portable Ostraka Agent Skill is exported at `.agents/skills/ostraka/`.
-Consumers can copy or symlink that directory into their agent's skill discovery
-location; Ostraka does not install or maintain agent-specific copies.
+Run `ostraka preamble` when an agent needs the static orientation and final
+reply guidance. Normal dispatched sessions receive the same guidance directly
+in their initial prompt.

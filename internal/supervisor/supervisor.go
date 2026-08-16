@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ostraka/internal/models"
+	agentprompt "ostraka/internal/prompt"
 	"ostraka/internal/store"
 )
 
@@ -35,9 +36,6 @@ const bootstrapItemContextMaxChars = 24000
 func bootstrapPrompt(itemID, instructions, brief, itemContext, replyCmd string) string {
 	return fmt.Sprintf(`You are starting a new agent session for Ostraka item %s.
 
-Use your normal harness turns and tools while working. The complete item context is below. Work and validate normally. When finished, send one final Ostraka item reply using the exact command below. Do not send that reply as a progress acknowledgement: it hands the item back to the user and ends this dispatch. Pass real multiline content through stdin; never put literal \n text in the reply.
-
-Final reply command:
 %s
 
 --- user-owned project instructions ---
@@ -50,7 +48,7 @@ Final reply command:
 
 --- Ostraka item context ---
 %s
---- end Ostraka item context ---`, itemID, replyCmd, emptyContext(instructions), emptyContext(brief), itemContext)
+--- end Ostraka item context ---`, itemID, agentprompt.AgentOrientation(replyCmd), emptyContext(instructions), emptyContext(brief), itemContext)
 }
 
 func itemContext(item models.Item) string {
@@ -103,11 +101,7 @@ func trimRunes(s string, max int) string {
 }
 
 func replyCommand(root, itemID string) string {
-	projectRoot := filepath.Dir(root)
-	if _, err := os.Stat(filepath.Join(projectRoot, "cmd", "ostraka", "main.go")); err == nil {
-		return fmt.Sprintf("go run ./cmd/ostraka item turn %s --actor agent --content-stdin", itemID)
-	}
-	return fmt.Sprintf("ostraka item turn %s --actor agent --content-stdin", itemID)
+	return agentprompt.ReplyCommand(filepath.Dir(root), itemID)
 }
 
 func emptyContext(s string) string {

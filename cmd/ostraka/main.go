@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"ostraka/internal/models"
+	"ostraka/internal/prompt"
 	"ostraka/internal/store"
 	"ostraka/internal/tui"
 
@@ -27,7 +29,7 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd)
+	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd, preambleCmd)
 	itemCmd.AddCommand(itemAddCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRmCmd)
 	rootCmd.AddCommand(projectCmd)
 	projectCmd.AddCommand(projectInstructionsCmd, projectBriefCmd)
@@ -40,6 +42,29 @@ func init() {
 	addItemShowFlags()
 	addItemTurnFlags()
 	addItemRmFlags()
+}
+
+// ── ostraka preamble ────────────────────────────────────────────────────────
+
+var preambleCmd = &cobra.Command{
+	Use:   "preamble",
+	Short: "Print the static agent orientation and reply guidance",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		fmt.Println(prompt.AgentOrientation(prompt.ReplyCommand(preambleProjectRoot(), "<item-id>")))
+		return nil
+	},
+}
+
+func preambleProjectRoot() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	if root, err := store.FindRoot(cwd); err == nil {
+		return filepath.Dir(root)
+	}
+	return cwd
 }
 
 // ── ostraka project ──────────────────────────────────────────────────────────
