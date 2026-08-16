@@ -17,15 +17,31 @@ func sessionPath(root string) string {
 	return filepath.Join(supervisorDir(root), "session.json")
 }
 
+// Claude Code automatically uses a one-hour cache TTL on a subscription. It
+// falls back to five minutes while spending usage credits, which the harness
+// cannot observe, so this remains a recommendation rather than a guarantee.
+const claudeSubscriptionCacheTTL = time.Hour
+
+// GPT-5.6 caches remain eligible for reuse for 30 minutes after their last
+// write or reuse. OpenAI may retain a cache longer, so this too is only a
+// recommendation threshold.
+const codexCacheTTL = 30 * time.Minute
+
 type sessionFile struct {
 	Provider  Provider  `json:"provider"`
 	SessionID string    `json:"session_id"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// Provider names a harness supported by the supervisor. It is persisted with
-// the session because a session ID is meaningful only to the harness that
-// created it.
+// sessionsFile keeps each item in its own provider conversation. The old
+// flat form is deliberately not migrated into an arbitrary item: doing so
+// would preserve precisely the cross-item context sharing this replaces.
+type sessionsFile struct {
+	Sessions map[string]sessionFile `json:"sessions"`
+}
+
+// Provider names a harness supported by the supervisor. A session ID is
+// meaningful only to the provider that created it.
 type Provider string
 
 const (
@@ -35,48 +51,74 @@ const (
 
 func (p Provider) valid() bool { return p == ProviderClaude || p == ProviderCodex }
 
-// loadSessionID returns "" (no error) if no session has been persisted yet —
-// callers treat that as "start a fresh harness session". A malformed file is
-// returned as an error; callers should fall back to "" rather than treat it
-// as fatal, since losing session continuity is cheaper than getting stuck.
-func loadSession(root string) (sessionFile, error) {
+func loadSessions(root string) (sessionsFile, error) {
 	b, err := os.ReadFile(sessionPath(root))
 	if os.IsNotExist(err) {
-		return sessionFile{Provider: ProviderClaude}, nil
+		return sessionsFile{Sessions: make(map[string]sessionFile)}, nil
 	}
 	if err != nil {
-		return sessionFile{}, err
+		return sessionsFile{}, err
 	}
-	var sf sessionFile
+	var sf sessionsFile
 	if err := json.Unmarshal(b, &sf); err != nil {
-		return sessionFile{}, err
+		return sessionsFile{}, err
 	}
-	// Files written before provider support resumed Claude by default.
-	if sf.Provider == "" {
-		sf.Provider = ProviderClaude
+	if sf.Sessions == nil {
+		// This is a pre-per-item file. Do not resume it for a new item.
+		return sessionsFile{Sessions: make(map[string]sessionFile)}, nil
 	}
-	if !sf.Provider.valid() {
-		return sessionFile{}, fmt.Errorf("unknown provider %q", sf.Provider)
+	for itemID, session := range sf.Sessions {
+		if session.Provider == "" {
+			session.Provider = ProviderClaude
+			sf.Sessions[itemID] = session
+		}
+		if !session.Provider.valid() {
+			return sessionsFile{}, fmt.Errorf("item %s: unknown provider %q", itemID, session.Provider)
+		}
 	}
 	return sf, nil
 }
 
-func loadSessionID(root string) (string, error) {
-	sf, err := loadSession(root)
-	return sf.SessionID, err
+func loadItemSession(root, itemID string) (sessionFile, error) {
+	sessions, err := loadSessions(root)
+	if err != nil {
+		return sessionFile{}, err
+	}
+	session, ok := sessions.Sessions[itemID]
+	if !ok {
+		return sessionFile{Provider: ProviderClaude}, nil
+	}
+	return session, nil
 }
 
-func saveSession(root string, sf sessionFile) error {
-	sf.UpdatedAt = time.Now().UTC()
-	b, err := json.MarshalIndent(sf, "", "  ")
+func saveItemSession(root, itemID string, session sessionFile) error {
+	sessions, err := loadSessions(root)
+	if err != nil {
+		return err
+	}
+	if !session.Provider.valid() {
+		return fmt.Errorf("unknown provider %q", session.Provider)
+	}
+	session.UpdatedAt = time.Now().UTC()
+	sessions.Sessions[itemID] = session
+	b, err := json.MarshalIndent(sessions, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(sessionPath(root), b, 0644)
 }
 
-func saveSessionID(root, id string) error {
-	return saveSession(root, sessionFile{Provider: ProviderClaude, SessionID: id})
+func sessionIsStale(session sessionFile, now time.Time) bool {
+	var ttl time.Duration
+	switch session.Provider {
+	case ProviderClaude:
+		ttl = claudeSubscriptionCacheTTL
+	case ProviderCodex:
+		ttl = codexCacheTTL
+	default:
+		return false
+	}
+	return session.SessionID != "" && !session.UpdatedAt.IsZero() && now.Sub(session.UpdatedAt) >= ttl
 }
 
 // sessionGuard serializes session reads and writes within a supervisor. A new

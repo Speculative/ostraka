@@ -516,9 +516,11 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusIdx = statusIndex(m.items[m.selected].Status)
 		}
 	case "S":
-		m.mode = modeSession
-		provider, _ := m.sup.Session()
-		m.sessionIdx = sessionProviderIndex(provider)
+		if itemID := m.selectedID(); itemID != "" {
+			m.mode = modeSession
+			provider, _, _ := m.sup.Session(itemID)
+			m.sessionIdx = sessionProviderIndex(provider)
+		}
 	}
 	return m, nil
 }
@@ -662,7 +664,7 @@ func (m model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sessionIdx--
 		}
 	case "enter":
-		if err := m.sup.StartNewSession(sessionProviders[m.sessionIdx]); err != nil {
+		if err := m.sup.StartNewSession(m.selectedID(), sessionProviders[m.sessionIdx]); err != nil {
 			m.err = err
 		}
 		m.mode = modeNav
@@ -947,7 +949,8 @@ func (m model) renderConv() string {
 }
 
 func (m model) overlaySessionPopup(lines []string) []string {
-	current, id := m.sup.Session()
+	itemID := m.selectedID()
+	current, id, updated := m.sup.Session(itemID)
 	rows := make([]string, len(sessionProviders))
 	for i, provider := range sessionProviders {
 		marker, sty := "  ", lipgloss.NewStyle()
@@ -959,8 +962,18 @@ func (m model) overlaySessionPopup(lines []string) []string {
 	active := string(current)
 	if id == "" {
 		active += " (none)"
+	} else if m.sup.SessionIsStale(itemID) {
+		if current == supervisor.ProviderClaude {
+			active += " (over 1h old; fresh recommended)"
+		} else {
+			active += " (over 30m old; fresh recommended)"
+		}
+	} else if current == supervisor.ProviderCodex {
+		active += " (resumes this item; 30m cache window)"
+	} else if !updated.IsZero() {
+		active += " (resumes this item; 1h cache window)"
 	}
-	box := popupStyle.Render("agent session · current " + active + "\n" + strings.Join(rows, "\n"))
+	box := popupStyle.Render("agent session · this item " + active + "\n" + strings.Join(rows, "\n"))
 	return overlayBox(lines, box, m.conv.Width)
 }
 
@@ -1114,8 +1127,14 @@ func (m model) renderFooter() string {
 		text = "y quit and stop the running turn  any other key stay"
 	default:
 		text = "q quit  j/k nav  a add  s status  S session  t turn  1-4 view  b backlog  pgup/pgdn scroll  r refresh"
+		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
+			text = "q quit  j/k nav  a add  s status  S fresh context recommended  t turn  1-4 view  b backlog  pgup/pgdn scroll  r refresh"
+		}
 		if m.showBacklog {
 			text = "q quit  j/k nav  a add  s status  S session  t turn  1-4 view  b hide backlog  pgup/pgdn scroll  r refresh"
+			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
+				text = "q quit  j/k nav  a add  s status  S fresh context recommended  t turn  1-4 view  b hide backlog  pgup/pgdn scroll  r refresh"
+			}
 		}
 	}
 

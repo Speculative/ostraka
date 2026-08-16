@@ -3,9 +3,10 @@ package supervisor
 import (
 	"os"
 	"testing"
+	"time"
 )
 
-func TestSessionDefaultsLegacyFilesToClaude(t *testing.T) {
+func TestLegacySharedSessionIsNotReusedForAnItem(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(supervisorDir(root), 0755); err != nil {
 		t.Fatal(err)
@@ -13,28 +14,54 @@ func TestSessionDefaultsLegacyFilesToClaude(t *testing.T) {
 	if err := os.WriteFile(sessionPath(root), []byte(`{"session_id":"legacy"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	sf, err := loadSession(root)
+	sf, err := loadItemSession(root, "item-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sf.Provider != ProviderClaude || sf.SessionID != "legacy" {
-		t.Errorf("got %+v, want legacy Claude session", sf)
+	if sf.Provider != ProviderClaude || sf.SessionID != "" {
+		t.Errorf("got %+v, want a fresh Claude session", sf)
 	}
 }
 
-func TestSessionRoundTripsProvider(t *testing.T) {
+func TestSessionStaleness(t *testing.T) {
+	now := time.Now()
+	if !sessionIsStale(sessionFile{Provider: ProviderClaude, SessionID: "old", UpdatedAt: now.Add(-claudeSubscriptionCacheTTL)}, now) {
+		t.Error("session at the age threshold should be stale")
+	}
+	if sessionIsStale(sessionFile{Provider: ProviderClaude, SessionID: "recent", UpdatedAt: now.Add(-claudeSubscriptionCacheTTL + time.Second)}, now) {
+		t.Error("recent session should not be stale")
+	}
+	if sessionIsStale(sessionFile{Provider: ProviderClaude, UpdatedAt: now.Add(-2 * claudeSubscriptionCacheTTL)}, now) {
+		t.Error("empty session should not be stale")
+	}
+	if !sessionIsStale(sessionFile{Provider: ProviderCodex, SessionID: "old", UpdatedAt: now.Add(-codexCacheTTL)}, now) {
+		t.Error("Codex session at its cache threshold should be stale")
+	}
+	if sessionIsStale(sessionFile{Provider: ProviderCodex, SessionID: "recent", UpdatedAt: now.Add(-codexCacheTTL + time.Second)}, now) {
+		t.Error("recent Codex session should not be stale")
+	}
+}
+
+func TestItemSessionsRoundTripIndependently(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(supervisorDir(root), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveSession(root, sessionFile{Provider: ProviderCodex, SessionID: "thread-1"}); err != nil {
+	if err := saveItemSession(root, "item-1", sessionFile{Provider: ProviderCodex, SessionID: "thread-1"}); err != nil {
 		t.Fatal(err)
 	}
-	sf, err := loadSession(root)
+	if err := saveItemSession(root, "item-2", sessionFile{Provider: ProviderClaude, SessionID: "thread-2"}); err != nil {
+		t.Fatal(err)
+	}
+	sf, err := loadItemSession(root, "item-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sf.Provider != ProviderCodex || sf.SessionID != "thread-1" {
 		t.Errorf("got %+v", sf)
+	}
+	other, err := loadItemSession(root, "item-2")
+	if err != nil || other.Provider != ProviderClaude || other.SessionID != "thread-2" {
+		t.Errorf("got %+v, %v", other, err)
 	}
 }

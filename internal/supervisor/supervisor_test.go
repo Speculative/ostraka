@@ -56,31 +56,39 @@ func newTestSupervisor(t *testing.T, h Harness) *Supervisor {
 	}
 }
 
-func TestDispatchStartsFreshThenResumes(t *testing.T) {
+func TestDispatchStartsFreshThenResumesPerItem(t *testing.T) {
 	fh := &fakeHarness{}
 	s := newTestSupervisor(t, fh)
 
 	s.dispatch(enqueueMsg{itemID: "item-1"})
 	s.dispatch(enqueueMsg{itemID: "item-2"})
+	s.dispatch(enqueueMsg{itemID: "item-1"})
 
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	if len(fh.calls) != 2 {
-		t.Fatalf("expected 2 harness calls, got %d", len(fh.calls))
+	if len(fh.calls) != 3 {
+		t.Fatalf("expected 3 harness calls, got %d", len(fh.calls))
 	}
 	if fh.calls[0] != "" {
 		t.Errorf("first dispatch should start fresh (empty session), got %q", fh.calls[0])
 	}
-	if fh.calls[1] != "session-a" {
-		t.Errorf("second dispatch should resume the session persisted by the first, got %q", fh.calls[1])
+	if fh.calls[1] != "" {
+		t.Errorf("a different item should start fresh, got %q", fh.calls[1])
+	}
+	if fh.calls[2] != "session-a" {
+		t.Errorf("third dispatch should resume item-1's session, got %q", fh.calls[2])
 	}
 
-	got, err := loadSessionID(s.root)
+	got, err := loadItemSession(s.root, "item-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "session-b" {
-		t.Errorf("expected persisted session id session-b, got %q", got)
+	if got.SessionID != "session-c" {
+		t.Errorf("expected item-1 session id session-c, got %q", got.SessionID)
+	}
+	other, err := loadItemSession(s.root, "item-2")
+	if err != nil || other.SessionID != "session-b" {
+		t.Errorf("item-2 session = %+v, %v", other, err)
 	}
 }
 
@@ -360,7 +368,7 @@ func TestInterruptedTurnStillPersistsItsSession(t *testing.T) {
 	<-fh.running
 	s.Shutdown()
 
-	sf, err := loadSession(s.root)
+	sf, err := loadItemSession(s.root, "item-1")
 	if err != nil {
 		t.Fatalf("no session persisted after an interrupted turn: %v", err)
 	}

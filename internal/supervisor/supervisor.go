@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"ostraka/internal/models"
 	"ostraka/internal/store"
@@ -126,27 +127,35 @@ func (s *Supervisor) runContext() context.Context {
 	return s.ctx
 }
 
-// Session returns the provider and ID that the next queued turn will use.
-func (s *Supervisor) Session() (Provider, string) {
+// Session returns the provider, ID, and last activity time for itemID.
+func (s *Supervisor) Session(itemID string) (Provider, string, time.Time) {
 	s.session.mu.Lock()
 	defer s.session.mu.Unlock()
-	sf, err := loadSession(s.root)
+	sf, err := loadItemSession(s.root, itemID)
 	if err != nil {
-		return ProviderClaude, ""
+		return ProviderClaude, "", time.Time{}
 	}
-	return sf.Provider, sf.SessionID
+	return sf.Provider, sf.SessionID, sf.UpdatedAt
 }
 
-// StartNewSession switches harness and clears its resume cursor. It is safe to
-// call during a running turn: dispatch will not let the old turn overwrite the
+// SessionIsStale reports whether a provider's documented cache-reuse window
+// has elapsed for itemID. The TUI uses it to recommend a fresh context, but
+// leaves the decision to the user: providers may retain cache entries longer.
+func (s *Supervisor) SessionIsStale(itemID string) bool {
+	provider, id, updated := s.Session(itemID)
+	return sessionIsStale(sessionFile{Provider: provider, SessionID: id, UpdatedAt: updated}, time.Now())
+}
+
+// StartNewSession switches itemID to a fresh harness context. It is safe to
+// call during a running turn: dispatch will not let that old turn overwrite the
 // freshly selected session state when it finishes.
-func (s *Supervisor) StartNewSession(provider Provider) error {
+func (s *Supervisor) StartNewSession(itemID string, provider Provider) error {
 	if !provider.valid() {
 		return fmt.Errorf("unknown provider %q", provider)
 	}
 	s.session.mu.Lock()
 	defer s.session.mu.Unlock()
-	return saveSession(s.root, sessionFile{Provider: provider})
+	return saveItemSession(s.root, itemID, sessionFile{Provider: provider})
 }
 
 func (s *Supervisor) harnessFor(provider Provider) Harness {
@@ -299,7 +308,7 @@ func (s *Supervisor) revertAcknowledged(itemID string, to models.Status) {
 
 func (s *Supervisor) dispatch(msg enqueueMsg) {
 	s.session.mu.Lock()
-	sf, err := loadSession(s.root)
+	sf, err := loadItemSession(s.root, msg.itemID)
 	s.session.mu.Unlock()
 	if err != nil {
 		s.logger.Printf("item %s: failed to load session, starting fresh with Claude: %v", msg.itemID, err)
@@ -355,10 +364,10 @@ func (s *Supervisor) persistSession(itemID string, dispatched sessionFile, sessi
 		return
 	}
 	s.session.mu.Lock()
-	current, loadErr := loadSession(s.root)
+	current, loadErr := loadItemSession(s.root, itemID)
 	var saveErr error
 	if loadErr == nil && current == dispatched {
-		saveErr = saveSession(s.root, sessionFile{Provider: dispatched.Provider, SessionID: sessionID})
+		saveErr = saveItemSession(s.root, itemID, sessionFile{Provider: dispatched.Provider, SessionID: sessionID})
 	}
 	s.session.mu.Unlock()
 	if saveErr != nil {
