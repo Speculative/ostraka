@@ -29,11 +29,90 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd)
 	itemCmd.AddCommand(itemAddCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRmCmd)
+	rootCmd.AddCommand(projectCmd)
+	projectCmd.AddCommand(projectInstructionsCmd, projectBriefCmd)
+	projectInstructionsCmd.AddCommand(projectInstructionsShowCmd, projectInstructionsReplaceCmd)
+	projectBriefCmd.AddCommand(projectBriefShowCmd, projectBriefReplaceCmd, projectBriefHistoryCmd)
+	projectInstructionsReplaceCmd.Flags().Bool("content-stdin", false, "read complete replacement from standard input")
+	projectBriefReplaceCmd.Flags().Bool("content-stdin", false, "read complete replacement from standard input")
 	addItemAddFlags()
 	addItemListFlags()
 	addItemShowFlags()
 	addItemTurnFlags()
 	addItemRmFlags()
+}
+
+// ── ostraka project ──────────────────────────────────────────────────────────
+
+var projectCmd = &cobra.Command{Use: "project", Short: "Manage project context for new agent sessions"}
+var projectInstructionsCmd = &cobra.Command{Use: "instructions", Short: "User-owned project instructions"}
+var projectBriefCmd = &cobra.Command{Use: "brief", Short: "Agent-curated project brief"}
+
+func contentFromStdin(cmd *cobra.Command) (string, error) {
+	b, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return "", fmt.Errorf("content must not be blank")
+	}
+	return string(b), nil
+}
+
+var projectInstructionsShowCmd = &cobra.Command{
+	Use: "show", Short: "Show user-owned project instructions",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		content, err := mustStore().ProjectInstructions()
+		if err != nil {
+			return err
+		}
+		fmt.Println(content)
+		return nil
+	},
+}
+var projectInstructionsReplaceCmd = &cobra.Command{
+	Use: "replace --content-stdin", Short: "Replace user-owned instructions from stdin",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		content, err := contentFromStdin(cmd)
+		if err != nil {
+			return err
+		}
+		return mustStore().ReplaceProjectInstructions(content)
+	},
+}
+var projectBriefShowCmd = &cobra.Command{
+	Use: "show", Short: "Show the current agent-curated brief",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		content, err := mustStore().ProjectBrief()
+		if err != nil {
+			return err
+		}
+		fmt.Println(content)
+		return nil
+	},
+}
+var projectBriefReplaceCmd = &cobra.Command{
+	Use: "replace --content-stdin", Short: "Replace the complete brief from stdin (maximum 6000 characters)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		content, err := contentFromStdin(cmd)
+		if err != nil {
+			return err
+		}
+		return mustStore().ReplaceProjectBrief(content)
+	},
+}
+var projectBriefHistoryCmd = &cobra.Command{
+	Use: "history", Short: "List previous complete brief versions",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		versions, err := mustStore().ProjectBriefHistory()
+		if err != nil {
+			return err
+		}
+		for _, v := range versions {
+			fmt.Println(v.Name, v.Created.Format(time.RFC3339))
+		}
+		return nil
+	},
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

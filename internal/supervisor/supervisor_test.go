@@ -431,6 +431,26 @@ func TestNudgePromptIncludesLatestUserTurn(t *testing.T) {
 	}
 }
 
+func TestBootstrapPromptIncludesItemAndExactReplyCommand(t *testing.T) {
+	got := bootstrapPrompt("item-1", "instructions", "brief", "full item context", "ostraka item turn item-1 --actor agent --content-stdin")
+	for _, want := range []string{"full item context", "instructions", "brief", "ostraka item turn item-1 --actor agent --content-stdin", "final Ostraka item reply"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("bootstrap prompt missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestBoundedItemContextMarksOmission(t *testing.T) {
+	item := models.Item{ID: "item-1", Title: "title", Body: strings.Repeat("b", bootstrapItemContextMaxChars), Turns: []models.Turn{{Actor: models.ActorUser, Content: strings.Repeat("old", bootstrapItemContextMaxChars)}, {Actor: models.ActorUser, Content: "recent"}}}
+	got := boundedItemContext(item)
+	if !strings.Contains(got, "Context limit reached") {
+		t.Errorf("bounded context did not mark omission: %q", got)
+	}
+	if !strings.Contains(got, "recent") {
+		t.Errorf("bounded context lost newest reply: %q", got)
+	}
+}
+
 func TestNudgePromptFallsBackToShowingTheItem(t *testing.T) {
 	// The prompt must not send the agent hunting via a status query: dispatch
 	// marks the item agent-acknowledged, so a pending-agent search finds

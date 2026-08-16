@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,25 +14,107 @@ import (
 	"ostraka/internal/store"
 )
 
-// nudgePrompt includes the final user turn when one triggered the dispatch.
-// That lets the agent respond immediately instead of spending its first tool
-// call rereading the item. The item-show fallback still covers initial and
-// stale dispatches, where no final user turn is available.
+// nudgePrompt is deliberately short because the provider session already has
+// the bootstrap context. It carries only the event that woke the agent and the
+// invariant most likely to be violated by a continuation.
 func nudgePrompt(itemID, userTurn string) string {
 	if userTurn != "" {
 		return fmt.Sprintf(
-			"There is new activity in ostraka on item %s. "+
-				"The latest user turn is included below; respond to it directly.\n\n"+
+			"There is a new user turn on Ostraka item %s. Continue the item's work; do not post an acknowledgement before doing the requested work.\n\n"+
 				"--- latest user turn ---\n%s\n--- end latest user turn ---\n\n"+
-				"Respond via `ostraka item turn %s --actor agent \"<content>\"` per the ostraka protocol.",
-			itemID, userTurn, itemID)
+				"Post one substantive `ostraka item turn` only after work and validation are complete; it ends this dispatch. Use actual multiline content, never literal `\\n` text.",
+			itemID, userTurn)
 	}
 	return fmt.Sprintf(
-		"There is new activity in ostraka on item %s. "+
-			"Run `ostraka item show %s --json` to see it, "+
-			"then respond via `ostraka item turn %s --actor agent \"<content>\"` "+
-			"per the ostraka protocol.",
-		itemID, itemID, itemID)
+		"Resume Ostraka item %s. Read it with `ostraka item show %s --json`, carry out any outstanding request, and send one final Ostraka item reply only after work and validation are complete. That reply ends this dispatch.",
+		itemID, itemID)
+}
+
+const bootstrapItemContextMaxChars = 24000
+
+func bootstrapPrompt(itemID, instructions, brief, itemContext, replyCmd string) string {
+	return fmt.Sprintf(`You are starting a new agent session for Ostraka item %s.
+
+Use your normal harness turns and tools while working. The complete item context is below. Work and validate normally. When finished, send one final Ostraka item reply using the exact command below. Do not send that reply as a progress acknowledgement: it hands the item back to the user and ends this dispatch. Pass real multiline content through stdin; never put literal \n text in the reply.
+
+Final reply command:
+%s
+
+--- user-owned project instructions ---
+%s
+--- end user-owned project instructions ---
+
+--- agent-curated project brief ---
+%s
+--- end agent-curated project brief ---
+
+--- Ostraka item context ---
+%s
+--- end Ostraka item context ---`, itemID, replyCmd, emptyContext(instructions), emptyContext(brief), itemContext)
+}
+
+func itemContext(item models.Item) string {
+	var sb strings.Builder
+	sb.WriteString(item.Title + "\n")
+	sb.WriteString(fmt.Sprintf("channel: %s  type: %s  status: %s  created: %s\n\n", item.Channel, item.Type, item.Status, item.Created.Format(time.RFC3339)))
+	sb.WriteString(item.Body)
+	for _, turn := range item.Turns {
+		sb.WriteString(fmt.Sprintf("\n\n--- %s · %s ---\n%s", turn.Actor, turn.Timestamp.Format(time.RFC3339), turn.Content))
+	}
+	return sb.String()
+}
+
+func boundedItemContext(item models.Item) string {
+	full := itemContext(item)
+	if len([]rune(full)) <= bootstrapItemContextMaxChars {
+		return full
+	}
+	header := item.Title + "\n" + fmt.Sprintf("channel: %s  type: %s  status: %s\n\n", item.Channel, item.Type, item.Status)
+	body := trimRunes(item.Body, bootstrapItemContextMaxChars/2)
+	parts := []string{header + body}
+	used := len([]rune(parts[0]))
+	omitted := 0
+	for i := len(item.Turns) - 1; i >= 0; i-- {
+		turn := fmt.Sprintf("\n\n--- %s · %s ---\n%s", item.Turns[i].Actor, item.Turns[i].Timestamp.Format(time.RFC3339), item.Turns[i].Content)
+		if used+len([]rune(turn)) > bootstrapItemContextMaxChars {
+			omitted++
+			continue
+		}
+		parts = append(parts, turn)
+		used += len([]rune(turn))
+	}
+	// Newest turns were collected backwards; preserve chronological order after
+	// the opening body.
+	for i, j := 1, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	if omitted > 0 {
+		parts = append(parts, fmt.Sprintf("\n\n[Context limit reached: %d earlier reply/replies omitted. Retrieve them with `ostraka item show %s --json` if needed.]", omitted, item.ID))
+	}
+	return strings.Join(parts, "")
+}
+
+func trimRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "\n[opening body truncated]"
+}
+
+func replyCommand(root, itemID string) string {
+	projectRoot := filepath.Dir(root)
+	if _, err := os.Stat(filepath.Join(projectRoot, "cmd", "ostraka", "main.go")); err == nil {
+		return fmt.Sprintf("go run ./cmd/ostraka item turn %s --actor agent --content-stdin", itemID)
+	}
+	return fmt.Sprintf("ostraka item turn %s --actor agent --content-stdin", itemID)
+}
+
+func emptyContext(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }
 
 func (s *Supervisor) latestUserTurn(itemID string) string {
@@ -393,7 +477,20 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	s.setBusy(msg.itemID)
 	defer s.setBusy("")
 
-	prompt := nudgePrompt(msg.itemID, s.latestUserTurn(msg.itemID))
+	userTurn := s.latestUserTurn(msg.itemID)
+	prompt := nudgePrompt(msg.itemID, userTurn)
+	if sf.SessionID == "" {
+		instructions, brief := "", ""
+		context := fmt.Sprintf("Ostraka item %s could not be read.", msg.itemID)
+		if s.store != nil {
+			instructions, _ = s.store.ProjectInstructions()
+			brief, _ = s.store.ProjectBrief()
+			if item, err := s.store.GetItem(msg.itemID); err == nil {
+				context = boundedItemContext(item)
+			}
+		}
+		prompt = bootstrapPrompt(msg.itemID, instructions, brief, context, replyCommand(s.root, msg.itemID))
+	}
 	result, err := s.harnessFor(sf.Provider).RunTurn(s.runContext(), prompt, sf.SessionID, sf.Model, sf.Effort, live.append)
 	if result.Model != "" {
 		s.setTurnInfo(msg.itemID, TurnInfo{Model: result.Model, Context: result.Context})

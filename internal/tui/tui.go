@@ -254,6 +254,11 @@ type model struct {
 	// newBelow marks that a turn landed off-screen below the reader, who was
 	// scrolled up at the time and so was not auto-followed down to it.
 	newBelow bool
+	// projectPane is 0 for item views, 1 for user instructions, and 2 for the
+	// agent-curated brief. Project documents deliberately use the existing
+	// reader/editor rather than becoming synthetic conversation items.
+	projectPane    int
+	editingProject bool
 
 	width  int
 	height int
@@ -551,6 +556,30 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.projectPane != 0 {
+		switch msg.String() {
+		case "1", "2", "3", "4":
+			m.projectPane = 0
+		case "tab", "5":
+			m.projectPane = 3 - m.projectPane
+			m.showProjectContext()
+			return m, nil
+		case "e":
+			m.editingProject = true
+			m.mode = modeCompose
+			m.input.Reset()
+			if m.projectPane == 1 {
+				v, _ := m.store.ProjectInstructions()
+				m.input.SetValue(v)
+			} else {
+				v, _ := m.store.ProjectBrief()
+				m.input.SetValue(v)
+			}
+			m.input.CursorEnd()
+			m = m.recalcLayout()
+			return m, m.input.Focus()
+		}
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		// Quitting now kills the running turn rather than leaving it to die
@@ -585,6 +614,9 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.switchView(channelView(models.ChannelHandoff))
 	case "4":
 		return m.switchView(archiveView)
+	case "5":
+		m.projectPane = 1
+		m.showProjectContext()
 	case "b":
 		// Backlog is hidden by default, so this is also the only way back to an
 		// item parked there — it must stay reachable, not just tidy.
@@ -913,6 +945,24 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+s":
 		content := strings.TrimSpace(m.input.Value())
+		if m.editingProject {
+			var err error
+			if m.projectPane == 1 {
+				err = m.store.ReplaceProjectInstructions(content)
+			} else {
+				err = m.store.ReplaceProjectBrief(content)
+			}
+			if err != nil {
+				m.err = err
+				return m, nil
+			}
+			m.editingProject = false
+			m.mode = modeNav
+			m.input.Blur()
+			m = m.recalcLayout()
+			m.showProjectContext()
+			return m, nil
+		}
 		if m.draft {
 			// The body is mandatory, so an empty one leaves the draft open
 			// rather than writing a half-item.
@@ -949,6 +999,14 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.conv.GotoBottom()
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "esc":
+		if m.editingProject {
+			m.editingProject = false
+			m.mode = modeNav
+			m.input.Blur()
+			m = m.recalcLayout()
+			m.showProjectContext()
+			return m, nil
+		}
 		m.checkpointTurnDraft()
 		m.input.Blur()
 		if m.draft {
@@ -1042,11 +1100,30 @@ func (m *model) checkpointTurnDraft() {
 }
 
 func (m model) switchView(v listView) (model, tea.Cmd) {
+	m.projectPane = 0
 	m.view = v
 	m.selected = 0
 	m.items = nil
 	m.showSelected()
 	return m, loadItemsCmd(m.store, v, m.showBacklog)
+}
+
+func (m *model) showProjectContext() {
+	m.items = nil
+	m.selected = 0
+	m.convItemID = ""
+	var title, content string
+	if m.projectPane == 1 {
+		title = "User-owned project instructions"
+		content, _ = m.store.ProjectInstructions()
+	} else {
+		title = "Agent-curated project brief"
+		content, _ = m.store.ProjectBrief()
+	}
+	if content == "" {
+		content = "(empty)"
+	}
+	m.conv.SetContent(wrapText(title+"\n\n"+content, m.conv.Width))
 }
 
 // ── view ─────────────────────────────────────────────────────────────────────
@@ -1337,6 +1414,15 @@ func (m model) renderHeader() string {
 			tabs[i] = headerTabStyle.Render("  " + label + "  ")
 		}
 	}
+	project := "  Project Context  "
+	if m.projectPane != 0 {
+		project = " [Project Context] "
+	}
+	if m.projectPane != 0 {
+		tabs = append(tabs, headerTabActiveStyle.Render(project))
+	} else {
+		tabs = append(tabs, headerTabStyle.Render(project))
+	}
 	row := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
 	// Pad to full width with header background.
 	pad := m.width - lipgloss.Width(row)
@@ -1351,6 +1437,9 @@ func (m model) renderFooter() string {
 	switch m.mode {
 	case modeCompose:
 		text = "ctrl+s submit  esc cancel  pgup/pgdn scroll"
+		if m.editingProject {
+			text = "ctrl+s save project document  esc cancel"
+		}
 		if m.draft {
 			text = "ctrl+s create item  esc discard draft"
 		} else if m.selected < len(m.items) && !dispatchable(m.items[m.selected].Status) {
@@ -1371,6 +1460,10 @@ func (m model) renderFooter() string {
 	case modeQuit:
 		text = "y quit and stop the running turn  any other key stay"
 	default:
+		if m.projectPane != 0 {
+			text = "tab switch document  e edit  1-4 item views  q quit"
+			break
+		}
 		text = "q quit  j/k nav  a add  s status  S session  t turn  1-4 view  b backlog  pgup/pgdn scroll  r refresh"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
 			text = "q quit  j/k nav  a add  s status  S fresh context recommended  t turn  1-4 view  b backlog  pgup/pgdn scroll  r refresh"
