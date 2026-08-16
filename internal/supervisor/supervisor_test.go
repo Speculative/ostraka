@@ -28,6 +28,7 @@ type fakeHarness struct {
 	efforts  []string // effort seen per call, in order
 	prompts  []string // prompts seen per call, in order
 	sessions []string // sessionID to return per call, in order
+	result   TurnResult
 	err      error
 }
 
@@ -46,7 +47,14 @@ func (f *fakeHarness) RunTurn(_ context.Context, prompt string, sessionID string
 	if idx < len(f.sessions) {
 		newSession = f.sessions[idx]
 	}
-	return TurnResult{SessionID: newSession, ResultText: "ok"}, nil
+	result := f.result
+	if result.SessionID == "" {
+		result.SessionID = newSession
+	}
+	if result.ResultText == "" {
+		result.ResultText = "ok"
+	}
+	return result, nil
 }
 
 func newTestSupervisor(t *testing.T, h Harness) *Supervisor {
@@ -132,6 +140,27 @@ func TestStartNewSessionModelIsForwardedOnTheFreshDispatchAndCarriesForward(t *t
 	_, model, effort, _, _ := s.Session("item-1")
 	if model != "opus" || effort != "high" {
 		t.Errorf("Session selection = (%q, %q), want (opus, high)", model, effort)
+	}
+}
+
+func TestDispatchCachesUsageWhenProviderOmitsResolvedModel(t *testing.T) {
+	fh := &fakeHarness{result: TurnResult{Context: ContextUsage{UsedTokens: 20, WindowTokens: 100}}}
+	s := newTestSupervisor(t, fh)
+	if err := s.StartNewSession("item-1", ProviderClaude, "gpt-5.6-sol", "xhigh"); err != nil {
+		t.Fatal(err)
+	}
+
+	s.dispatch(enqueueMsg{itemID: "item-1"})
+
+	info, ok := s.LastTurnInfo("item-1")
+	if !ok {
+		t.Fatal("usage was not cached when the provider omitted its model")
+	}
+	if info.Model != "gpt-5.6-sol" {
+		t.Errorf("cached model = %q, want selected session model", info.Model)
+	}
+	if info.Context != (ContextUsage{UsedTokens: 20, WindowTokens: 100}) {
+		t.Errorf("cached context = %+v", info.Context)
 	}
 }
 

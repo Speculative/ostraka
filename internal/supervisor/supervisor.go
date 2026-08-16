@@ -486,8 +486,16 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		prompt = bootstrapPrompt(msg.itemID, instructions, brief, context, replyCommand(s.root, msg.itemID))
 	}
 	result, err := s.harnessFor(sf.Provider).RunTurn(s.runContext(), prompt, sf.SessionID, sf.Model, sf.Effort, live.append)
-	if result.Model != "" {
-		s.setTurnInfo(msg.itemID, TurnInfo{Model: result.Model, Context: result.Context})
+	if result.Model != "" || result.Context.UsedTokens > 0 || result.Context.WindowTokens > 0 {
+		model := result.Model
+		// Codex's usage notification does not include the resolved model. The
+		// selected session model is still the best label available for the
+		// footer, and usage should not disappear just because that label is
+		// absent from the provider result.
+		if model == "" {
+			model = sf.Model
+		}
+		s.setTurnInfo(msg.itemID, TurnInfo{Model: model, Context: result.Context})
 	}
 	if err != nil {
 		s.logger.Printf("item %s: dispatch failed: %v", msg.itemID, err)

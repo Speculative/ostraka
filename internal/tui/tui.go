@@ -1541,17 +1541,29 @@ func (m model) renderAgentInfo(itemID string) string {
 	if itemID == "" || m.sup == nil {
 		return ""
 	}
+	_, sessionModel, effort, _, _ := m.sup.Session(itemID)
 	if info, ok := m.sup.LastTurnInfo(itemID); ok {
+		model := info.Model
+		if model == "" {
+			model = sessionModel
+		}
+		agent := strings.TrimSpace(model + " " + effort)
 		if info.Context.WindowTokens <= 0 {
-			return info.Model + " "
+			if agent == "" {
+				return ""
+			}
+			return agent + " "
 		}
 		remaining := 100 - info.Context.UsedTokens*100/info.Context.WindowTokens
 		if remaining < 0 {
 			remaining = 0
 		}
-		return fmt.Sprintf("%s %d%% left ", info.Model, remaining)
+		if agent == "" {
+			return fmt.Sprintf("%d%% left ", remaining)
+		}
+		return fmt.Sprintf("%s %d%% left ", agent, remaining)
 	}
-	if _, sessionModel, effort, _, _ := m.sup.Session(itemID); sessionModel != "" {
+	if sessionModel != "" {
 		return strings.TrimSpace(sessionModel+" "+effort) + " "
 	}
 	return ""

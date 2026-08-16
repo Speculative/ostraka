@@ -1,14 +1,48 @@
 package tui
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"ostraka/internal/models"
 	"ostraka/internal/supervisor"
 )
+
+type agentInfoSupervisor struct {
+	info    supervisor.TurnInfo
+	hasInfo bool
+	model   string
+	effort  string
+}
+
+func (*agentInfoSupervisor) Enqueue(string) {}
+
+func (s *agentInfoSupervisor) Session(string) (supervisor.Provider, string, string, string, time.Time) {
+	return supervisor.ProviderClaude, s.model, s.effort, "", time.Time{}
+}
+
+func (*agentInfoSupervisor) SessionIsStale(string) bool { return false }
+
+func (s *agentInfoSupervisor) LastTurnInfo(string) (supervisor.TurnInfo, bool) {
+	return s.info, s.hasInfo
+}
+
+func (*agentInfoSupervisor) PreferredModel(supervisor.Provider) string  { return "" }
+func (*agentInfoSupervisor) PreferredEffort(supervisor.Provider) string { return "" }
+
+func (*agentInfoSupervisor) StartNewSession(string, supervisor.Provider, string, string) error {
+	return nil
+}
+
+func (*agentInfoSupervisor) AvailableModels(context.Context, supervisor.Provider) ([]supervisor.ModelOption, error) {
+	return nil, nil
+}
+
+func (*agentInfoSupervisor) Busy() (string, bool) { return "", false }
 
 func TestSessionKeyEnterAdvancesToModelStepAndTriggersLoad(t *testing.T) {
 	m := newModel(nil, nil, nil)
@@ -203,6 +237,20 @@ func TestRenderAgentInfoShowsTheChosenModelBeforeTheFirstTurn(t *testing.T) {
 	got := m.renderAgentInfo("item-1")
 	if got != "opus high " {
 		t.Errorf("renderAgentInfo = %q, want %q", got, "opus high ")
+	}
+}
+
+func TestRenderAgentInfoKeepsContextPercentWithEffortAfterATurn(t *testing.T) {
+	sup := &agentInfoSupervisor{
+		info:    supervisor.TurnInfo{Model: "claude-sonnet-5", Context: supervisor.ContextUsage{UsedTokens: 20, WindowTokens: 100}},
+		hasInfo: true,
+		model:   "opus",
+		effort:  "high",
+	}
+	m := newModel(nil, nil, sup)
+
+	if got := m.renderAgentInfo("item-1"); got != "claude-sonnet-5 high 80% left " {
+		t.Errorf("renderAgentInfo = %q, want model, effort, and remaining context", got)
 	}
 }
 
