@@ -10,6 +10,7 @@ require (
 	github.com/charmbracelet/x/exp/teatest v0.0.0-20260816001655-68d539dca504
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/hinshun/vt10x v0.0.0-20220301184237-5011da428d02
+	github.com/muesli/termenv v0.16.0
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -33,7 +34,6 @@ require (
 	github.com/mattn/go-runewidth v0.0.19 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
-	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
