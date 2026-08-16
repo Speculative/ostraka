@@ -35,16 +35,40 @@ type ContextUsage struct {
 	WindowTokens int64
 }
 
+// ModelOption is one model selectable for a fresh session, as reported by a
+// provider's own discovery source. A provider with no discovery source
+// returns a single option representing its configured/default model instead
+// of an invented catalog.
+type ModelOption struct {
+	// ID is passed verbatim to the harness's model flag. Empty means "pass no
+	// flag" — the harness's own default for a fresh session.
+	ID          string
+	DisplayName string
+	// ContextWindow is the model's context window in tokens, or 0 when the
+	// discovery source does not report one.
+	ContextWindow int64
+	// Default marks the provider's current default selection.
+	Default bool
+}
+
 // Harness abstracts a coding-agent CLI harness (claude, future codex).
 type Harness interface {
 	// RunTurn sends prompt to the harness. If sessionID is "", starts a
 	// fresh session; otherwise resumes it. The returned TurnResult always
 	// carries the harness's session id (new or resumed) when err is nil.
 	//
+	// model selects the model for a fresh session (sessionID == ""); it is
+	// ignored when resuming, since a resumed session keeps whatever model it
+	// already started with. "" means the harness's own default.
+	//
 	// onEvent, when non-nil, is called with one display line per event as
 	// the turn runs — the caller uses it to show live progress. It is called
 	// from RunTurn's goroutine, never concurrently.
-	RunTurn(ctx context.Context, prompt, sessionID string, onEvent func(string)) (TurnResult, error)
+	RunTurn(ctx context.Context, prompt, sessionID, model string, onEvent func(string)) (TurnResult, error)
+
+	// AvailableModels lists the models selectable for a fresh session. It
+	// always returns at least one option.
+	AvailableModels(ctx context.Context) ([]ModelOption, error)
 }
 
 // claudeHarness drives the Claude Code CLI in headless mode.
@@ -60,6 +84,26 @@ func newCodexHarness() *codexHarness { return &codexHarness{bin: "codex"} }
 
 func newClaudeHarness() *claudeHarness {
 	return &claudeHarness{bin: "claude"}
+}
+
+// claudeModelAliases are Claude Code's documented --model aliases (see
+// `claude --help`), the same set the interactive /model picker offers.
+// There is no discovery RPC: no `claude model` subcommand exists, and no
+// stream-json event lists selectable models. This static list is the best
+// available source rather than an invented catalog — it is what the CLI
+// itself documents. An alias an account cannot use (e.g. a tier without
+// usage credits for a given model) surfaces as a normal turn error, the same
+// as it would interactively.
+var claudeModelAliases = []ModelOption{
+	{ID: "", DisplayName: "Default", Default: true},
+	{ID: "opus", DisplayName: "Opus"},
+	{ID: "sonnet", DisplayName: "Sonnet"},
+	{ID: "haiku", DisplayName: "Haiku"},
+	{ID: "fable", DisplayName: "Fable"},
+}
+
+func (h *claudeHarness) AvailableModels(ctx context.Context) ([]ModelOption, error) {
+	return claudeModelAliases, nil
 }
 
 type claudeJSONResult struct {
@@ -112,7 +156,7 @@ type contentBlock struct {
 	IsError bool            `json:"is_error"`
 }
 
-func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID string, onEvent func(string)) (TurnResult, error) {
+func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID, model string, onEvent func(string)) (TurnResult, error) {
 	// stream-json (with --verbose, which it requires) emits one JSON object
 	// per line as the turn runs, rather than a single blob at the end — that
 	// is what makes a live progress view possible. --brief additionally gives
@@ -126,6 +170,10 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID string, o
 	}
 	if sessionID != "" {
 		args = append(args, "--resume", sessionID)
+	} else if model != "" {
+		// A resumed session keeps whatever model it already started with —
+		// the flag only makes sense on a fresh launch.
+		args = append(args, "--model", model)
 	}
 
 	cmd := exec.CommandContext(ctx, h.bin, args...)
@@ -211,8 +259,8 @@ func applyClaudeResultTelemetry(result *TurnResult, raw claudeJSONResult) {
 	}
 }
 
-func (h *codexHarness) RunTurn(ctx context.Context, prompt, sessionID string, onEvent func(string)) (TurnResult, error) {
-	return h.runAppServer(ctx, prompt, sessionID, onEvent)
+func (h *codexHarness) RunTurn(ctx context.Context, prompt, sessionID, model string, onEvent func(string)) (TurnResult, error) {
+	return h.runAppServer(ctx, prompt, sessionID, model, onEvent)
 }
 
 // appServerMessage is deliberately a small envelope. The App Server schema is
@@ -227,74 +275,103 @@ type appServerMessage struct {
 	} `json:"error"`
 }
 
-func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID string, onEvent func(string)) (result TurnResult, err error) {
-	cmd := exec.CommandContext(ctx, h.bin, "app-server", "--stdio")
+// appServerConn is one JSON-RPC connection to `codex app-server --stdio`.
+// RunTurn and AvailableModels each open their own — the protocol has no
+// standing session independent of a thread, so there is nothing to gain by
+// sharing a process across calls, and a short-lived one keeps discovery from
+// needing to coordinate with an in-flight turn.
+type appServerConn struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	reader *bufio.Reader
+	stderr *bytes.Buffer
+}
+
+func startAppServerConn(ctx context.Context, bin string) (*appServerConn, error) {
+	cmd := exec.CommandContext(ctx, bin, "app-server", "--stdio")
 	detachProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return result, fmt.Errorf("codex app-server: stdin pipe: %w", err)
+		return nil, fmt.Errorf("codex app-server: stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return result, fmt.Errorf("codex app-server: stdout pipe: %w", err)
+		return nil, fmt.Errorf("codex app-server: stdout pipe: %w", err)
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return result, fmt.Errorf("codex app-server: start: %w", err)
+		return nil, fmt.Errorf("codex app-server: start: %w", err)
 	}
-	defer func() {
-		_ = stdin.Close()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		_ = cmd.Wait()
-	}()
+	return &appServerConn{cmd: cmd, stdin: stdin, reader: bufio.NewReader(stdout), stderr: &stderr}, nil
+}
 
-	encoder := json.NewEncoder(stdin)
-	reader := bufio.NewReader(stdout)
-	send := func(id int, method string, params any) error {
-		return encoder.Encode(struct {
-			ID     int    `json:"id"`
-			Method string `json:"method"`
-			Params any    `json:"params"`
-		}{id, method, params})
+func (c *appServerConn) close() {
+	_ = c.stdin.Close()
+	if c.cmd.Process != nil {
+		_ = c.cmd.Process.Kill()
 	}
-	next := func() (appServerMessage, error) {
-		line, readErr := reader.ReadString('\n')
-		if readErr != nil && len(line) == 0 {
+	_ = c.cmd.Wait()
+}
+
+func (c *appServerConn) send(id int, method string, params any) error {
+	return json.NewEncoder(c.stdin).Encode(struct {
+		ID     int    `json:"id"`
+		Method string `json:"method"`
+		Params any    `json:"params"`
+	}{id, method, params})
+}
+
+func (c *appServerConn) next() (appServerMessage, error) {
+	line, readErr := c.reader.ReadString('\n')
+	if readErr != nil && len(line) == 0 {
+		return appServerMessage{}, readErr
+	}
+	var message appServerMessage
+	if unmarshalErr := json.Unmarshal([]byte(strings.TrimSpace(line)), &message); unmarshalErr != nil {
+		return appServerMessage{}, fmt.Errorf("invalid JSON-RPC output: %w", unmarshalErr)
+	}
+	return message, nil
+}
+
+// waitForResult reads until id's response arrives. Notifications encountered
+// along the way are handed to onNotify, if given, rather than dropped —
+// during a turn they carry progress events; during discovery there is
+// nothing to do with them, so callers pass nil.
+func (c *appServerConn) waitForResult(id int, onNotify func(appServerMessage)) (appServerMessage, error) {
+	for {
+		message, readErr := c.next()
+		if readErr != nil {
 			return appServerMessage{}, readErr
 		}
-		var message appServerMessage
-		if unmarshalErr := json.Unmarshal([]byte(strings.TrimSpace(line)), &message); unmarshalErr != nil {
-			return appServerMessage{}, fmt.Errorf("invalid JSON-RPC output: %w", unmarshalErr)
+		if message.Method != "" {
+			if onNotify != nil {
+				onNotify(message)
+			}
+			continue
 		}
-		return message, nil
-	}
-	waitForResponse := func(id int) (appServerMessage, error) {
-		for {
-			message, readErr := next()
-			if readErr != nil {
-				return appServerMessage{}, readErr
+		if message.ID != nil && *message.ID == id {
+			if message.Error != nil {
+				return appServerMessage{}, fmt.Errorf("%s", message.Error.Message)
 			}
-			if message.Method != "" {
-				parseAppServerEvent(message, &result, onEvent)
-				continue
-			}
-			if message.ID != nil && *message.ID == id {
-				if message.Error != nil {
-					return appServerMessage{}, fmt.Errorf("%s", message.Error.Message)
-				}
-				return message, nil
-			}
+			return message, nil
 		}
 	}
+}
 
-	if err := send(1, "initialize", appServerInitializeParams()); err != nil {
+func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID, model string, onEvent func(string)) (result TurnResult, err error) {
+	conn, err := startAppServerConn(ctx, h.bin)
+	if err != nil {
+		return result, err
+	}
+	defer conn.close()
+	onNotify := func(message appServerMessage) { parseAppServerEvent(message, &result, onEvent) }
+
+	if err := conn.send(1, "initialize", appServerInitializeParams()); err != nil {
 		return result, fmt.Errorf("codex app-server: initialize: %w", err)
 	}
-	if _, err := waitForResponse(1); err != nil {
-		return result, appServerFailure(err, stderr.String())
+	if _, err := conn.waitForResult(1, onNotify); err != nil {
+		return result, appServerFailure(err, conn.stderr.String())
 	}
 
 	var threadParams map[string]any
@@ -304,6 +381,11 @@ func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID strin
 			return result, fmt.Errorf("codex app-server: get working directory: %w", cwdErr)
 		}
 		threadParams = map[string]any{"cwd": cwd}
+		if model != "" {
+			// A resumed session keeps whatever model it already started
+			// with — the field only makes sense on a fresh thread/start.
+			threadParams["model"] = model
+		}
 	} else {
 		threadParams = map[string]any{"threadId": sessionID, "excludeTurns": true}
 	}
@@ -311,12 +393,12 @@ func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID strin
 	if sessionID != "" {
 		method = "thread/resume"
 	}
-	if err := send(2, method, threadParams); err != nil {
+	if err := conn.send(2, method, threadParams); err != nil {
 		return result, fmt.Errorf("codex app-server: %s: %w", method, err)
 	}
-	threadResponse, err := waitForResponse(2)
+	threadResponse, err := conn.waitForResult(2, onNotify)
 	if err != nil {
-		return result, appServerFailure(err, stderr.String())
+		return result, appServerFailure(err, conn.stderr.String())
 	}
 	var thread struct {
 		Thread struct {
@@ -328,17 +410,17 @@ func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID strin
 	}
 	result.SessionID = thread.Thread.ID
 
-	if err := send(3, "turn/start", appServerTurnParams(result.SessionID, prompt)); err != nil {
+	if err := conn.send(3, "turn/start", appServerTurnParams(result.SessionID, prompt)); err != nil {
 		return result, fmt.Errorf("codex app-server: turn/start: %w", err)
 	}
-	if _, err := waitForResponse(3); err != nil {
-		return result, appServerFailure(err, stderr.String())
+	if _, err := conn.waitForResult(3, onNotify); err != nil {
+		return result, appServerFailure(err, conn.stderr.String())
 	}
 
 	for {
-		message, readErr := next()
+		message, readErr := conn.next()
 		if readErr != nil {
-			return result, appServerFailure(readErr, stderr.String())
+			return result, appServerFailure(readErr, conn.stderr.String())
 		}
 		if message.Method == "turn/completed" {
 			parseAppServerEvent(message, &result, onEvent)
@@ -346,6 +428,76 @@ func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID strin
 		}
 		parseAppServerEvent(message, &result, onEvent)
 	}
+}
+
+// codexModelListResult is the subset of the App Server's model/list response
+// this adapter uses. The live schema (confirmed against codex-cli 0.147.0)
+// has no context-window field, unlike Claude's modelUsage — ModelOption.
+// ContextWindow is left 0 for every Codex option.
+type codexModelListResult struct {
+	Data []struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"displayName"`
+		Hidden      bool   `json:"hidden"`
+		IsDefault   bool   `json:"isDefault"`
+	} `json:"data"`
+	NextCursor *string `json:"nextCursor"`
+}
+
+func (h *codexHarness) AvailableModels(ctx context.Context) ([]ModelOption, error) {
+	conn, err := startAppServerConn(ctx, h.bin)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.close()
+
+	if err := conn.send(1, "initialize", appServerInitializeParams()); err != nil {
+		return nil, fmt.Errorf("codex app-server: initialize: %w", err)
+	}
+	if _, err := conn.waitForResult(1, nil); err != nil {
+		return nil, appServerFailure(err, conn.stderr.String())
+	}
+
+	var options []ModelOption
+	id, cursor := 2, ""
+	for {
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		if err := conn.send(id, "model/list", params); err != nil {
+			return nil, fmt.Errorf("codex app-server: model/list: %w", err)
+		}
+		resp, err := conn.waitForResult(id, nil)
+		if err != nil {
+			return nil, appServerFailure(err, conn.stderr.String())
+		}
+		var raw codexModelListResult
+		if err := json.Unmarshal(resp.Result, &raw); err != nil {
+			return nil, fmt.Errorf("codex app-server: model/list: %w", err)
+		}
+		options = append(options, parseCodexModelList(raw)...)
+		if raw.NextCursor == nil || *raw.NextCursor == "" {
+			break
+		}
+		cursor = *raw.NextCursor
+		id++
+	}
+	if len(options) == 0 {
+		return []ModelOption{{ID: "", DisplayName: "Default", Default: true}}, nil
+	}
+	return options, nil
+}
+
+func parseCodexModelList(raw codexModelListResult) []ModelOption {
+	options := make([]ModelOption, 0, len(raw.Data))
+	for _, m := range raw.Data {
+		if m.Hidden {
+			continue
+		}
+		options = append(options, ModelOption{ID: m.ID, DisplayName: m.DisplayName, Default: m.IsDefault})
+	}
+	return options
 }
 
 // appServerInitializeParams declares the optional protocol features this

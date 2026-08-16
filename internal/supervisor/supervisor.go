@@ -130,15 +130,18 @@ func (s *Supervisor) runContext() context.Context {
 	return s.ctx
 }
 
-// Session returns the provider, ID, and last activity time for itemID.
-func (s *Supervisor) Session(itemID string) (Provider, string, time.Time) {
+// Session returns the provider, model, ID, and last activity time for
+// itemID. model is the one the next fresh session would launch with (or the
+// one the current session is already running, once a turn has confirmed it);
+// it may be "" for the harness's own default.
+func (s *Supervisor) Session(itemID string) (provider Provider, model, sessionID string, updatedAt time.Time) {
 	s.session.mu.Lock()
 	defer s.session.mu.Unlock()
 	sf, err := loadItemSession(s.root, itemID)
 	if err != nil {
-		return ProviderClaude, "", time.Time{}
+		return ProviderClaude, "", "", time.Time{}
 	}
-	return sf.Provider, sf.SessionID, sf.UpdatedAt
+	return sf.Provider, sf.Model, sf.SessionID, sf.UpdatedAt
 }
 
 // TurnInfo is the model and context-window usage from an item's most recent
@@ -171,20 +174,27 @@ func (s *Supervisor) setTurnInfo(itemID string, info TurnInfo) {
 // has elapsed for itemID. The TUI uses it to recommend a fresh context, but
 // leaves the decision to the user: providers may retain cache entries longer.
 func (s *Supervisor) SessionIsStale(itemID string) bool {
-	provider, id, updated := s.Session(itemID)
+	provider, _, id, updated := s.Session(itemID)
 	return sessionIsStale(sessionFile{Provider: provider, SessionID: id, UpdatedAt: updated}, time.Now())
 }
 
-// StartNewSession switches itemID to a fresh harness context. It is safe to
-// call during a running turn: dispatch will not let that old turn overwrite the
-// freshly selected session state when it finishes.
-func (s *Supervisor) StartNewSession(itemID string, provider Provider) error {
+// StartNewSession switches itemID to a fresh harness context, to be launched
+// with model on its next dispatch. model may be "" for the harness's own
+// default. It is safe to call during a running turn: dispatch will not let
+// that old turn overwrite the freshly selected session state when it
+// finishes.
+func (s *Supervisor) StartNewSession(itemID string, provider Provider, model string) error {
 	if !provider.valid() {
 		return fmt.Errorf("unknown provider %q", provider)
 	}
 	s.session.mu.Lock()
 	defer s.session.mu.Unlock()
-	return saveItemSession(s.root, itemID, sessionFile{Provider: provider})
+	return saveItemSession(s.root, itemID, sessionFile{Provider: provider, Model: model})
+}
+
+// AvailableModels lists the models selectable for a fresh provider session.
+func (s *Supervisor) AvailableModels(ctx context.Context, provider Provider) ([]ModelOption, error) {
+	return s.harnessFor(provider).AvailableModels(ctx)
 }
 
 func (s *Supervisor) harnessFor(provider Provider) Harness {
@@ -364,7 +374,7 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	defer s.setBusy("")
 
 	prompt := nudgePrompt(msg.itemID, s.latestUserTurn(msg.itemID))
-	result, err := s.harnessFor(sf.Provider).RunTurn(s.runContext(), prompt, sf.SessionID, live.append)
+	result, err := s.harnessFor(sf.Provider).RunTurn(s.runContext(), prompt, sf.SessionID, sf.Model, live.append)
 	if result.Model != "" {
 		s.setTurnInfo(msg.itemID, TurnInfo{Model: result.Model, Context: result.Context})
 	}
@@ -400,7 +410,7 @@ func (s *Supervisor) persistSession(itemID string, dispatched sessionFile, sessi
 	current, loadErr := loadItemSession(s.root, itemID)
 	var saveErr error
 	if loadErr == nil && current == dispatched {
-		saveErr = saveItemSession(s.root, itemID, sessionFile{Provider: dispatched.Provider, SessionID: sessionID})
+		saveErr = saveItemSession(s.root, itemID, sessionFile{Provider: dispatched.Provider, Model: dispatched.Model, SessionID: sessionID})
 	}
 	s.session.mu.Unlock()
 	if saveErr != nil {

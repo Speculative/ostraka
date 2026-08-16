@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -243,5 +244,57 @@ func TestAppServerTurnParamsUseNonInteractivePolicy(t *testing.T) {
 	}
 	if params.ThreadID != "thread-123" || params.ApprovalPolicy != "never" || params.SandboxPolicy.Type != "dangerFullAccess" {
 		t.Errorf("turn params = %s", b)
+	}
+}
+
+func TestClaudeAvailableModelsOffersADefaultAndTheDocumentedAliases(t *testing.T) {
+	// There is no discovery RPC for Claude, so this is a static list — but it
+	// must still include an explicit default and be free of duplicate IDs.
+	h := newClaudeHarness()
+	opts, err := h.AvailableModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	haveDefault := false
+	for _, opt := range opts {
+		if opt.DisplayName == "" {
+			t.Errorf("option %+v has no display name", opt)
+		}
+		if seen[opt.ID] {
+			t.Errorf("duplicate model id %q", opt.ID)
+		}
+		seen[opt.ID] = true
+		if opt.Default {
+			haveDefault = true
+		}
+	}
+	if !haveDefault {
+		t.Error("no option marked as the default")
+	}
+}
+
+// parseCodexModelList is exercised directly against a canned response shape
+// rather than a live app-server, since the parsing rules (drop hidden
+// entries, thread isDefault through) don't need a subprocess to verify.
+func TestParseCodexModelListDropsHiddenEntriesAndKeepsDefault(t *testing.T) {
+	var raw codexModelListResult
+	body := `{"data":[
+		{"id":"gpt-5.6-sol","displayName":"GPT-5.6-Sol","hidden":false,"isDefault":true},
+		{"id":"gpt-5.6-terra","displayName":"GPT-5.6-Terra","hidden":false,"isDefault":false},
+		{"id":"gpt-legacy","displayName":"GPT-Legacy","hidden":true,"isDefault":false}
+	]}`
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatal(err)
+	}
+	got := parseCodexModelList(raw)
+	if len(got) != 2 {
+		t.Fatalf("parsed %d options, want 2 (hidden entry must be dropped): %+v", len(got), got)
+	}
+	if got[0].ID != "gpt-5.6-sol" || !got[0].Default {
+		t.Errorf("first option = %+v, want the isDefault entry preserved", got[0])
+	}
+	if got[1].ID != "gpt-5.6-terra" || got[1].Default {
+		t.Errorf("second option = %+v", got[1])
 	}
 }

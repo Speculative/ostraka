@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,6 +35,16 @@ type watchEventMsg struct{}
 type errMsg error
 type draftCheckpointMsg struct{ sequence int }
 type draftSafetyMsg struct{}
+
+// modelsLoadedMsg carries the result of fetching a provider's AvailableModels
+// for the modeSessionModel popup. provider is included so a stale response
+// (the user backed out and picked a different provider before this arrived)
+// can be told apart from the one the popup is currently showing.
+type modelsLoadedMsg struct {
+	provider supervisor.Provider
+	models   []supervisor.ModelOption
+	err      error
+}
 
 // ── styles ───────────────────────────────────────────────────────────────────
 
@@ -156,6 +167,23 @@ func loadItemsCmd(s *store.Store, v listView, showBacklog bool) tea.Cmd {
 	}
 }
 
+// modelDiscoveryTimeout bounds one AvailableModels call. Codex's is a
+// subprocess round trip (spawn app-server, initialize, model/list); Claude's
+// is in-process and instant. Either way the popup must not hang forever if a
+// CLI never answers.
+const modelDiscoveryTimeout = 15 * time.Second
+
+// loadModelsCmd fetches provider's model list in a bubbletea goroutine, so
+// spawning Codex's app-server subprocess cannot freeze the UI.
+func loadModelsCmd(sup *supervisor.Supervisor, provider supervisor.Provider) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), modelDiscoveryTimeout)
+		defer cancel()
+		models, err := sup.AvailableModels(ctx, provider)
+		return modelsLoadedMsg{provider: provider, models: models, err: err}
+	}
+}
+
 // ── model ────────────────────────────────────────────────────────────────────
 
 type model struct {
@@ -197,6 +225,17 @@ type model struct {
 	// sessionIdx picks a fresh harness session in the deliberately small v0
 	// session menu. Full session history and switching comes later.
 	sessionIdx int
+	// sessionProvider is the provider chosen in the modeSession step, carried
+	// forward into modeSessionModel — the second, provider-specific step of
+	// the same "S" flow.
+	sessionProvider supervisor.Provider
+	// sessionModelIdx, sessionModels, sessionModelsLoading, and
+	// sessionModelsErr back the modeSessionModel popup: the list fetched from
+	// sessionProvider's AvailableModels, which options, and any fetch error.
+	sessionModelIdx      int
+	sessionModels        []supervisor.ModelOption
+	sessionModelsLoading bool
+	sessionModelsErr     error
 
 	// convTurns is the turn count of the item currently rendered into conv,
 	// so a reload can tell "new turn arrived" from "same item, redrawn".
@@ -234,6 +273,7 @@ const (
 	modeTitle
 	modeStatus
 	modeSession
+	modeSessionModel
 	modeQuit
 )
 
@@ -398,6 +438,24 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg
 		return m, nil
 
+	case modelsLoadedMsg:
+		// A stale response — the user backed out and reopened with a
+		// different provider before this arrived — has nothing to update.
+		if m.mode != modeSessionModel || msg.provider != m.sessionProvider {
+			return m, nil
+		}
+		m.sessionModelsLoading = false
+		m.sessionModels = msg.models
+		m.sessionModelsErr = msg.err
+		m.sessionModelIdx = 0
+		for i, opt := range msg.models {
+			if opt.Default {
+				m.sessionModelIdx = i
+				break
+			}
+		}
+		return m, nil
+
 	case draftCheckpointMsg:
 		if m.mode == modeCompose && !m.draft && msg.sequence == m.draftSequence {
 			m.checkpointTurnDraft()
@@ -436,6 +494,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleStatusKey(msg)
 		case modeSession:
 			return m.handleSessionKey(msg)
+		case modeSessionModel:
+			return m.handleSessionModelKey(msg)
 		case modeQuit:
 			return m.handleQuitKey(msg)
 		}
@@ -534,7 +594,7 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "S":
 		if itemID := m.selectedID(); itemID != "" {
 			m.mode = modeSession
-			provider, _, _ := m.sup.Session(itemID)
+			provider, _, _, _ := m.sup.Session(itemID)
 			m.sessionIdx = sessionProviderIndex(provider)
 		}
 	}
@@ -664,9 +724,11 @@ func (m model) handleStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleSessionKey exposes only the cheap operation we need today: begin a
-// fresh Claude or Codex context. The persisted provider travels with the empty
-// cursor, so the next dispatch cannot resume a session from the other CLI.
+// handleSessionKey is step one of "S": pick a provider for a fresh context.
+// Enter advances to modeSessionModel to pick that provider's model rather
+// than starting the session immediately — the persisted provider and model
+// travel together with the empty cursor, so the next dispatch cannot resume
+// a session from the other CLI or launch with the wrong model.
 func (m model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
@@ -680,10 +742,41 @@ func (m model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sessionIdx--
 		}
 	case "enter":
-		if err := m.sup.StartNewSession(m.selectedID(), sessionProviders[m.sessionIdx]); err != nil {
-			m.err = err
+		m.sessionProvider = sessionProviders[m.sessionIdx]
+		m.mode = modeSessionModel
+		m.sessionModelIdx = 0
+		m.sessionModels = nil
+		m.sessionModelsErr = nil
+		m.sessionModelsLoading = true
+		return m, loadModelsCmd(m.sup, m.sessionProvider)
+	}
+	return m, nil
+}
+
+// handleSessionModelKey is step two of "S": pick a model from
+// sessionProvider's AvailableModels, then actually start the fresh session.
+// Esc returns to the provider list rather than all the way to modeNav — the
+// user backed out of one step, not the whole flow.
+func (m model) handleSessionModelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.mode = modeSession
+	case "j", "down":
+		if m.sessionModelIdx < len(m.sessionModels)-1 {
+			m.sessionModelIdx++
 		}
-		m.mode = modeNav
+	case "k", "up":
+		if m.sessionModelIdx > 0 {
+			m.sessionModelIdx--
+		}
+	case "enter":
+		if m.sessionModelIdx < len(m.sessionModels) {
+			modelID := m.sessionModels[m.sessionModelIdx].ID
+			if err := m.sup.StartNewSession(m.selectedID(), m.sessionProvider, modelID); err != nil {
+				m.err = err
+			}
+			m.mode = modeNav
+		}
 	}
 	return m, nil
 }
@@ -966,13 +1059,15 @@ func (m model) renderConv() string {
 		lines = m.overlayStatusPopup(lines)
 	} else if m.mode == modeSession {
 		lines = m.overlaySessionPopup(lines)
+	} else if m.mode == modeSessionModel {
+		lines = m.overlaySessionModelPopup(lines)
 	}
 	return strings.Join(lines, "\n")
 }
 
 func (m model) overlaySessionPopup(lines []string) []string {
 	itemID := m.selectedID()
-	current, id, updated := m.sup.Session(itemID)
+	current, currentModel, id, updated := m.sup.Session(itemID)
 	rows := make([]string, len(sessionProviders))
 	for i, provider := range sessionProviders {
 		marker, sty := "  ", lipgloss.NewStyle()
@@ -982,6 +1077,9 @@ func (m model) overlaySessionPopup(lines []string) []string {
 		rows[i] = sty.Render(marker + "new " + string(provider) + " session")
 	}
 	active := string(current)
+	if currentModel != "" {
+		active += " " + currentModel
+	}
 	if id == "" {
 		active += " (none)"
 	} else if m.sup.SessionIsStale(itemID) {
@@ -996,6 +1094,37 @@ func (m model) overlaySessionPopup(lines []string) []string {
 		active += " (resumes this item; 1h cache window)"
 	}
 	box := popupStyle.Render("agent session · this item " + active + "\n" + strings.Join(rows, "\n"))
+	return overlayBox(lines, box, m.conv.Width)
+}
+
+// overlaySessionModelPopup is step two of "S": choose a model for the
+// provider picked in overlaySessionPopup. Its content is asynchronous —
+// AvailableModels can be a subprocess round trip for Codex — so it renders a
+// loading line until modelsLoadedMsg lands, or the fetch error in its place.
+func (m model) overlaySessionModelPopup(lines []string) []string {
+	header := "model · new " + string(m.sessionProvider) + " session"
+	var body string
+	switch {
+	case m.sessionModelsLoading:
+		body = dimStyle.Render("  loading models…")
+	case m.sessionModelsErr != nil:
+		body = dimStyle.Render("  could not list models: " + m.sessionModelsErr.Error())
+	default:
+		rows := make([]string, len(m.sessionModels))
+		for i, opt := range m.sessionModels {
+			marker, sty := "  ", lipgloss.NewStyle()
+			if i == m.sessionModelIdx {
+				marker, sty = "› ", lipgloss.NewStyle().Bold(true).Foreground(pendingFg)
+			}
+			label := opt.DisplayName
+			if opt.Default {
+				label += " (default)"
+			}
+			rows[i] = sty.Render(marker + label)
+		}
+		body = strings.Join(rows, "\n")
+	}
+	box := popupStyle.Render(header + "\n" + body)
 	return overlayBox(lines, box, m.conv.Width)
 }
 
@@ -1144,7 +1273,9 @@ func (m model) renderFooter() string {
 	case modeStatus:
 		text = "j/k select  enter apply  esc cancel"
 	case modeSession:
-		text = "j/k select  enter start fresh session  esc cancel"
+		text = "j/k select  enter choose model  esc cancel"
+	case modeSessionModel:
+		text = "j/k select  enter start fresh session  esc back"
 	case modeQuit:
 		text = "y quit and stop the running turn  any other key stay"
 	default:

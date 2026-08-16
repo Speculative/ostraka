@@ -28,7 +28,11 @@ const claudeSubscriptionCacheTTL = time.Hour
 const codexCacheTTL = 30 * time.Minute
 
 type sessionFile struct {
-	Provider  Provider  `json:"provider"`
+	Provider Provider `json:"provider"`
+	// Model applies only when SessionID is empty: it selects the model for
+	// the next fresh session launch. A resumed session ignores it and keeps
+	// whatever model it already started with.
+	Model     string    `json:"model,omitempty"`
 	SessionID string    `json:"session_id"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

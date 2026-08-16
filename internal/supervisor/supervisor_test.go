@@ -13,18 +13,27 @@ import (
 	"ostraka/internal/store"
 )
 
+// noModelDiscovery satisfies the Harness interface's discovery method for
+// fakes that don't exercise model selection.
+type noModelDiscovery struct{}
+
+func (noModelDiscovery) AvailableModels(context.Context) ([]ModelOption, error) { return nil, nil }
+
 type fakeHarness struct {
+	noModelDiscovery
 	mu       sync.Mutex
 	calls    []string // sessionID seen per call, in order
+	models   []string // model seen per call, in order
 	prompts  []string // prompts seen per call, in order
 	sessions []string // sessionID to return per call, in order
 	err      error
 }
 
-func (f *fakeHarness) RunTurn(_ context.Context, prompt string, sessionID string, _ func(string)) (TurnResult, error) {
+func (f *fakeHarness) RunTurn(_ context.Context, prompt string, sessionID string, model string, _ func(string)) (TurnResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, sessionID)
+	f.models = append(f.models, model)
 	f.prompts = append(f.prompts, prompt)
 	if f.err != nil {
 		return TurnResult{}, f.err
@@ -92,6 +101,34 @@ func TestDispatchStartsFreshThenResumesPerItem(t *testing.T) {
 	}
 }
 
+func TestStartNewSessionModelIsForwardedOnTheFreshDispatchAndCarriesForward(t *testing.T) {
+	fh := &fakeHarness{}
+	s := newTestSupervisor(t, fh)
+
+	if err := s.StartNewSession("item-1", ProviderClaude, "opus"); err != nil {
+		t.Fatal(err)
+	}
+	s.dispatch(enqueueMsg{itemID: "item-1"}) // fresh: session-a
+	s.dispatch(enqueueMsg{itemID: "item-1"}) // resumed: session-a -> session-b
+
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	if len(fh.models) != 2 {
+		t.Fatalf("expected 2 harness calls, got %d", len(fh.models))
+	}
+	if fh.models[0] != "opus" {
+		t.Errorf("fresh dispatch model = %q, want opus", fh.models[0])
+	}
+	if fh.models[1] != "opus" {
+		t.Errorf("resumed dispatch should still forward the session's model, got %q", fh.models[1])
+	}
+
+	_, model, _, _ := s.Session("item-1")
+	if model != "opus" {
+		t.Errorf("Session model = %q, want opus (carried forward by persistSession)", model)
+	}
+}
+
 func TestEnqueueSerializesThroughQueue(t *testing.T) {
 	fh := &fakeHarness{}
 	s := newTestSupervisor(t, fh)
@@ -139,13 +176,14 @@ func TestDispatchErrorIsLoggedNotFatal(t *testing.T) {
 // statusSpyHarness records the item's status as observed from inside the run,
 // which is the only place the in-progress marker is visible.
 type statusSpyHarness struct {
+	noModelDiscovery
 	st     *store.Store
 	itemID string
 	during models.Status
 	err    error
 }
 
-func (h *statusSpyHarness) RunTurn(_ context.Context, _ string, _ string, _ func(string)) (TurnResult, error) {
+func (h *statusSpyHarness) RunTurn(_ context.Context, _ string, _ string, _ string, _ func(string)) (TurnResult, error) {
 	if item, err := h.st.GetItem(h.itemID); err == nil {
 		h.during = item.Status
 	}
@@ -294,13 +332,14 @@ func TestNewRecoversFromAnInterruptedDispatch(t *testing.T) {
 // blockingHarness parks inside the run until its context is cancelled, which
 // is what an agent mid-turn looks like from the supervisor's side.
 type blockingHarness struct {
+	noModelDiscovery
 	running   chan struct{}
 	once      sync.Once
 	cancelled bool
 	sessionID string
 }
 
-func (h *blockingHarness) RunTurn(ctx context.Context, _ string, _ string, _ func(string)) (TurnResult, error) {
+func (h *blockingHarness) RunTurn(ctx context.Context, _ string, _ string, _ string, _ func(string)) (TurnResult, error) {
 	h.once.Do(func() { close(h.running) })
 	<-ctx.Done()
 	h.cancelled = true
@@ -427,13 +466,14 @@ func TestDispatchIncludesFinalUserTurnInNudge(t *testing.T) {
 // anything and after — the run is the only point at which the log is supposed
 // to exist, and the gap before the first event is where a stale one shows.
 type liveSpyHarness struct {
+	noModelDiscovery
 	root   string
 	itemID string
 	before string
 	during string
 }
 
-func (h *liveSpyHarness) RunTurn(_ context.Context, _ string, _ string, onEvent func(string)) (TurnResult, error) {
+func (h *liveSpyHarness) RunTurn(_ context.Context, _ string, _ string, _ string, onEvent func(string)) (TurnResult, error) {
 	h.before = ReadLive(h.root, h.itemID)
 	if onEvent != nil {
 		onEvent("mid-run line")
