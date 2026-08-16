@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -267,6 +269,114 @@ func TestHiddenBacklogRowDropsRulesWhenTooNarrow(t *testing.T) {
 func TestHiddenBacklogRowIsEmptyWithoutALabel(t *testing.T) {
 	if got := hiddenBacklogRow("", 40); got != "" {
 		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestWindowListRowsFitsWithoutScrolling(t *testing.T) {
+	rows := []string{"a", "b", "c"}
+	got, offset, total := windowListRows(rows, 0, 1, 10)
+	if len(got) != 3 {
+		t.Errorf("got %d rows, want all 3: %v", len(got), got)
+	}
+	if offset != 0 || total != 3 {
+		t.Errorf("got offset=%d total=%d, want 0, 3", offset, total)
+	}
+}
+
+func TestWindowListRowsFallsForwardIfGivenStartDoesNotFitSelection(t *testing.T) {
+	// The defensive fallback: start=0 does not actually fit selecting the
+	// last row in a 4-line budget, so windowListRows must still push forward
+	// far enough to show it rather than clip it. In normal operation the
+	// caller (ensureListOffsetVisible) is what keeps start honest; this
+	// covers the case where it isn't.
+	rows := []string{"a\nA", "b\nB", "c\nC", "d\nD", "e\nE"}
+	got, offset, total := windowListRows(rows, 0, 4, 4)
+	want := []string{"d\nD", "e\nE"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if offset != 6 || total != 10 {
+		t.Errorf("got offset=%d total=%d, want 6, 10", offset, total)
+	}
+}
+
+func TestWindowListRowsKeepsAGivenStartThatStillFitsSelection(t *testing.T) {
+	// This is the behavior the earlier from-scratch search got wrong: a
+	// start that already shows the selection must not move just because a
+	// tighter-fitting start also exists.
+	rows := []string{"a\nA", "b\nB", "c\nC", "d\nD", "e\nE"}
+	got, offset, total := windowListRows(rows, 2, 3, 4)
+	want := []string{"c\nC", "d\nD"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if offset != 4 || total != 10 {
+		t.Errorf("got offset=%d total=%d, want 4, 10", offset, total)
+	}
+}
+
+func TestWindowListRowsClampsStartDownWhenSelectionMovesAboveIt(t *testing.T) {
+	rows := []string{"a\nA", "b\nB", "c\nC", "d\nD", "e\nE"}
+	got, offset, total := windowListRows(rows, 3, 1, 4)
+	want := []string{"b\nB", "c\nC"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if offset != 2 || total != 10 {
+		t.Errorf("got offset=%d total=%d, want 2, 10", offset, total)
+	}
+}
+
+func TestWindowListRowsIsANoopWithoutABudget(t *testing.T) {
+	rows := []string{"a", "b"}
+	got, offset, total := windowListRows(rows, 0, 0, 0)
+	if !reflect.DeepEqual(got, rows) {
+		t.Errorf("got %v, want the unfiltered rows", got)
+	}
+	if offset != 0 || total != 2 {
+		t.Errorf("got offset=%d total=%d, want 0, 2", offset, total)
+	}
+}
+
+func TestEnsureListOffsetVisibleHoldsStillWhileSelectionStaysInWindow(t *testing.T) {
+	var items []models.Item
+	for i := 0; i < 20; i++ {
+		items = append(items, mkItem(fmt.Sprintf("I%02d", i), models.StatusPendingUser))
+	}
+	// height=10 → mainH=8 → availH=6, and each short-titled row is 2 lines,
+	// so 3 rows are visible per page.
+	m := model{items: items, width: 100, height: 10}
+
+	m.selected = 10
+	m.listOffset = m.ensureListOffsetVisible()
+	scrolledOffset := m.listOffset
+	if scrolledOffset == 0 {
+		t.Fatalf("selecting row 10 should have scrolled the window, offset=%d", scrolledOffset)
+	}
+
+	// Moving up by one row, while the selection is still inside the visible
+	// window, must leave the window exactly where it was.
+	m.selected = 9
+	m.listOffset = m.ensureListOffsetVisible()
+	if m.listOffset != scrolledOffset {
+		t.Errorf("offset moved from %d to %d on an in-window up-arrow", scrolledOffset, m.listOffset)
+	}
+}
+
+func TestEnsureListOffsetVisibleScrollsUpByOneAtTheTopEdge(t *testing.T) {
+	var items []models.Item
+	for i := 0; i < 20; i++ {
+		items = append(items, mkItem(fmt.Sprintf("I%02d", i), models.StatusPendingUser))
+	}
+	m := model{items: items, width: 100, height: 10}
+	m.selected = 10
+	m.listOffset = m.ensureListOffsetVisible() // scroll down first
+
+	before := m.listOffset
+	m.selected = before - 1 // one row above the current window
+	m.listOffset = m.ensureListOffsetVisible()
+	if m.listOffset != before-1 {
+		t.Errorf("got offset=%d, want %d (window scrolls up by exactly the one row needed)", m.listOffset, before-1)
 	}
 }
 

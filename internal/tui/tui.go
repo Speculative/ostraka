@@ -172,6 +172,11 @@ type model struct {
 	hiddenBacklog int
 	items         []models.Item
 	selected      int
+	// listOffset is the index of the first row shown in the list panel. It
+	// persists across renders so the panel stays put as selection moves
+	// within the visible window, only scrolling once selection would
+	// otherwise leave it. See ensureListOffsetVisible.
+	listOffset int
 
 	conv  viewport.Model
 	input textarea.Model
@@ -323,7 +328,18 @@ func (m model) Init() tea.Cmd {
 
 // ── update ───────────────────────────────────────────────────────────────────
 
+// Update dispatches msg and then reconciles listOffset against wherever
+// selection and items ended up. Rows vary in height and the list panel's
+// available space depends on layout, so this runs after every message
+// rather than being threaded through each of update's many return points.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	nm := next.(model)
+	nm.listOffset = nm.ensureListOffsetVisible()
+	return nm, cmd
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -882,14 +898,17 @@ func (m model) View() string {
 	footer := m.renderFooter()
 
 	listW := m.listWidth()
-	listContent := m.renderList()
 	mainH := m.height - 2 // subtract header and footer
+	listContent, listScrollbarStr := m.renderList(mainH - 2)
+	listWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, listContent, listScrollbarStr)
 	listPanelStyle := lipgloss.NewStyle().
-		Padding(1).
+		// No right padding: the scrollbar occupies that column instead,
+		// mirroring the conv pane and composer below.
+		Padding(1, 0, 1, 1).
 		BorderRight(true).
 		BorderStyle(lipgloss.NormalBorder()).
 		Height(mainH)
-	listPanel := listPanelStyle.Width(listW).Render(listContent)
+	listPanel := listPanelStyle.Width(listW).Render(listWithScrollbar)
 	convAreaW := m.width - (m.listWidth() + 1)
 	convScrollbar := renderScrollbar(m.conv.Height, m.conv.TotalLineCount(), m.conv.YOffset)
 	convWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, m.renderConv(), convScrollbar)
@@ -1177,19 +1196,19 @@ func (m model) renderAgentInfo(itemID string) string {
 	return fmt.Sprintf("%s %d%% left ", info.Model, remaining)
 }
 
-func (m model) renderList() string {
+func (m model) renderList(availH int) (content, scrollbar string) {
 	marker := hiddenBacklogLabel(m.hiddenBacklog)
 	if len(m.items) == 0 && !m.draft {
 		// A view holding nothing but suppressed rows is not empty, and saying
 		// so would be a lie the toggle can't be discovered from.
 		if marker != "" {
-			return dimStyle.Render(hiddenBacklogRow(marker, m.listWidth()-2))
+			return dimStyle.Render(hiddenBacklogRow(marker, m.listWidth()-2)), listScrollbar(availH, 1, 0)
 		}
-		return dimStyle.Render("(empty)")
+		return dimStyle.Render("(empty)"), listScrollbar(availH, 1, 0)
 	}
-	colW := m.listWidth() - 2 // panel uses Width(listW) with Padding(1), so content = listW-2
-
-	const badgeW = 2
+	// panel uses Width(listW) with 1 col left padding + 1 col scrollbar, so
+	// content = listW-2, same budget as the old uniform Padding(1).
+	colW := m.listWidth() - 2
 	textW := colW - badgeW
 
 	lines := make([]string, len(m.items))
@@ -1245,12 +1264,167 @@ func (m model) renderList() string {
 		lines = append(lines,
 			renderDraftTitle(rowSty, colW, m.title.View())+"\n"+metaSty.Render("  new item [backlog]"))
 	}
+	// Clamp to the panel's height so a long list scrolls instead of pushing
+	// the header and footer off screen. Reserve a line for the marker row
+	// below, if any, before windowing so the two stay within budget together.
+	rowBudget := availH
+	if marker != "" {
+		rowBudget--
+	}
+	window, offset, total := windowListRows(lines, m.listOffset, m.selected, rowBudget)
+	if marker != "" {
+		total++ // the marker row itself, appended below outside the window
+	}
+	lines = window
+
 	// Sits below the rows and is not selectable: selection indexes m.items,
 	// which this is deliberately not part of.
 	if marker != "" {
 		lines = append(lines, dimStyle.Render(hiddenBacklogRow(marker, colW)))
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), listScrollbar(availH, total, offset)
+}
+
+// listScrollbar guards renderScrollbar against a non-positive height, which
+// would otherwise ask strings.Repeat for a negative count.
+func listScrollbar(availH, total, offset int) string {
+	if availH <= 0 {
+		return ""
+	}
+	return renderScrollbar(availH, total, offset)
+}
+
+// windowListRows returns the slice of rows that fits within availH lines,
+// starting from start and scrolling forward only as far as needed to keep
+// the selected row fully visible. Rows vary in height (word-wrapped
+// previews), so the window is computed by summing per-row heights rather
+// than counting rows. offset and total are line counts (not row counts),
+// matching what renderScrollbar expects.
+//
+// start is not searched for here — it comes in already anchored by
+// ensureListOffsetVisible, which is what keeps the window still while
+// selection moves within it. Recomputing the tightest-fitting start from
+// scratch on every call, as an earlier version of this function did, always
+// picks the start closest to the selection, which scrolls by one row on
+// every step once the selection is below the first page.
+func windowListRows(rows []string, start, selected, availH int) (window []string, offset, total int) {
+	heights := make([]int, len(rows))
+	for i, r := range rows {
+		heights[i] = strings.Count(r, "\n") + 1
+		total += heights[i]
+	}
+	if availH <= 0 || len(rows) == 0 {
+		return rows, 0, total
+	}
+	if selected < 0 {
+		selected = 0
+	}
+	if selected >= len(rows) {
+		selected = len(rows) - 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start > selected {
+		start = selected
+	}
+	// Defensive only: ensureListOffsetVisible should already guarantee this
+	// fits, but if heights and start ever disagree, still show the selection
+	// rather than clip it.
+	for start < selected {
+		sum := 0
+		for i := start; i <= selected; i++ {
+			sum += heights[i]
+		}
+		if sum <= availH {
+			break
+		}
+		start++
+	}
+	for i := 0; i < start; i++ {
+		offset += heights[i]
+	}
+
+	used := 0
+	for i := start; i <= selected; i++ {
+		used += heights[i]
+	}
+	end := selected + 1
+	for end < len(rows) && used+heights[end] <= availH {
+		used += heights[end]
+		end++
+	}
+	return rows[start:end], offset, total
+}
+
+// listRowHeights mirrors the row heights renderList actually draws — each
+// item's wrapped preview lines plus one metadata line, and a fixed two-line
+// row for an open draft — without rendering the full styled rows. Used to
+// keep listOffset in sync on every keystroke without paying for lipgloss
+// styling each time.
+func (m model) listRowHeights() []int {
+	colW := m.listWidth() - 2
+	textW := colW - badgeW
+	heights := make([]int, 0, len(m.items)+1)
+	for _, it := range m.items {
+		heights = append(heights, len(truncateLines(wordWrap(it.Title, textW), previewMaxLines, textW))+1)
+	}
+	if m.draft {
+		heights = append(heights, 2)
+	}
+	return heights
+}
+
+// listAvailRows is the line budget renderList windows rows into: the list
+// panel's height minus the header, footer, and panel padding, minus one more
+// if the hidden-backlog marker is going to claim a line below the rows.
+func (m model) listAvailRows() int {
+	avail := m.height - 2 - 2 // header+footer, then the panel's top+bottom padding
+	if hiddenBacklogLabel(m.hiddenBacklog) != "" {
+		avail--
+	}
+	return avail
+}
+
+// ensureListOffsetVisible adjusts listOffset by the minimum amount needed to
+// keep the selected row visible, leaving it untouched otherwise: it scrolls
+// up to selected's row if selected is above the current window, or down just
+// far enough to fit selected if it is below. This is what keeps the list
+// panel still while the selection moves within the visible page, instead of
+// re-centring on every keypress.
+func (m model) ensureListOffsetVisible() int {
+	heights := m.listRowHeights()
+	n := len(heights)
+	if n == 0 {
+		return 0
+	}
+	selected := m.selected
+	if selected < 0 {
+		selected = 0
+	}
+	if selected >= n {
+		selected = n - 1
+	}
+	start := m.listOffset
+	if start < 0 {
+		start = 0
+	}
+	if start > selected {
+		start = selected
+	}
+	if availH := m.listAvailRows(); availH > 0 {
+		for start < selected {
+			sum := 0
+			for i := start; i <= selected; i++ {
+				sum += heights[i]
+			}
+			if sum <= availH {
+				break
+			}
+			start++
+		}
+	}
+	return start
 }
 
 // renderDraftTitle paints the part of the draft row after textinput explicitly.
@@ -1280,6 +1454,11 @@ func renderStyledANSI(style lipgloss.Style, text string) string {
 // CLI does not — so one long-bodied item could otherwise crowd out every
 // other row in the list.
 const previewMaxLines = 2
+
+// badgeW is the width of the status-dot prefix ("● " or "  ") that precedes
+// each row's text, shared between renderList and the offset-tracking helpers
+// below so both agree on how much width wraps the preview.
+const badgeW = 2
 
 // truncateLines caps lines at n, marking the cut with an ellipsis so a
 // shortened preview is visibly shortened rather than silently wrong. The
