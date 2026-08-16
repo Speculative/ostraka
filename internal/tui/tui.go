@@ -447,11 +447,30 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessionModelsLoading = false
 		m.sessionModels = msg.models
 		m.sessionModelsErr = msg.err
+		// Preselect the item's already-chosen model, if it's one of the
+		// options this provider offers — reopening the picker must not look
+		// like it forgot a prior selection. Only an item that never had one
+		// (or is switching provider) falls back to the provider's own
+		// default.
 		m.sessionModelIdx = 0
+		currentProvider, currentModel, _, _ := m.sup.Session(m.selectedID())
+		if currentProvider != msg.provider {
+			currentModel = m.sup.PreferredModel(msg.provider)
+		}
+		matched := false
 		for i, opt := range msg.models {
-			if opt.Default {
+			if opt.ID == currentModel {
 				m.sessionModelIdx = i
+				matched = true
 				break
+			}
+		}
+		if !matched {
+			for i, opt := range msg.models {
+				if opt.Default {
+					m.sessionModelIdx = i
+					break
+				}
 			}
 		}
 		return m, nil
@@ -1308,23 +1327,31 @@ func (m model) renderFooter() string {
 }
 
 // renderAgentInfo formats the model and remaining context % from itemID's
-// most recent turn, or "" if none has run yet this process.
+// most recent turn this process. Before any turn has run — a freshly picked
+// session, or the TUI having just started against an item resumed from an
+// earlier process — it falls back to the explicitly selected model, if any,
+// so the user can tell what they are about to get without dispatching first.
+// An untouched item inherits the last explicit selection for its default
+// provider. If there is no saved preference, the harness default genuinely
+// is not knowable ahead of a turn (see 20260809-073211), so it renders "".
 func (m model) renderAgentInfo(itemID string) string {
 	if itemID == "" || m.sup == nil {
 		return ""
 	}
-	info, ok := m.sup.LastTurnInfo(itemID)
-	if !ok {
-		return ""
+	if info, ok := m.sup.LastTurnInfo(itemID); ok {
+		if info.Context.WindowTokens <= 0 {
+			return info.Model + " "
+		}
+		remaining := 100 - info.Context.UsedTokens*100/info.Context.WindowTokens
+		if remaining < 0 {
+			remaining = 0
+		}
+		return fmt.Sprintf("%s %d%% left ", info.Model, remaining)
 	}
-	if info.Context.WindowTokens <= 0 {
-		return info.Model + " "
+	if _, sessionModel, _, _ := m.sup.Session(itemID); sessionModel != "" {
+		return sessionModel + " "
 	}
-	remaining := 100 - info.Context.UsedTokens*100/info.Context.WindowTokens
-	if remaining < 0 {
-		remaining = 0
-	}
-	return fmt.Sprintf("%s %d%% left ", info.Model, remaining)
+	return ""
 }
 
 func (m model) renderList(availH int) (content, scrollbar string) {

@@ -41,7 +41,8 @@ type sessionFile struct {
 // flat form is deliberately not migrated into an arbitrary item: doing so
 // would preserve precisely the cross-item context sharing this replaces.
 type sessionsFile struct {
-	Sessions map[string]sessionFile `json:"sessions"`
+	Sessions      map[string]sessionFile `json:"sessions"`
+	ModelDefaults map[Provider]string    `json:"model_defaults,omitempty"`
 }
 
 // Provider names a harness supported by the supervisor. A session ID is
@@ -90,9 +91,33 @@ func loadItemSession(root, itemID string) (sessionFile, error) {
 	}
 	session, ok := sessions.Sessions[itemID]
 	if !ok {
-		return sessionFile{Provider: ProviderClaude}, nil
+		return sessionFile{Provider: ProviderClaude, Model: sessions.ModelDefaults[ProviderClaude]}, nil
 	}
 	return session, nil
+}
+
+func loadModelDefault(root string, provider Provider) (string, error) {
+	sessions, err := loadSessions(root)
+	if err != nil {
+		return "", err
+	}
+	return sessions.ModelDefaults[provider], nil
+}
+
+func saveModelDefault(root string, provider Provider, model string) error {
+	sessions, err := loadSessions(root)
+	if err != nil {
+		return err
+	}
+	if sessions.ModelDefaults == nil {
+		sessions.ModelDefaults = make(map[Provider]string)
+	}
+	sessions.ModelDefaults[provider] = model
+	b, err := json.MarshalIndent(sessions, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(sessionPath(root), b, 0644)
 }
 
 func saveItemSession(root, itemID string, session sessionFile) error {

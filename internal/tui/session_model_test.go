@@ -86,8 +86,22 @@ func TestSessionModelKeyEnterIsANoOpWhileModelsAreStillLoading(t *testing.T) {
 	}
 }
 
+// newSessionModelTestSupervisor gives modelsLoadedMsg tests a real
+// Supervisor to read Session() from — the handler now looks up the item's
+// already-chosen model to decide what to preselect.
+func newSessionModelTestSupervisor(t *testing.T) *supervisor.Supervisor {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), ".ostraka")
+	sup := supervisor.New(root)
+	t.Cleanup(sup.Shutdown)
+	return sup
+}
+
 func TestModelsLoadedMsgPopulatesSessionModelPopupState(t *testing.T) {
-	m := newModel(nil, nil, nil)
+	sup := newSessionModelTestSupervisor(t)
+	m := newModel(nil, nil, sup)
+	m.items = []models.Item{{ID: "item-1"}}
+	m.selected = 0
 	m.mode = modeSessionModel
 	m.sessionProvider = supervisor.ProviderClaude
 	m.sessionModelsLoading = true
@@ -105,14 +119,42 @@ func TestModelsLoadedMsgPopulatesSessionModelPopupState(t *testing.T) {
 		t.Fatalf("sessionModels = %v", got.sessionModels)
 	}
 	if got.sessionModelIdx != 1 {
-		t.Errorf("sessionModelIdx = %d, want 1 (the default option preselected)", got.sessionModelIdx)
+		t.Errorf("sessionModelIdx = %d, want 1 (item has no prior model, falls back to the provider default)", got.sessionModelIdx)
+	}
+}
+
+func TestModelsLoadedMsgPreselectsTheItemsAlreadyChosenModel(t *testing.T) {
+	// Reopening the picker on an item that already has a model must not look
+	// like it forgot the choice and reset to the provider's own default.
+	sup := newSessionModelTestSupervisor(t)
+	if err := sup.StartNewSession("item-1", supervisor.ProviderClaude, "opus"); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(nil, nil, sup)
+	m.items = []models.Item{{ID: "item-1"}}
+	m.selected = 0
+	m.mode = modeSessionModel
+	m.sessionProvider = supervisor.ProviderClaude
+	m.sessionModelsLoading = true
+
+	opts := []supervisor.ModelOption{
+		{ID: "opus", DisplayName: "Opus"},
+		{ID: "sonnet", DisplayName: "Sonnet", Default: true},
+	}
+	next, _ := m.Update(modelsLoadedMsg{provider: supervisor.ProviderClaude, models: opts})
+	got := next.(model)
+	if got.sessionModelIdx != 0 {
+		t.Errorf("sessionModelIdx = %d, want 0 (opus, the item's already-chosen model, not the provider default)", got.sessionModelIdx)
 	}
 }
 
 func TestModelsLoadedMsgIgnoresStaleProviderResponse(t *testing.T) {
 	// The user can back out of the model step and reopen it against a
 	// different provider before a slow Codex app-server round trip returns.
-	m := newModel(nil, nil, nil)
+	sup := newSessionModelTestSupervisor(t)
+	m := newModel(nil, nil, sup)
+	m.items = []models.Item{{ID: "item-1"}}
+	m.selected = 0
 	m.mode = modeSessionModel
 	m.sessionProvider = supervisor.ProviderClaude
 	m.sessionModelsLoading = true
@@ -124,5 +166,72 @@ func TestModelsLoadedMsgIgnoresStaleProviderResponse(t *testing.T) {
 	}
 	if len(got.sessionModels) != 0 {
 		t.Error("a response for a provider no longer selected populated sessionModels")
+	}
+}
+
+func TestRenderAgentInfoShowsTheChosenModelBeforeTheFirstTurn(t *testing.T) {
+	sup := newSessionModelTestSupervisor(t)
+	if err := sup.StartNewSession("item-1", supervisor.ProviderClaude, "opus"); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(nil, nil, sup)
+
+	// No turn has run this process yet (LastTurnInfo is empty), so this must
+	// fall back to the explicitly selected model rather than going blank.
+	got := m.renderAgentInfo("item-1")
+	if got != "opus " {
+		t.Errorf("renderAgentInfo = %q, want %q", got, "opus ")
+	}
+}
+
+func TestRenderAgentInfoIsBlankForAnItemWithNoModelChosen(t *testing.T) {
+	sup := newSessionModelTestSupervisor(t)
+	m := newModel(nil, nil, sup)
+
+	// A never-touched item has no explicit model and no turn: the harness's
+	// own default isn't knowable ahead of a turn, so this stays blank.
+	if got := m.renderAgentInfo("item-1"); got != "" {
+		t.Errorf("renderAgentInfo = %q, want empty", got)
+	}
+}
+
+func TestChosenModelBecomesTheDefaultForFutureItems(t *testing.T) {
+	sup := newSessionModelTestSupervisor(t)
+	if err := sup.StartNewSession("item-1", supervisor.ProviderClaude, "opus"); err != nil {
+		t.Fatal(err)
+	}
+
+	provider, model, sessionID, _ := sup.Session("item-2")
+	if provider != supervisor.ProviderClaude || model != "opus" || sessionID != "" {
+		t.Fatalf("new item session = (%q, %q, %q), want (claude, opus, empty)", provider, model, sessionID)
+	}
+
+	m := newModel(nil, nil, sup)
+	if got := m.renderAgentInfo("item-2"); got != "opus " {
+		t.Errorf("renderAgentInfo before first turn = %q, want %q", got, "opus ")
+	}
+}
+
+func TestModelsLoadedMsgUsesProviderPreferenceWhenSwitchingProvider(t *testing.T) {
+	sup := newSessionModelTestSupervisor(t)
+	if err := sup.StartNewSession("codex-item", supervisor.ProviderCodex, "gpt-5.6-sol"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sup.StartNewSession("item-1", supervisor.ProviderClaude, "opus"); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(nil, nil, sup)
+	m.items = []models.Item{{ID: "item-1"}}
+	m.mode = modeSessionModel
+	m.sessionProvider = supervisor.ProviderCodex
+	m.sessionModelsLoading = true
+
+	opts := []supervisor.ModelOption{
+		{ID: "gpt-5.5", DisplayName: "GPT-5.5", Default: true},
+		{ID: "gpt-5.6-sol", DisplayName: "GPT-5.6 Sol"},
+	}
+	next, _ := m.Update(modelsLoadedMsg{provider: supervisor.ProviderCodex, models: opts})
+	if got := next.(model).sessionModelIdx; got != 1 {
+		t.Errorf("sessionModelIdx = %d, want 1 (saved Codex preference)", got)
 	}
 }

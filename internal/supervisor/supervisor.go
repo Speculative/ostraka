@@ -189,7 +189,19 @@ func (s *Supervisor) StartNewSession(itemID string, provider Provider, model str
 	}
 	s.session.mu.Lock()
 	defer s.session.mu.Unlock()
-	return saveItemSession(s.root, itemID, sessionFile{Provider: provider, Model: model})
+	if err := saveItemSession(s.root, itemID, sessionFile{Provider: provider, Model: model}); err != nil {
+		return err
+	}
+	return saveModelDefault(s.root, provider, model)
+}
+
+// PreferredModel returns the last model explicitly selected for provider.
+// New items and the model picker use it until the user chooses another one.
+func (s *Supervisor) PreferredModel(provider Provider) string {
+	s.session.mu.Lock()
+	defer s.session.mu.Unlock()
+	model, _ := loadModelDefault(s.root, provider)
+	return model
 }
 
 // AvailableModels lists the models selectable for a fresh provider session.
