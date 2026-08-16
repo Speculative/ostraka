@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -228,7 +229,7 @@ func TestAppServerInitializeParamsEnablesExperimentalAPI(t *testing.T) {
 }
 
 func TestAppServerTurnParamsUseNonInteractivePolicy(t *testing.T) {
-	b, err := json.Marshal(appServerTurnParams("thread-123", "hello"))
+	b, err := json.Marshal(appServerTurnParams("thread-123", "hello", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,6 +245,15 @@ func TestAppServerTurnParamsUseNonInteractivePolicy(t *testing.T) {
 	}
 	if params.ThreadID != "thread-123" || params.ApprovalPolicy != "never" || params.SandboxPolicy.Type != "dangerFullAccess" {
 		t.Errorf("turn params = %s", b)
+	}
+}
+
+func TestAppServerTurnParamsIncludeEffortOnlyWhenProvided(t *testing.T) {
+	if got := appServerTurnParams("thread-123", "hello", "xhigh")["effort"]; got != "xhigh" {
+		t.Errorf("effort = %v, want xhigh", got)
+	}
+	if _, ok := appServerTurnParams("thread-123", "hello", "")["effort"]; ok {
+		t.Error("empty effort should be omitted")
 	}
 }
 
@@ -268,6 +278,9 @@ func TestClaudeAvailableModelsOffersADefaultAndTheDocumentedAliases(t *testing.T
 		if opt.Default {
 			haveDefault = true
 		}
+		if !reflect.DeepEqual(opt.SupportedReasoningEfforts, []string{"low", "medium", "high", "xhigh", "max"}) {
+			t.Errorf("option %q efforts = %v", opt.ID, opt.SupportedReasoningEfforts)
+		}
 	}
 	if !haveDefault {
 		t.Error("no option marked as the default")
@@ -280,7 +293,7 @@ func TestClaudeAvailableModelsOffersADefaultAndTheDocumentedAliases(t *testing.T
 func TestParseCodexModelListDropsHiddenEntriesAndKeepsDefault(t *testing.T) {
 	var raw codexModelListResult
 	body := `{"data":[
-		{"id":"gpt-5.6-sol","displayName":"GPT-5.6-Sol","hidden":false,"isDefault":true},
+		{"id":"gpt-5.6-sol","displayName":"GPT-5.6-Sol","hidden":false,"isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"medium","description":"balanced"},{"reasoningEffort":"xhigh","description":"deep"}],"defaultReasoningEffort":"medium"},
 		{"id":"gpt-5.6-terra","displayName":"GPT-5.6-Terra","hidden":false,"isDefault":false},
 		{"id":"gpt-legacy","displayName":"GPT-Legacy","hidden":true,"isDefault":false}
 	]}`
@@ -293,6 +306,9 @@ func TestParseCodexModelListDropsHiddenEntriesAndKeepsDefault(t *testing.T) {
 	}
 	if got[0].ID != "gpt-5.6-sol" || !got[0].Default {
 		t.Errorf("first option = %+v, want the isDefault entry preserved", got[0])
+	}
+	if !reflect.DeepEqual(got[0].SupportedReasoningEfforts, []string{"medium", "xhigh"}) || got[0].DefaultReasoningEffort != "medium" {
+		t.Errorf("first option effort metadata = %+v", got[0])
 	}
 	if got[1].ID != "gpt-5.6-terra" || got[1].Default {
 		t.Errorf("second option = %+v", got[1])

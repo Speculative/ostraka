@@ -33,6 +33,7 @@ type sessionFile struct {
 	// the next fresh session launch. A resumed session ignores it and keeps
 	// whatever model it already started with.
 	Model     string    `json:"model,omitempty"`
+	Effort    string    `json:"effort,omitempty"`
 	SessionID string    `json:"session_id"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -41,8 +42,10 @@ type sessionFile struct {
 // flat form is deliberately not migrated into an arbitrary item: doing so
 // would preserve precisely the cross-item context sharing this replaces.
 type sessionsFile struct {
-	Sessions      map[string]sessionFile `json:"sessions"`
-	ModelDefaults map[Provider]string    `json:"model_defaults,omitempty"`
+	Sessions        map[string]sessionFile `json:"sessions"`
+	DefaultProvider Provider               `json:"default_provider,omitempty"`
+	ModelDefaults   map[Provider]string    `json:"model_defaults,omitempty"`
+	EffortDefaults  map[Provider]string    `json:"effort_defaults,omitempty"`
 }
 
 // Provider names a harness supported by the supervisor. A session ID is
@@ -91,9 +94,21 @@ func loadItemSession(root, itemID string) (sessionFile, error) {
 	}
 	session, ok := sessions.Sessions[itemID]
 	if !ok {
-		return sessionFile{Provider: ProviderClaude, Model: sessions.ModelDefaults[ProviderClaude]}, nil
+		provider := sessions.DefaultProvider
+		if !provider.valid() {
+			provider = ProviderClaude
+		}
+		return sessionFile{Provider: provider, Model: sessions.ModelDefaults[provider], Effort: sessions.EffortDefaults[provider]}, nil
 	}
 	return session, nil
+}
+
+func loadEffortDefault(root string, provider Provider) (string, error) {
+	sessions, err := loadSessions(root)
+	if err != nil {
+		return "", err
+	}
+	return sessions.EffortDefaults[provider], nil
 }
 
 func loadModelDefault(root string, provider Provider) (string, error) {
@@ -113,6 +128,25 @@ func saveModelDefault(root string, provider Provider, model string) error {
 		sessions.ModelDefaults = make(map[Provider]string)
 	}
 	sessions.ModelDefaults[provider] = model
+	b, err := json.MarshalIndent(sessions, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(sessionPath(root), b, 0644)
+}
+
+func saveEffortDefault(root string, provider Provider, effort string) error {
+	sessions, err := loadSessions(root)
+	if err != nil {
+		return err
+	}
+	if sessions.EffortDefaults == nil {
+		sessions.EffortDefaults = make(map[Provider]string)
+	}
+	sessions.EffortDefaults[provider] = effort
+	// The most recently completed provider/model/effort choice is the
+	// default for items which do not have their own session yet.
+	sessions.DefaultProvider = provider
 	b, err := json.MarshalIndent(sessions, "", "  ")
 	if err != nil {
 		return err

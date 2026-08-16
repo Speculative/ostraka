@@ -65,3 +65,49 @@ func TestItemSessionsRoundTripIndependently(t *testing.T) {
 		t.Errorf("got %+v, %v", other, err)
 	}
 }
+
+func TestEffortPersistsPerItemAndProviderPreference(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(supervisorDir(root), 0755); err != nil {
+		t.Fatal(err)
+	}
+	s := New(root)
+	t.Cleanup(s.Shutdown)
+	if err := s.StartNewSession("item-1", ProviderClaude, "opus", "xhigh"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, effort, _, _ := s.Session("item-1")
+	if effort != "xhigh" {
+		t.Errorf("item effort = %q", effort)
+	}
+	_, _, inherited, _, _ := s.Session("item-2")
+	if inherited != "xhigh" {
+		t.Errorf("provider preference = %q", inherited)
+	}
+}
+
+func TestLatestSelectionIsInheritedByUntouchedItems(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(supervisorDir(root), 0755); err != nil {
+		t.Fatal(err)
+	}
+	s := New(root)
+	t.Cleanup(s.Shutdown)
+	if err := s.StartNewSession("item-1", ProviderCodex, "gpt-5.6-sol", "xhigh"); err != nil {
+		t.Fatal(err)
+	}
+
+	provider, model, effort, sessionID, _ := s.Session("backlogged-item")
+	if provider != ProviderCodex || model != "gpt-5.6-sol" || effort != "xhigh" || sessionID != "" {
+		t.Fatalf("untouched session = (%q, %q, %q, %q), want (codex, gpt-5.6-sol, xhigh, empty)", provider, model, effort, sessionID)
+	}
+
+	// An item with established state keeps it when the global selection moves.
+	if err := s.StartNewSession("item-2", ProviderClaude, "opus", "high"); err != nil {
+		t.Fatal(err)
+	}
+	provider, model, effort, _, _ = s.Session("item-1")
+	if provider != ProviderCodex || model != "gpt-5.6-sol" || effort != "xhigh" {
+		t.Fatalf("existing item changed with default: (%q, %q, %q)", provider, model, effort)
+	}
+}

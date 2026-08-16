@@ -49,6 +49,10 @@ type ModelOption struct {
 	ContextWindow int64
 	// Default marks the provider's current default selection.
 	Default bool
+	// SupportedReasoningEfforts and DefaultReasoningEffort are reported by
+	// providers whose effort choices vary by model.
+	SupportedReasoningEfforts []string
+	DefaultReasoningEffort    string
 }
 
 // Harness abstracts a coding-agent CLI harness (claude, future codex).
@@ -64,7 +68,7 @@ type Harness interface {
 	// onEvent, when non-nil, is called with one display line per event as
 	// the turn runs — the caller uses it to show live progress. It is called
 	// from RunTurn's goroutine, never concurrently.
-	RunTurn(ctx context.Context, prompt, sessionID, model string, onEvent func(string)) (TurnResult, error)
+	RunTurn(ctx context.Context, prompt, sessionID, model, effort string, onEvent func(string)) (TurnResult, error)
 
 	// AvailableModels lists the models selectable for a fresh session. It
 	// always returns at least one option.
@@ -94,12 +98,14 @@ func newClaudeHarness() *claudeHarness {
 // itself documents. An alias an account cannot use (e.g. a tier without
 // usage credits for a given model) surfaces as a normal turn error, the same
 // as it would interactively.
+var claudeReasoningEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+
 var claudeModelAliases = []ModelOption{
-	{ID: "", DisplayName: "Default", Default: true},
-	{ID: "opus", DisplayName: "Opus"},
-	{ID: "sonnet", DisplayName: "Sonnet"},
-	{ID: "haiku", DisplayName: "Haiku"},
-	{ID: "fable", DisplayName: "Fable"},
+	{ID: "", DisplayName: "Default", Default: true, SupportedReasoningEfforts: claudeReasoningEfforts, DefaultReasoningEffort: "high"},
+	{ID: "opus", DisplayName: "Opus", SupportedReasoningEfforts: claudeReasoningEfforts, DefaultReasoningEffort: "high"},
+	{ID: "sonnet", DisplayName: "Sonnet", SupportedReasoningEfforts: claudeReasoningEfforts, DefaultReasoningEffort: "high"},
+	{ID: "haiku", DisplayName: "Haiku", SupportedReasoningEfforts: claudeReasoningEfforts, DefaultReasoningEffort: "high"},
+	{ID: "fable", DisplayName: "Fable", SupportedReasoningEfforts: claudeReasoningEfforts, DefaultReasoningEffort: "high"},
 }
 
 func (h *claudeHarness) AvailableModels(ctx context.Context) ([]ModelOption, error) {
@@ -156,7 +162,7 @@ type contentBlock struct {
 	IsError bool            `json:"is_error"`
 }
 
-func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID, model string, onEvent func(string)) (TurnResult, error) {
+func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID, model, effort string, onEvent func(string)) (TurnResult, error) {
 	// stream-json (with --verbose, which it requires) emits one JSON object
 	// per line as the turn runs, rather than a single blob at the end — that
 	// is what makes a live progress view possible. --brief additionally gives
@@ -170,10 +176,15 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID, model st
 	}
 	if sessionID != "" {
 		args = append(args, "--resume", sessionID)
-	} else if model != "" {
+	} else {
 		// A resumed session keeps whatever model it already started with —
 		// the flag only makes sense on a fresh launch.
-		args = append(args, "--model", model)
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		if effort != "" {
+			args = append(args, "--effort", effort)
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, h.bin, args...)
@@ -259,8 +270,8 @@ func applyClaudeResultTelemetry(result *TurnResult, raw claudeJSONResult) {
 	}
 }
 
-func (h *codexHarness) RunTurn(ctx context.Context, prompt, sessionID, model string, onEvent func(string)) (TurnResult, error) {
-	return h.runAppServer(ctx, prompt, sessionID, model, onEvent)
+func (h *codexHarness) RunTurn(ctx context.Context, prompt, sessionID, model, effort string, onEvent func(string)) (TurnResult, error) {
+	return h.runAppServer(ctx, prompt, sessionID, model, effort, onEvent)
 }
 
 // appServerMessage is deliberately a small envelope. The App Server schema is
@@ -359,7 +370,7 @@ func (c *appServerConn) waitForResult(id int, onNotify func(appServerMessage)) (
 	}
 }
 
-func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID, model string, onEvent func(string)) (result TurnResult, err error) {
+func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID, model, effort string, onEvent func(string)) (result TurnResult, err error) {
 	conn, err := startAppServerConn(ctx, h.bin)
 	if err != nil {
 		return result, err
@@ -410,7 +421,11 @@ func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID, mode
 	}
 	result.SessionID = thread.Thread.ID
 
-	if err := conn.send(3, "turn/start", appServerTurnParams(result.SessionID, prompt)); err != nil {
+	turnEffort := ""
+	if sessionID == "" {
+		turnEffort = effort
+	}
+	if err := conn.send(3, "turn/start", appServerTurnParams(result.SessionID, prompt, turnEffort)); err != nil {
 		return result, fmt.Errorf("codex app-server: turn/start: %w", err)
 	}
 	if _, err := conn.waitForResult(3, onNotify); err != nil {
@@ -436,10 +451,14 @@ func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID, mode
 // ContextWindow is left 0 for every Codex option.
 type codexModelListResult struct {
 	Data []struct {
-		ID          string `json:"id"`
-		DisplayName string `json:"displayName"`
-		Hidden      bool   `json:"hidden"`
-		IsDefault   bool   `json:"isDefault"`
+		ID                        string `json:"id"`
+		DisplayName               string `json:"displayName"`
+		Hidden                    bool   `json:"hidden"`
+		IsDefault                 bool   `json:"isDefault"`
+		SupportedReasoningEfforts []struct {
+			ReasoningEffort string `json:"reasoningEffort"`
+		} `json:"supportedReasoningEfforts"`
+		DefaultReasoningEffort string `json:"defaultReasoningEffort"`
 	} `json:"data"`
 	NextCursor *string `json:"nextCursor"`
 }
@@ -495,7 +514,12 @@ func parseCodexModelList(raw codexModelListResult) []ModelOption {
 		if m.Hidden {
 			continue
 		}
-		options = append(options, ModelOption{ID: m.ID, DisplayName: m.DisplayName, Default: m.IsDefault})
+		efforts := make([]string, 0, len(m.SupportedReasoningEfforts))
+		for _, effort := range m.SupportedReasoningEfforts {
+			efforts = append(efforts, effort.ReasoningEffort)
+		}
+		options = append(options, ModelOption{ID: m.ID, DisplayName: m.DisplayName, Default: m.IsDefault,
+			SupportedReasoningEfforts: efforts, DefaultReasoningEffort: m.DefaultReasoningEffort})
 	}
 	return options
 }
@@ -517,13 +541,17 @@ func appServerInitializeParams() map[string]any {
 // behaviour. Ostraka already runs inside its own sandbox, and the TUI does
 // not implement App Server's approval-request protocol; accepting the default
 // on-request policy would otherwise leave a turn waiting forever.
-func appServerTurnParams(threadID, prompt string) map[string]any {
-	return map[string]any{
+func appServerTurnParams(threadID, prompt, effort string) map[string]any {
+	params := map[string]any{
 		"threadId":       threadID,
 		"input":          []map[string]string{{"type": "text", "text": prompt}},
 		"approvalPolicy": "never",
 		"sandboxPolicy":  map[string]string{"type": "dangerFullAccess"},
 	}
+	if effort != "" {
+		params["effort"] = effort
+	}
+	return params
 }
 
 func appServerFailure(err error, stderr string) error {

@@ -24,16 +24,18 @@ type fakeHarness struct {
 	mu       sync.Mutex
 	calls    []string // sessionID seen per call, in order
 	models   []string // model seen per call, in order
+	efforts  []string // effort seen per call, in order
 	prompts  []string // prompts seen per call, in order
 	sessions []string // sessionID to return per call, in order
 	err      error
 }
 
-func (f *fakeHarness) RunTurn(_ context.Context, prompt string, sessionID string, model string, _ func(string)) (TurnResult, error) {
+func (f *fakeHarness) RunTurn(_ context.Context, prompt string, sessionID string, model string, effort string, _ func(string)) (TurnResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, sessionID)
 	f.models = append(f.models, model)
+	f.efforts = append(f.efforts, effort)
 	f.prompts = append(f.prompts, prompt)
 	if f.err != nil {
 		return TurnResult{}, f.err
@@ -105,7 +107,7 @@ func TestStartNewSessionModelIsForwardedOnTheFreshDispatchAndCarriesForward(t *t
 	fh := &fakeHarness{}
 	s := newTestSupervisor(t, fh)
 
-	if err := s.StartNewSession("item-1", ProviderClaude, "opus"); err != nil {
+	if err := s.StartNewSession("item-1", ProviderClaude, "opus", "high"); err != nil {
 		t.Fatal(err)
 	}
 	s.dispatch(enqueueMsg{itemID: "item-1"}) // fresh: session-a
@@ -122,10 +124,13 @@ func TestStartNewSessionModelIsForwardedOnTheFreshDispatchAndCarriesForward(t *t
 	if fh.models[1] != "opus" {
 		t.Errorf("resumed dispatch should still forward the session's model, got %q", fh.models[1])
 	}
+	if fh.efforts[0] != "high" || fh.efforts[1] != "high" {
+		t.Errorf("efforts = %v, want high carried through dispatch", fh.efforts)
+	}
 
-	_, model, _, _ := s.Session("item-1")
-	if model != "opus" {
-		t.Errorf("Session model = %q, want opus (carried forward by persistSession)", model)
+	_, model, effort, _, _ := s.Session("item-1")
+	if model != "opus" || effort != "high" {
+		t.Errorf("Session selection = (%q, %q), want (opus, high)", model, effort)
 	}
 }
 
@@ -183,7 +188,7 @@ type statusSpyHarness struct {
 	err    error
 }
 
-func (h *statusSpyHarness) RunTurn(_ context.Context, _ string, _ string, _ string, _ func(string)) (TurnResult, error) {
+func (h *statusSpyHarness) RunTurn(_ context.Context, _ string, _ string, _ string, _ string, _ func(string)) (TurnResult, error) {
 	if item, err := h.st.GetItem(h.itemID); err == nil {
 		h.during = item.Status
 	}
@@ -339,7 +344,7 @@ type blockingHarness struct {
 	sessionID string
 }
 
-func (h *blockingHarness) RunTurn(ctx context.Context, _ string, _ string, _ string, _ func(string)) (TurnResult, error) {
+func (h *blockingHarness) RunTurn(ctx context.Context, _ string, _ string, _ string, _ string, _ func(string)) (TurnResult, error) {
 	h.once.Do(func() { close(h.running) })
 	<-ctx.Done()
 	h.cancelled = true
@@ -473,7 +478,7 @@ type liveSpyHarness struct {
 	during string
 }
 
-func (h *liveSpyHarness) RunTurn(_ context.Context, _ string, _ string, _ string, onEvent func(string)) (TurnResult, error) {
+func (h *liveSpyHarness) RunTurn(_ context.Context, _ string, _ string, _ string, _ string, onEvent func(string)) (TurnResult, error) {
 	h.before = ReadLive(h.root, h.itemID)
 	if onEvent != nil {
 		onEvent("mid-run line")

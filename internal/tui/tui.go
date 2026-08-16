@@ -236,6 +236,10 @@ type model struct {
 	sessionModels        []supervisor.ModelOption
 	sessionModelsLoading bool
 	sessionModelsErr     error
+	// The third session-picker step uses the selected model's supported
+	// efforts; no additional provider round trip is needed.
+	sessionEffortIdx int
+	sessionEfforts   []string
 
 	// convTurns is the turn count of the item currently rendered into conv,
 	// so a reload can tell "new turn arrived" from "same item, redrawn".
@@ -274,6 +278,7 @@ const (
 	modeStatus
 	modeSession
 	modeSessionModel
+	modeSessionEffort
 	modeQuit
 )
 
@@ -453,7 +458,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (or is switching provider) falls back to the provider's own
 		// default.
 		m.sessionModelIdx = 0
-		currentProvider, currentModel, _, _ := m.sup.Session(m.selectedID())
+		currentProvider, currentModel, _, _, _ := m.sup.Session(m.selectedID())
 		if currentProvider != msg.provider {
 			currentModel = m.sup.PreferredModel(msg.provider)
 		}
@@ -515,6 +520,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSessionKey(msg)
 		case modeSessionModel:
 			return m.handleSessionModelKey(msg)
+		case modeSessionEffort:
+			return m.handleSessionEffortKey(msg)
 		case modeQuit:
 			return m.handleQuitKey(msg)
 		}
@@ -613,7 +620,7 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "S":
 		if itemID := m.selectedID(); itemID != "" {
 			m.mode = modeSession
-			provider, _, _, _ := m.sup.Session(itemID)
+			provider, _, _, _, _ := m.sup.Session(itemID)
 			m.sessionIdx = sessionProviderIndex(provider)
 		}
 	}
@@ -773,7 +780,7 @@ func (m model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleSessionModelKey is step two of "S": pick a model from
-// sessionProvider's AvailableModels, then actually start the fresh session.
+// sessionProvider's AvailableModels, then advance to effort selection.
 // Esc returns to the provider list rather than all the way to modeNav — the
 // user backed out of one step, not the whole flow.
 func (m model) handleSessionModelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -790,8 +797,54 @@ func (m model) handleSessionModelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if m.sessionModelIdx < len(m.sessionModels) {
-			modelID := m.sessionModels[m.sessionModelIdx].ID
-			if err := m.sup.StartNewSession(m.selectedID(), m.sessionProvider, modelID); err != nil {
+			opt := m.sessionModels[m.sessionModelIdx]
+			m.sessionEfforts = append([]string(nil), opt.SupportedReasoningEfforts...)
+			m.sessionEffortIdx = effortIndex(m.selectedEffortPreference(), m.sessionEfforts)
+			if m.sessionEffortIdx < 0 {
+				m.sessionEffortIdx = effortIndex(opt.DefaultReasoningEffort, m.sessionEfforts)
+			}
+			if m.sessionEffortIdx < 0 {
+				m.sessionEffortIdx = 0
+			}
+			m.mode = modeSessionEffort
+		}
+	}
+	return m, nil
+}
+
+func effortIndex(effort string, efforts []string) int {
+	for i, candidate := range efforts {
+		if candidate == effort {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m model) selectedEffortPreference() string {
+	provider, _, effort, _, _ := m.sup.Session(m.selectedID())
+	if provider == m.sessionProvider {
+		return effort
+	}
+	return m.sup.PreferredEffort(m.sessionProvider)
+}
+
+func (m model) handleSessionEffortKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.mode = modeSessionModel
+	case "j", "down":
+		if m.sessionEffortIdx < len(m.sessionEfforts)-1 {
+			m.sessionEffortIdx++
+		}
+	case "k", "up":
+		if m.sessionEffortIdx > 0 {
+			m.sessionEffortIdx--
+		}
+	case "enter":
+		if m.sessionModelIdx < len(m.sessionModels) && m.sessionEffortIdx < len(m.sessionEfforts) {
+			err := m.sup.StartNewSession(m.selectedID(), m.sessionProvider, m.sessionModels[m.sessionModelIdx].ID, m.sessionEfforts[m.sessionEffortIdx])
+			if err != nil {
 				m.err = err
 			}
 			m.mode = modeNav
@@ -1080,13 +1133,15 @@ func (m model) renderConv() string {
 		lines = m.overlaySessionPopup(lines)
 	} else if m.mode == modeSessionModel {
 		lines = m.overlaySessionModelPopup(lines)
+	} else if m.mode == modeSessionEffort {
+		lines = m.overlaySessionEffortPopup(lines)
 	}
 	return strings.Join(lines, "\n")
 }
 
 func (m model) overlaySessionPopup(lines []string) []string {
 	itemID := m.selectedID()
-	current, currentModel, id, updated := m.sup.Session(itemID)
+	current, currentModel, currentEffort, id, updated := m.sup.Session(itemID)
 	rows := make([]string, len(sessionProviders))
 	for i, provider := range sessionProviders {
 		marker, sty := "  ", lipgloss.NewStyle()
@@ -1098,6 +1153,9 @@ func (m model) overlaySessionPopup(lines []string) []string {
 	active := string(current)
 	if currentModel != "" {
 		active += " " + currentModel
+	}
+	if currentEffort != "" {
+		active += " " + currentEffort
 	}
 	if id == "" {
 		active += " (none)"
@@ -1113,6 +1171,19 @@ func (m model) overlaySessionPopup(lines []string) []string {
 		active += " (resumes this item; 1h cache window)"
 	}
 	box := popupStyle.Render("agent session · this item " + active + "\n" + strings.Join(rows, "\n"))
+	return overlayBox(lines, box, m.conv.Width)
+}
+
+func (m model) overlaySessionEffortPopup(lines []string) []string {
+	rows := make([]string, len(m.sessionEfforts))
+	for i, effort := range m.sessionEfforts {
+		marker, sty := "  ", lipgloss.NewStyle()
+		if i == m.sessionEffortIdx {
+			marker, sty = "› ", lipgloss.NewStyle().Bold(true).Foreground(pendingFg)
+		}
+		rows[i] = sty.Render(marker + effort)
+	}
+	box := popupStyle.Render("effort · new " + string(m.sessionProvider) + " session\n" + strings.Join(rows, "\n"))
 	return overlayBox(lines, box, m.conv.Width)
 }
 
@@ -1294,6 +1365,8 @@ func (m model) renderFooter() string {
 	case modeSession:
 		text = "j/k select  enter choose model  esc cancel"
 	case modeSessionModel:
+		text = "j/k select  enter choose effort  esc back"
+	case modeSessionEffort:
 		text = "j/k select  enter start fresh session  esc back"
 	case modeQuit:
 		text = "y quit and stop the running turn  any other key stay"
@@ -1348,8 +1421,8 @@ func (m model) renderAgentInfo(itemID string) string {
 		}
 		return fmt.Sprintf("%s %d%% left ", info.Model, remaining)
 	}
-	if _, sessionModel, _, _ := m.sup.Session(itemID); sessionModel != "" {
-		return sessionModel + " "
+	if _, sessionModel, effort, _, _ := m.sup.Session(itemID); sessionModel != "" {
+		return strings.TrimSpace(sessionModel+" "+effort) + " "
 	}
 	return ""
 }

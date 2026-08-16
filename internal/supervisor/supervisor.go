@@ -134,14 +134,14 @@ func (s *Supervisor) runContext() context.Context {
 // itemID. model is the one the next fresh session would launch with (or the
 // one the current session is already running, once a turn has confirmed it);
 // it may be "" for the harness's own default.
-func (s *Supervisor) Session(itemID string) (provider Provider, model, sessionID string, updatedAt time.Time) {
+func (s *Supervisor) Session(itemID string) (provider Provider, model, effort, sessionID string, updatedAt time.Time) {
 	s.session.mu.Lock()
 	defer s.session.mu.Unlock()
 	sf, err := loadItemSession(s.root, itemID)
 	if err != nil {
-		return ProviderClaude, "", "", time.Time{}
+		return ProviderClaude, "", "", "", time.Time{}
 	}
-	return sf.Provider, sf.Model, sf.SessionID, sf.UpdatedAt
+	return sf.Provider, sf.Model, sf.Effort, sf.SessionID, sf.UpdatedAt
 }
 
 // TurnInfo is the model and context-window usage from an item's most recent
@@ -174,7 +174,7 @@ func (s *Supervisor) setTurnInfo(itemID string, info TurnInfo) {
 // has elapsed for itemID. The TUI uses it to recommend a fresh context, but
 // leaves the decision to the user: providers may retain cache entries longer.
 func (s *Supervisor) SessionIsStale(itemID string) bool {
-	provider, _, id, updated := s.Session(itemID)
+	provider, _, _, id, updated := s.Session(itemID)
 	return sessionIsStale(sessionFile{Provider: provider, SessionID: id, UpdatedAt: updated}, time.Now())
 }
 
@@ -183,16 +183,24 @@ func (s *Supervisor) SessionIsStale(itemID string) bool {
 // default. It is safe to call during a running turn: dispatch will not let
 // that old turn overwrite the freshly selected session state when it
 // finishes.
-func (s *Supervisor) StartNewSession(itemID string, provider Provider, model string) error {
+func (s *Supervisor) StartNewSession(itemID string, provider Provider, model, effort string) error {
 	if !provider.valid() {
 		return fmt.Errorf("unknown provider %q", provider)
 	}
 	s.session.mu.Lock()
 	defer s.session.mu.Unlock()
-	if err := saveItemSession(s.root, itemID, sessionFile{Provider: provider, Model: model}); err != nil {
+	if err := saveItemSession(s.root, itemID, sessionFile{Provider: provider, Model: model, Effort: effort}); err != nil {
 		return err
 	}
-	return saveModelDefault(s.root, provider, model)
+	if err := saveModelDefault(s.root, provider, model); err != nil {
+		return err
+	}
+	return saveEffortDefault(s.root, provider, effort)
+}
+
+func (s *Supervisor) PreferredEffort(provider Provider) string {
+	effort, _ := loadEffortDefault(s.root, provider)
+	return effort
 }
 
 // PreferredModel returns the last model explicitly selected for provider.
@@ -386,7 +394,7 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	defer s.setBusy("")
 
 	prompt := nudgePrompt(msg.itemID, s.latestUserTurn(msg.itemID))
-	result, err := s.harnessFor(sf.Provider).RunTurn(s.runContext(), prompt, sf.SessionID, sf.Model, live.append)
+	result, err := s.harnessFor(sf.Provider).RunTurn(s.runContext(), prompt, sf.SessionID, sf.Model, sf.Effort, live.append)
 	if result.Model != "" {
 		s.setTurnInfo(msg.itemID, TurnInfo{Model: result.Model, Context: result.Context})
 	}
@@ -422,7 +430,7 @@ func (s *Supervisor) persistSession(itemID string, dispatched sessionFile, sessi
 	current, loadErr := loadItemSession(s.root, itemID)
 	var saveErr error
 	if loadErr == nil && current == dispatched {
-		saveErr = saveItemSession(s.root, itemID, sessionFile{Provider: dispatched.Provider, Model: dispatched.Model, SessionID: sessionID})
+		saveErr = saveItemSession(s.root, itemID, sessionFile{Provider: dispatched.Provider, Model: dispatched.Model, Effort: dispatched.Effort, SessionID: sessionID})
 	}
 	s.session.mu.Unlock()
 	if saveErr != nil {
