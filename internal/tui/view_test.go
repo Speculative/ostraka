@@ -775,6 +775,69 @@ func TestProjectContextWatcherOnlyRearms(t *testing.T) {
 	}
 }
 
+func TestPageKeysScrollConversationByHalfAPane(t *testing.T) {
+	keyDown := tea.KeyMsg{Type: tea.KeyPgDown}
+	keyUp := tea.KeyMsg{Type: tea.KeyPgUp}
+
+	tests := []struct {
+		name string
+		page func(model, tea.KeyMsg) model
+	}{
+		{
+			name: "item navigation",
+			page: func(m model, key tea.KeyMsg) model {
+				next, _ := m.handleNavKey(key)
+				return next.(model)
+			},
+		},
+		{
+			name: "project navigation",
+			page: func(m model, key tea.KeyMsg) model {
+				m.projectPane = 1
+				next, _ := m.handleNavKey(key)
+				return next.(model)
+			},
+		},
+		{
+			name: "turn composer",
+			page: func(m model, key tea.KeyMsg) model {
+				m.mode = modeCompose
+				next, _ := m.handleInputKey(key)
+				return next.(model)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newModel(nil, nil, nil)
+			m.conv.Height = 20
+			m.conv.SetContent(strings.Repeat("line\n", 100))
+			m.conv.SetYOffset(30)
+
+			m = tt.page(m, keyDown)
+			if got := m.conv.YOffset; got != 40 {
+				t.Fatalf("PgDn offset = %d, want 40", got)
+			}
+			m = tt.page(m, keyUp)
+			if got := m.conv.YOffset; got != 30 {
+				t.Errorf("PgUp offset = %d, want 30", got)
+			}
+		})
+	}
+}
+
+func TestPageKeyStillScrollsAOneLineConversationPane(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.conv.Height = 1
+	m.conv.SetContent("one\ntwo\nthree")
+
+	next, _ := m.handleNavKey(tea.KeyMsg{Type: tea.KeyPgDown})
+	if got := next.(model).conv.YOffset; got != 1 {
+		t.Errorf("PgDn offset = %d, want 1", got)
+	}
+}
+
 // mkItem builds a minimal inbox item for the selection tests below.
 func mkItem(id string, st models.Status) models.Item {
 	return models.Item{ID: id, Channel: models.ChannelInbox, Status: st, Created: t0, Title: id}

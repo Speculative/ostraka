@@ -654,12 +654,10 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showProjectContext()
 			return m, nil
 		case "pgdown":
-			m.conv.PageDown()
-			m.syncNewBelow()
+			m.pageConversation(1)
 			return m, nil
 		case "pgup":
-			m.conv.PageUp()
-			m.syncNewBelow()
+			m.pageConversation(-1)
 			return m, nil
 		case "e":
 			if m.selected < 0 || m.selected >= len(m.projectEntries) || !m.projectEntries[m.selected].editable {
@@ -702,11 +700,9 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showSelected()
 		}
 	case "pgdown":
-		m.conv.PageDown()
-		m.syncNewBelow()
+		m.pageConversation(1)
 	case "pgup":
-		m.conv.PageUp()
-		m.syncNewBelow()
+		m.pageConversation(-1)
 	case "1":
 		return m.switchView(channelView(models.ChannelInbox))
 	case "2":
@@ -1134,12 +1130,10 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "pgdown":
 		// The textarea binds neither page key, so they stay available for
 		// scrolling the conversation while composing a reply to it.
-		m.conv.PageDown()
-		m.syncNewBelow()
+		m.pageConversation(1)
 		return m, nil
 	case "pgup":
-		m.conv.PageUp()
-		m.syncNewBelow()
+		m.pageConversation(-1)
 		return m, nil
 	}
 	prevH := m.currentInputHeight()
@@ -2179,6 +2173,19 @@ func (m *model) syncNewBelow() {
 	if m.conv.AtBottom() {
 		m.newBelow = false
 	}
+}
+
+// pageConversation keeps half of the current pane visible across page-key
+// presses, so a reader retains context instead of jumping by a whole screen.
+// A one-line pane is the only case where half its height would not move at all.
+func (m *model) pageConversation(direction int) {
+	distance := max(1, m.conv.Height/2)
+	if direction > 0 {
+		m.conv.ScrollDown(distance)
+	} else {
+		m.conv.ScrollUp(distance)
+	}
+	m.syncNewBelow()
 }
 
 func (m *model) updateConv() {
