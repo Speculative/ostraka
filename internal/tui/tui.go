@@ -428,6 +428,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case itemsLoadedMsg:
+		// Project documents deliberately do not load the item list into the
+		// reading pane. A watcher event can have queued a list load just before
+		// the user opened Project Context, so guard here as well as at the
+		// watcher entry point below.
+		if m.projectPane != 0 {
+			return m, nil
+		}
 		// Loads run asynchronously. A response from before a b toggle must not
 		// replace the list after the toggle has requested the opposite filter;
 		// otherwise the first keypress appears to do nothing until the next
@@ -483,7 +490,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case watchEventMsg:
-		// Re-arm the watcher and reload current channel.
+		// Re-arm the watcher. Project documents are independent of item
+		// reloads, so leave their pane alone while they are open.
+		if m.projectPane != 0 {
+			return m, waitForWatch(m.watchCh)
+		}
 		return m, tea.Batch(waitForWatch(m.watchCh), loadItemsCmd(m.store, m.view, m.showBacklog))
 
 	case errMsg:

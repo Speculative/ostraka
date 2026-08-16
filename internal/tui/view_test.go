@@ -661,6 +661,48 @@ func TestProjectContextUsesTheThirdViewKey(t *testing.T) {
 	}
 }
 
+func TestProjectContextIgnoresQueuedItemReloads(t *testing.T) {
+	m := model{
+		view:        channelView(models.ChannelInbox),
+		projectPane: 1,
+		convItemID:  "project-instructions",
+	}
+
+	out, _ := m.Update(itemsLoadedMsg{
+		items:       []models.Item{mkItem("item-1", models.StatusAgentAcknowledged)},
+		view:        m.view,
+		showBacklog: false,
+	})
+	got := out.(model)
+	if got.projectPane != 1 {
+		t.Fatalf("project pane = %d, want 1", got.projectPane)
+	}
+	if len(got.items) != 0 {
+		t.Fatalf("queued item reload populated %d items while project context was open", len(got.items))
+	}
+	if got.convItemID != "project-instructions" {
+		t.Fatalf("queued item reload replaced project content with %q", got.convItemID)
+	}
+}
+
+func TestProjectContextWatcherOnlyRearms(t *testing.T) {
+	watchCh := make(chan struct{}, 1)
+	watchCh <- struct{}{}
+	m := model{
+		view:        channelView(models.ChannelInbox),
+		projectPane: 2,
+		watchCh:     watchCh,
+	}
+
+	_, cmd := m.Update(watchEventMsg{})
+	if cmd == nil {
+		t.Fatal("project context watcher was not re-armed")
+	}
+	if msg := cmd(); msg != (watchEventMsg{}) {
+		t.Fatalf("watcher command returned %T, want watchEventMsg", msg)
+	}
+}
+
 // mkItem builds a minimal inbox item for the selection tests below.
 func mkItem(id string, st models.Status) models.Item {
 	return models.Item{ID: id, Channel: models.ChannelInbox, Status: st, Created: t0, Title: id}
