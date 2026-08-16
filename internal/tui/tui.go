@@ -29,7 +29,10 @@ import (
 // so the list can report the hidden ones instead of dropping them silently.
 type itemsLoadedMsg struct {
 	items         []models.Item
+	allItems      []models.Item
 	hiddenBacklog int
+	view          listView
+	showBacklog   bool
 }
 type watchEventMsg struct{}
 type errMsg error
@@ -163,7 +166,13 @@ func loadItemsCmd(s *store.Store, v listView, showBacklog bool) tea.Cmd {
 			return errMsg(err)
 		}
 		shown, hidden := v.prepare(items, showBacklog)
-		return itemsLoadedMsg{items: shown, hiddenBacklog: hidden}
+		return itemsLoadedMsg{
+			items:         shown,
+			allItems:      items,
+			hiddenBacklog: hidden,
+			view:          v,
+			showBacklog:   showBacklog,
+		}
 	}
 }
 
@@ -193,9 +202,11 @@ type model struct {
 
 	view  listView
 	views []listView
-	// showBacklog reveals parked items in the channel views. Off by default:
-	// the list is meant to be what still needs someone.
-	showBacklog bool
+	// showBacklog reveals parked items in the channel views. At startup the
+	// inbox includes them when all its rows fit; after that, b is an explicit
+	// user choice that reloads preserve.
+	showBacklog                  bool
+	backlogVisibilityInitialized bool
 	// hiddenBacklog is how many items the current view is suppressing.
 	hiddenBacklog int
 	items         []models.Item
@@ -397,9 +408,23 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m = m.recalcLayout()
+		// Init starts its asynchronous load before Bubble Tea tells us the
+		// terminal size. Reload once dimensions are known so the initial inbox
+		// can make its one-time backlog choice from the real list capacity.
+		if !m.backlogVisibilityInitialized && m.view == channelView(models.ChannelInbox) {
+			return m, loadItemsCmd(m.store, m.view, false)
+		}
 		return m, nil
 
 	case itemsLoadedMsg:
+		// Loads run asynchronously. A response from before a b toggle must not
+		// replace the list after the toggle has requested the opposite filter;
+		// otherwise the first keypress appears to do nothing until the next
+		// response happens to arrive. The same guard prevents a former tab from
+		// repainting the one currently being viewed.
+		if msg.view != m.view || (m.backlogVisibilityInitialized && msg.showBacklog != m.showBacklog) {
+			return m, nil
+		}
 		prevID := m.selectedID()
 		prevRendered := m.convItemID
 		prevTurns := m.convTurns
@@ -407,8 +432,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Sample before SetContent: appending lines can change the answer.
 		wasAtBottom := m.conv.AtBottom()
 
-		m.items = msg.items
-		m.hiddenBacklog = msg.hiddenBacklog
+		if !m.backlogVisibilityInitialized && msg.allItems != nil && m.view == channelView(models.ChannelInbox) && m.listBaseAvailRows() > 0 {
+			m.showBacklog = m.initialBacklogFits(msg.allItems)
+			m.backlogVisibilityInitialized = true
+			m.items, m.hiddenBacklog = m.view.prepare(msg.allItems, m.showBacklog)
+		} else {
+			m.items = msg.items
+			m.hiddenBacklog = msg.hiddenBacklog
+		}
 		m.restoreSelection(prevID)
 		m.updateConv()
 
@@ -1687,11 +1718,9 @@ func windowListRows(rows []string, start, selected, availH int) (window []string
 // keep listOffset in sync on every keystroke without paying for lipgloss
 // styling each time.
 func (m model) listRowHeights() []int {
-	colW := m.listWidth() - 2
-	textW := colW - badgeW
 	heights := make([]int, 0, len(m.items)+1)
 	for _, it := range m.items {
-		heights = append(heights, len(truncateLines(wordWrap(it.Title, textW), previewMaxLines, textW))+1)
+		heights = append(heights, m.listRowHeight(it))
 	}
 	if m.draft {
 		heights = append(heights, 2)
@@ -1699,11 +1728,40 @@ func (m model) listRowHeights() []int {
 	return heights
 }
 
+// listRowHeight is the number of screen rows a list item occupies. Keeping it
+// separate from listRowHeights lets startup decide whether the whole inbox,
+// including backlog, fits before choosing which slice to display.
+func (m model) listRowHeight(item models.Item) int {
+	colW := m.listWidth() - 2
+	textW := colW - badgeW
+	return len(truncateLines(wordWrap(item.Title, textW), previewMaxLines, textW)) + 1
+}
+
+// listBaseAvailRows is the list's row budget without the hidden-backlog
+// marker. That is the relevant capacity when deciding whether to show every
+// inbox row at startup.
+func (m model) listBaseAvailRows() int {
+	return m.height - 2 - 2 // header+footer, then the panel's top+bottom padding
+}
+
+// initialBacklogFits reports whether showing all live inbox items, including
+// parked backlog, still leaves room in the list. A list exactly full is not
+// considered a short inbox: hiding backlog then reserves the extra line for
+// the marker and makes the overflow discoverable.
+func (m model) initialBacklogFits(all []models.Item) bool {
+	items, _ := channelView(models.ChannelInbox).prepare(all, true)
+	used := 0
+	for _, item := range items {
+		used += m.listRowHeight(item)
+	}
+	return used < m.listBaseAvailRows()
+}
+
 // listAvailRows is the line budget renderList windows rows into: the list
 // panel's height minus the header, footer, and panel padding, minus one more
 // if the hidden-backlog marker is going to claim a line below the rows.
 func (m model) listAvailRows() int {
-	avail := m.height - 2 - 2 // header+footer, then the panel's top+bottom padding
+	avail := m.listBaseAvailRows()
 	if hiddenBacklogLabel(m.hiddenBacklog) != "" {
 		avail--
 	}

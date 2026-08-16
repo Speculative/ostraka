@@ -182,6 +182,75 @@ func TestPrepareCountsOnlyBacklogAsHidden(t *testing.T) {
 	}
 }
 
+func TestInitialBacklogFitsOnlyWhenInboxLeavesListSpace(t *testing.T) {
+	m := model{width: 80, height: 10} // six list rows after chrome
+	all := []models.Item{
+		item(models.ChannelInbox, models.StatusActive, t0),
+		item(models.ChannelInbox, models.StatusBacklog, t0),
+	}
+	if !m.initialBacklogFits(all) {
+		t.Error("short inbox should show backlog on startup")
+	}
+
+	all = append(all, item(models.ChannelInbox, models.StatusBacklog, t0))
+	if m.initialBacklogFits(all) {
+		t.Error("inbox that fills the list should hide backlog on startup")
+	}
+}
+
+func TestInitialBacklogFitUsesRenderedRowHeights(t *testing.T) {
+	m := model{width: 80, height: 9} // five list rows after chrome
+	all := []models.Item{
+		item(models.ChannelInbox, models.StatusActive, t0),
+		item(models.ChannelInbox, models.StatusBacklog, t0),
+	}
+	all[1].Title = strings.Repeat("backlog ", 20)
+	if m.initialBacklogFits(all) {
+		t.Error("wrapped titles that fill the list should hide backlog")
+	}
+}
+
+func TestFirstInboxLoadAppliesAutomaticBacklogVisibility(t *testing.T) {
+	m := model{view: channelView(models.ChannelInbox), width: 80, height: 10}
+	all := []models.Item{
+		item(models.ChannelInbox, models.StatusActive, t0),
+		item(models.ChannelInbox, models.StatusBacklog, t0),
+	}
+	out, _ := m.Update(itemsLoadedMsg{allItems: all, view: m.view})
+	got := out.(model)
+	if !got.backlogVisibilityInitialized || !got.showBacklog {
+		t.Error("first short inbox load should enable backlog visibility")
+	}
+	if len(got.items) != len(all) {
+		t.Errorf("shown items = %d, want %d", len(got.items), len(all))
+	}
+}
+
+func TestItemsLoadDoesNotUndoNewerBacklogToggle(t *testing.T) {
+	backlog := item(models.ChannelInbox, models.StatusBacklog, t0)
+	m := model{
+		view:                         channelView(models.ChannelInbox),
+		width:                        80,
+		height:                       10,
+		showBacklog:                  true,
+		backlogVisibilityInitialized: true,
+		items:                        []models.Item{backlog},
+	}
+
+	// This response was started before b enabled backlog. It must not hide the
+	// row after the model has moved on to the newer visibility choice.
+	out, _ := m.Update(itemsLoadedMsg{
+		items:         nil,
+		hiddenBacklog: 1,
+		view:          m.view,
+		showBacklog:   false,
+	})
+	got := out.(model)
+	if !got.showBacklog || len(got.items) != 1 || got.items[0].Status != models.StatusBacklog {
+		t.Errorf("stale load replaced current backlog view: %+v", got)
+	}
+}
+
 func TestHiddenBacklogLabel(t *testing.T) {
 	if got := hiddenBacklogLabel(0); got != "" {
 		t.Errorf("zero should render nothing, got %q", got)
@@ -568,7 +637,7 @@ func mkItem(id string, st models.Status) models.Item {
 // re-established after any reload.
 func loadInto(t *testing.T, m model, items []models.Item) model {
 	t.Helper()
-	out, _ := m.Update(itemsLoadedMsg{items: items})
+	out, _ := m.Update(itemsLoadedMsg{items: items, view: m.view, showBacklog: m.showBacklog})
 	return out.(model)
 }
 
