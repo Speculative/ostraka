@@ -124,9 +124,12 @@ func startWatcher(root string) (<-chan struct{}, error) {
 		w.Close()
 		return nil, err
 	}
-	// Only watch the supported item locations. Legacy channel directories may
-	// remain on disk, but they are no longer part of the store schema or TUI.
-	for _, name := range []string{"INBOX", "ARCHIVE"} {
+	// Watch the supported item locations and supervisor state. Live progress is
+	// written under supervisor/, so omitting it leaves the reading pane stale
+	// until another action happens to trigger a reload. Legacy channel
+	// directories may remain on disk, but they are no longer part of the store
+	// schema or TUI.
+	for _, name := range []string{"INBOX", "ARCHIVE", "supervisor"} {
 		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
 			w.Add(filepath.Join(root, name))
 		}
