@@ -52,7 +52,7 @@ func FindRoot(start string) (string, error) {
 }
 
 func NewStore(root string) (*Store, error) {
-	for _, sub := range append(dirValues(), archiveDir) {
+	for _, sub := range append(append(dirValues(), archiveDir), activityDir) {
 		if err := os.MkdirAll(filepath.Join(root, sub), 0755); err != nil {
 			return nil, err
 		}
@@ -209,6 +209,20 @@ func (s *Store) CreateItem(channel models.Channel, title, body string, itemType 
 	if err := ValidateTitle(title); err != nil {
 		return models.Item{}, err
 	}
+	var parentItem models.Item
+	if parent != "" {
+		var err error
+		parentItem, err = s.GetItem(parent)
+		if err != nil {
+			return models.Item{}, fmt.Errorf("parent %q: %w", parent, err)
+		}
+		if parentItem.Parent != "" {
+			return models.Item{}, fmt.Errorf("parent %q is a subthread; subthreads cannot be nested", parent)
+		}
+		if models.TerminalStatuses[parentItem.Status] {
+			return models.Item{}, fmt.Errorf("cannot create a subthread under terminal item %q", parent)
+		}
+	}
 	now := time.Now().UTC()
 	id := now.Format("20060102-150405")
 
@@ -240,7 +254,97 @@ func (s *Store) CreateItem(channel models.Channel, title, body string, itemType 
 	if err := WriteItem(item, s.itemPath(item)); err != nil {
 		return models.Item{}, err
 	}
+	if parent != "" {
+		if err := s.addSubthreadActivity(parentItem, item, ActivitySubthreadCreated, ""); err != nil {
+			return models.Item{}, err
+		}
+	}
 	return item, nil
+}
+
+// CreateSubthread accepts either a root or one of its children and always
+// attaches the new item directly to the root. This is the store-level guard
+// behind the product's one-level tree invariant.
+func (s *Store) CreateSubthread(contextID string, title, body string, itemType models.ItemType, status models.Status) (models.Item, error) {
+	context, err := s.GetItem(contextID)
+	if err != nil {
+		return models.Item{}, err
+	}
+	rootID := context.ID
+	if context.Parent != "" {
+		rootID = context.Parent
+	}
+	return s.CreateItem(context.Channel, title, body, itemType, status, rootID)
+}
+
+// AddRelated makes a symmetric root-to-root link. Both endpoints currently
+// store the edge for convenient inspection, while readers still union links
+// so a manually edited or partially written endpoint cannot hide a relation.
+func (s *Store) AddRelated(firstID, secondID string) (models.Item, error) {
+	first, err := s.GetItem(firstID)
+	if err != nil {
+		return models.Item{}, err
+	}
+	second, err := s.GetItem(secondID)
+	if err != nil {
+		return models.Item{}, err
+	}
+	if first.Parent != "" || second.Parent != "" {
+		return models.Item{}, fmt.Errorf("related items must be top-level roots")
+	}
+	if first.ID == second.ID {
+		return models.Item{}, fmt.Errorf("an item cannot be related to itself")
+	}
+	first.Related = appendUnique(first.Related, second.ID)
+	second.Related = appendUnique(second.Related, first.ID)
+	if err := WriteItem(first, s.itemPath(first)); err != nil {
+		return models.Item{}, err
+	}
+	if err := WriteItem(second, s.itemPath(second)); err != nil {
+		return models.Item{}, err
+	}
+	return first, nil
+}
+
+// RelatedItems returns the symmetric union of stored outgoing links and
+// backlinks. Dangling references are ignored rather than making an item
+// unreadable after its related peer is deleted.
+func (s *Store) RelatedItems(id string) ([]models.Item, error) {
+	item, err := s.GetItem(id)
+	if err != nil {
+		return nil, err
+	}
+	all, err := s.ListItems(ListOpts{})
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]bool)
+	for _, related := range item.Related {
+		ids[related] = true
+	}
+	for _, candidate := range all {
+		for _, related := range candidate.Related {
+			if related == id {
+				ids[candidate.ID] = true
+			}
+		}
+	}
+	var out []models.Item
+	for _, candidate := range all {
+		if ids[candidate.ID] {
+			out = append(out, candidate)
+		}
+	}
+	return out, nil
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.Item, error) {
@@ -298,6 +402,10 @@ func StatusAfterAgentTurn(current models.Status) (models.Status, bool) {
 }
 
 func (s *Store) SetStatus(id string, status models.Status) (models.Item, error) {
+	return s.SetStatusBy(id, status, models.ActorUser)
+}
+
+func (s *Store) SetStatusBy(id string, status models.Status, actor models.Actor) (models.Item, error) {
 	oldPath, err := s.pathForID(id)
 	if err != nil {
 		return models.Item{}, err
@@ -306,6 +414,18 @@ func (s *Store) SetStatus(id string, status models.Status) (models.Item, error) 
 	if err != nil {
 		return models.Item{}, err
 	}
+	if models.TerminalStatuses[status] && item.Parent == "" {
+		children, err := s.ListItems(ListOpts{})
+		if err != nil {
+			return models.Item{}, err
+		}
+		for _, child := range children {
+			if child.Parent == item.ID && !models.TerminalStatuses[child.Status] {
+				return models.Item{}, fmt.Errorf("cannot close root %q while subthread %q is still open", item.ID, child.ID)
+			}
+		}
+	}
+	oldStatus := item.Status
 	item.Status = status
 	newPath := s.itemPath(item)
 	if err := WriteItem(item, newPath); err != nil {
@@ -319,6 +439,23 @@ func (s *Store) SetStatus(id string, status models.Status) (models.Item, error) 
 			return models.Item{}, err
 		}
 	}
+	if item.Parent != "" && !models.TerminalStatuses[oldStatus] && models.TerminalStatuses[status] {
+		root, rootErr := s.GetItem(item.Parent)
+		if rootErr != nil {
+			return models.Item{}, rootErr
+		}
+		if err := s.appendActivity(root.ID, models.Activity{
+			ID:         activityID(time.Now().UTC()),
+			Type:       ActivitySubthreadClosed,
+			ChildID:    item.ID,
+			ChildTitle: item.Title,
+			Result:     string(status),
+			Actor:      actor,
+			Timestamp:  time.Now().UTC(),
+		}); err != nil {
+			return models.Item{}, err
+		}
+	}
 	return item, nil
 }
 
@@ -326,6 +463,15 @@ func (s *Store) DeleteItem(id string) error {
 	path, err := s.pathForID(id)
 	if err != nil {
 		return err
+	}
+	items, err := s.ListItems(ListOpts{})
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if item.Parent == id {
+			return fmt.Errorf("cannot delete item %q while it has subthreads", id)
+		}
 	}
 	return os.Remove(path)
 }

@@ -938,3 +938,66 @@ func TestDraftKeepsItsRowPastTheEnd(t *testing.T) {
 		t.Errorf("draft selection moved to %d, want 1 (one past the end)", got.selected)
 	}
 }
+
+func TestChildDraftStaysWithItsParentFamily(t *testing.T) {
+	root := mkItem("root", models.StatusActive)
+	root.Title = "root title"
+	child := mkItem("child", models.StatusBacklog)
+	child.Parent = root.ID
+	child.Title = "existing child"
+	other := mkItem("other", models.StatusActive)
+	other.Title = "other root"
+
+	m := model{
+		items:       []models.Item{root, child, other},
+		allItems:    []models.Item{root, child, other},
+		selected:    3,
+		draft:       true,
+		draftParent: root.ID,
+		width:       100,
+		height:      40,
+		view:        channelView(models.ChannelInbox),
+		collapsed:   make(map[string]bool),
+	}
+	m.title.SetValue("new child")
+
+	if got := m.draftRowIndex(); got != 2 {
+		t.Fatalf("draft row = %d, want 2 after the parent family", got)
+	}
+	content, _ := m.renderList(20)
+	plain := ansi.Strip(content)
+	rootAt := strings.Index(plain, "root title")
+	childAt := strings.Index(plain, "existing child")
+	draftAt := strings.Index(plain, "new child")
+	otherAt := strings.Index(plain, "other root")
+	if rootAt < 0 || childAt < 0 || draftAt < 0 || otherAt < 0 {
+		t.Fatalf("list is missing a row: %q", plain)
+	}
+	if !(rootAt < childAt && childAt < draftAt && draftAt < otherAt) {
+		t.Fatalf("draft was not rendered after its parent family: %q", plain)
+	}
+	if !strings.Contains(plain, "├─ › new child") {
+		t.Fatalf("child draft is not indented as a subthread: %q", plain)
+	}
+}
+
+func TestCancelChildDraftRestoresParentSelection(t *testing.T) {
+	root := mkItem("root", models.StatusActive)
+	child := mkItem("child", models.StatusBacklog)
+	child.Parent = root.ID
+	other := mkItem("other", models.StatusActive)
+
+	m := newSelectionModel(t, []models.Item{root, child, other}, 3)
+	m.mode = modeTitle
+	m.draft = true
+	m.draftParent = root.ID
+
+	got := m.cancelDraft()
+
+	if got.selectedID() != root.ID {
+		t.Errorf("selection landed on %q, want parent %q", got.selectedID(), root.ID)
+	}
+	if got.selected != 0 {
+		t.Errorf("selected index = %d, want 0", got.selected)
+	}
+}

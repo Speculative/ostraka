@@ -215,10 +215,12 @@ type statusSpyHarness struct {
 	st     *store.Store
 	itemID string
 	during models.Status
+	called bool
 	err    error
 }
 
 func (h *statusSpyHarness) RunTurn(_ context.Context, _ string, _ string, _ string, _ string, _ func(string)) (TurnResult, error) {
+	h.called = true
 	if item, err := h.st.GetItem(h.itemID); err == nil {
 		h.during = item.Status
 	}
@@ -298,8 +300,8 @@ func TestDispatchLeavesNonPendingAgentItemsAlone(t *testing.T) {
 
 	s.dispatch(enqueueMsg{itemID: item.ID})
 
-	if spy.during != models.StatusBacklog {
-		t.Errorf("status during run: got %q want %q", spy.during, models.StatusBacklog)
+	if spy.called {
+		t.Error("stale dispatch launched a harness turn")
 	}
 	after, _ := st.GetItem(item.ID)
 	if after.Status != models.StatusBacklog {

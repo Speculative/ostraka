@@ -72,7 +72,26 @@ func (l *liveLog) append(line string) {
 	defer l.mu.Unlock()
 	l.buf.WriteString(line)
 	l.buf.WriteString("\n")
-	os.WriteFile(l.path, []byte(l.buf.String()), 0644) //nolint:errcheck
+	// Replace the log atomically. os.WriteFile truncates the existing path
+	// before writing, so the TUI watcher can otherwise observe a brief empty
+	// file between every two live lines and make the trace flicker.
+	f, err := os.CreateTemp(filepath.Dir(l.path), ".live-*")
+	if err != nil {
+		return
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // no-op once the rename below succeeds
+	if _, err := f.Write([]byte(l.buf.String())); err != nil {
+		f.Close()
+		return
+	}
+	if err := f.Close(); err != nil {
+		return
+	}
+	if err := os.Chmod(tmp, 0644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, l.path)
 }
 
 // clear removes the log. Called when a dispatch ends, whichever way it ended:

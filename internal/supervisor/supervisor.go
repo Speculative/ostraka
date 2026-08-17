@@ -31,6 +31,25 @@ func nudgePrompt(itemID, userTurn string) string {
 		itemID, itemID)
 }
 
+func activityNudgePrompt(itemID, userTurn string, activities []models.Activity) string {
+	base := nudgePrompt(itemID, userTurn)
+	if len(activities) == 0 {
+		return base
+	}
+	var sb strings.Builder
+	sb.WriteString(base)
+	sb.WriteString("\n\n--- unhandled subthread activity ---\n")
+	for _, activity := range activities {
+		title := activity.ChildTitle
+		if title == "" {
+			title = activity.ChildID
+		}
+		sb.WriteString(fmt.Sprintf("%s: %s (%s, result=%s, actor=%s)\n", activity.Type, title, activity.ChildID, activity.Result, activity.Actor))
+	}
+	sb.WriteString("Review each affected subthread with `ostraka item show <child-id> --json`, reconcile its decision with the root item, and include the consequences in your final root reply.")
+	return sb.String()
+}
+
 const bootstrapItemContextMaxChars = 24000
 
 func bootstrapPrompt(itemID, instructions, brief, itemContext, replyCmd string) string {
@@ -55,9 +74,40 @@ func itemContext(item models.Item) string {
 	var sb strings.Builder
 	sb.WriteString(item.Title + "\n")
 	sb.WriteString(fmt.Sprintf("channel: %s  type: %s  status: %s  created: %s\n\n", item.Channel, item.Type, item.Status, item.Created.Format(time.RFC3339)))
+	if item.Parent != "" {
+		sb.WriteString("parent: " + item.Parent + "\n\n")
+	}
+	if len(item.Related) > 0 {
+		sb.WriteString("related: " + strings.Join(item.Related, ", ") + "\n\n")
+	}
 	sb.WriteString(item.Body)
 	for _, turn := range item.Turns {
 		sb.WriteString(fmt.Sprintf("\n\n--- %s · %s ---\n%s", turn.Actor, turn.Timestamp.Format(time.RFC3339), turn.Content))
+	}
+	return sb.String()
+}
+
+func relationshipContext(s *store.Store, item models.Item) string {
+	if s == nil {
+		return ""
+	}
+	var sb strings.Builder
+	if item.Parent != "" {
+		if root, err := s.GetItem(item.Parent); err == nil {
+			sb.WriteString(fmt.Sprintf("\n--- subthread relationship ---\nroot: %s — %s\n", root.ID, root.Title))
+		}
+	}
+	if item.Parent == "" {
+		if all, err := s.ListItems(store.ListOpts{}); err == nil {
+			for _, child := range all {
+				if child.Parent == item.ID {
+					sb.WriteString(fmt.Sprintf("\nsubthread: %s — %s [%s]", child.ID, child.Title, child.Status))
+				}
+			}
+		}
+	}
+	if len(item.Related) > 0 {
+		sb.WriteString("\nrelated roots: " + strings.Join(item.Related, ", "))
 	}
 	return sb.String()
 }
@@ -133,7 +183,8 @@ func (s *Supervisor) latestUserTurn(itemID string) string {
 const queueCapacity = 64
 
 type enqueueMsg struct {
-	itemID string
+	itemID   string
+	activity bool
 }
 
 // Supervisor drives a background coding-agent harness, resuming it whenever
@@ -160,7 +211,10 @@ type Supervisor struct {
 	started  bool
 	done     chan struct{}
 
-	busy busyGuard
+	busy           busyGuard
+	queueMu        sync.Mutex
+	activityQueued map[string]bool
+	activityBusy   map[string]bool
 }
 
 // busyGuard tracks the item being dispatched right now, so the UI can ask
@@ -384,6 +438,77 @@ func (s *Supervisor) Enqueue(itemID string) {
 	}
 }
 
+func (s *Supervisor) enqueueActivity(itemID string) {
+	s.queueMu.Lock()
+	if s.activityQueued == nil {
+		s.activityQueued = make(map[string]bool)
+	}
+	if s.activityQueued[itemID] {
+		s.queueMu.Unlock()
+		return
+	}
+	s.activityQueued[itemID] = true
+	s.queueMu.Unlock()
+	select {
+	case s.queue <- enqueueMsg{itemID: itemID, activity: true}:
+	default:
+		s.queueMu.Lock()
+		delete(s.activityQueued, itemID)
+		s.queueMu.Unlock()
+		s.logger.Printf("queue full, dropping activity dispatch for item %s", itemID)
+	}
+}
+
+// EnqueuePendingActivityRoots wakes roots affected by child closure events.
+// It is safe to call after every filesystem notification; queue de-duplication
+// keeps a burst of child writes to one family from launching duplicate runs.
+func (s *Supervisor) EnqueuePendingActivityRoots() {
+	if s.store == nil {
+		return
+	}
+	items, err := s.store.ListItems(store.ListOpts{})
+	if err != nil {
+		s.logger.Printf("cannot scan activity roots: %v", err)
+		return
+	}
+	for _, root := range items {
+		if root.Parent != "" || root.Status == models.StatusBacklog || models.TerminalStatuses[root.Status] || root.Status == models.StatusProposed {
+			continue
+		}
+		activities, err := s.store.PendingActivities(root.ID)
+		if err != nil {
+			s.logger.Printf("cannot read activities for %s: %v", root.ID, err)
+			continue
+		}
+		shouldWake := false
+		for _, activity := range activities {
+			if activity.Type == store.ActivitySubthreadClosed {
+				shouldWake = true
+				break
+			}
+		}
+		if !shouldWake {
+			continue
+		}
+		s.queueMu.Lock()
+		busy := s.activityBusy[root.ID]
+		s.queueMu.Unlock()
+		if busy {
+			// The dispatch will rescan after it finishes. This suppresses the
+			// repeated fsnotify writes caused by one activity journal update,
+			// while still allowing genuinely new events to queue a follow-up.
+			continue
+		}
+		if root.Status != models.StatusPendingAgent && root.Status != models.StatusAgentAcknowledged {
+			if _, err := s.store.SetStatusBy(root.ID, models.StatusPendingAgent, models.ActorAgent); err != nil {
+				s.logger.Printf("cannot queue root %s for child activity: %v", root.ID, err)
+				continue
+			}
+		}
+		s.enqueueActivity(root.ID)
+	}
+}
+
 func (s *Supervisor) run() {
 	defer close(s.done)
 	ctx := s.runContext()
@@ -403,6 +528,11 @@ func (s *Supervisor) run() {
 			if !ok {
 				return
 			}
+			if msg.activity {
+				s.queueMu.Lock()
+				delete(s.activityQueued, msg.itemID)
+				s.queueMu.Unlock()
+			}
 			s.dispatch(msg)
 		}
 	}
@@ -410,22 +540,26 @@ func (s *Supervisor) run() {
 
 // markAcknowledged flags an item as being worked on, but only from
 // pending-agent: any other status means the user has moved the item since it
-// was queued, and a stale dispatch should not drag it back.
-func (s *Supervisor) markAcknowledged(itemID string) {
+// was queued, and a stale dispatch should not drag it back or launch a second
+// harness turn. The bool is the dispatch admission result; callers must not
+// run the harness when the queued request has gone stale.
+func (s *Supervisor) markAcknowledged(itemID string) bool {
 	if s.store == nil {
-		return
+		return true
 	}
 	item, err := s.store.GetItem(itemID)
 	if err != nil {
 		s.logger.Printf("item %s: cannot read to mark acknowledged: %v", itemID, err)
-		return
+		return false
 	}
 	if item.Status != models.StatusPendingAgent {
-		return
+		return false
 	}
 	if _, err := s.store.SetStatus(itemID, models.StatusAgentAcknowledged); err != nil {
 		s.logger.Printf("item %s: cannot mark acknowledged: %v", itemID, err)
+		return false
 	}
+	return true
 }
 
 // revertAcknowledged clears the in-progress marker if it is still set. It is a
@@ -444,6 +578,29 @@ func (s *Supervisor) revertAcknowledged(itemID string, to models.Status) {
 }
 
 func (s *Supervisor) dispatch(msg enqueueMsg) {
+	s.queueMu.Lock()
+	if s.activityBusy == nil {
+		s.activityBusy = make(map[string]bool)
+	}
+	s.activityBusy[msg.itemID] = true
+	s.queueMu.Unlock()
+	defer func() {
+		s.queueMu.Lock()
+		delete(s.activityBusy, msg.itemID)
+		s.queueMu.Unlock()
+		s.EnqueuePendingActivityRoots()
+	}()
+	if s.store == nil {
+		s.logger.Printf("item %s: no store available", msg.itemID)
+	}
+	var activities []models.Activity
+	var beforeTurns int
+	if s.store != nil {
+		activities, _ = s.store.PendingActivities(msg.itemID)
+		if item, err := s.store.GetItem(msg.itemID); err == nil {
+			beforeTurns = len(item.Turns)
+		}
+	}
 	s.session.mu.Lock()
 	sf, err := loadItemSession(s.root, msg.itemID)
 	s.session.mu.Unlock()
@@ -467,12 +624,15 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	live.clear()
 	defer live.clear()
 
-	s.markAcknowledged(msg.itemID)
+	if !s.markAcknowledged(msg.itemID) {
+		s.logger.Printf("item %s: skipping stale dispatch; item is no longer pending-agent", msg.itemID)
+		return
+	}
 	s.setBusy(msg.itemID)
 	defer s.setBusy("")
 
 	userTurn := s.latestUserTurn(msg.itemID)
-	prompt := nudgePrompt(msg.itemID, userTurn)
+	prompt := activityNudgePrompt(msg.itemID, userTurn, activities)
 	if sf.SessionID == "" {
 		instructions, brief := "", ""
 		context := fmt.Sprintf("Ostraka item %s could not be read.", msg.itemID)
@@ -481,6 +641,10 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 			brief, _ = s.store.ProjectBrief()
 			if item, err := s.store.GetItem(msg.itemID); err == nil {
 				context = boundedItemContext(item)
+				context += relationshipContext(s.store, item)
+			}
+			if len(activities) > 0 {
+				context += "\n\n" + activityNudgePrompt(msg.itemID, "", activities)
 			}
 		}
 		prompt = bootstrapPrompt(msg.itemID, instructions, brief, context, replyCommand(s.root, msg.itemID))
@@ -511,7 +675,26 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	}
 	// A successful run whose agent never posted a turn leaves the marker
 	// behind — hand it back rather than showing work that isn't happening.
-	s.revertAcknowledged(msg.itemID, models.StatusPendingUser)
+	postedAgentTurn := false
+	if s.store != nil {
+		if item, readErr := s.store.GetItem(msg.itemID); readErr == nil {
+			postedAgentTurn = len(item.Turns) > beforeTurns && len(item.Turns) > 0 && item.Turns[len(item.Turns)-1].Actor == models.ActorAgent
+		}
+	}
+	if postedAgentTurn && len(activities) > 0 {
+		ids := make([]string, len(activities))
+		for i, activity := range activities {
+			ids[i] = activity.ID
+		}
+		if err := s.store.MarkActivitiesHandled(msg.itemID, ids); err != nil {
+			s.logger.Printf("item %s: cannot mark child activities handled: %v", msg.itemID, err)
+		}
+	}
+	if len(activities) > 0 && !postedAgentTurn {
+		s.revertAcknowledged(msg.itemID, models.StatusPendingAgent)
+	} else {
+		s.revertAcknowledged(msg.itemID, models.StatusPendingUser)
+	}
 	s.persistSession(msg.itemID, sf, result.SessionID)
 	s.logger.Printf("item %s: dispatch complete (session=%s is_error=%v duration_ms=%d cost_usd=%.4f num_turns=%d model=%s context_used=%d context_window=%d)",
 		msg.itemID, result.SessionID, result.IsError, result.DurationMs, result.TotalCostUSD, result.NumTurns,

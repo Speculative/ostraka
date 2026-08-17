@@ -30,7 +30,7 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd, preambleCmd)
-	itemCmd.AddCommand(itemAddCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRmCmd)
+	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRmCmd)
 	rootCmd.AddCommand(projectCmd)
 	projectCmd.AddCommand(projectInstructionsCmd, projectBriefCmd)
 	projectInstructionsCmd.AddCommand(projectInstructionsShowCmd, projectInstructionsReplaceCmd)
@@ -216,6 +216,7 @@ var addFlags struct {
 	itype   string
 	status  string
 	parent  string
+	related []string
 }
 
 func addItemAddFlags() {
@@ -224,8 +225,9 @@ func addItemAddFlags() {
 	f.StringVar(&addFlags.title, "title", "", "single-line label for list views (required)")
 	f.StringVar(&addFlags.body, "body", "", "opening description, any length (required)")
 	f.StringVarP(&addFlags.itype, "type", "t", "thread", "thread|doc")
-	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|pending-agent|agent-acknowledged|done|archived")
+	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|pending-agent|agent-acknowledged|proposed|done|archived")
 	f.StringVarP(&addFlags.parent, "parent", "p", "", "parent item ID")
+	f.StringSliceVar(&addFlags.related, "related", nil, "top-level item IDs to relate")
 	itemAddCmd.MarkFlagRequired("channel")
 	itemAddCmd.MarkFlagRequired("title")
 	itemAddCmd.MarkFlagRequired("body")
@@ -240,20 +242,68 @@ var itemAddCmd = &cobra.Command{
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s := mustStore()
-		item, err := s.CreateItem(
-			models.Channel(addFlags.channel),
-			addFlags.title,
-			addFlags.body,
-			models.ItemType(addFlags.itype),
-			models.Status(addFlags.status),
-			addFlags.parent,
-		)
+		for _, related := range addFlags.related {
+			if _, err := s.GetItem(related); err != nil {
+				return err
+			}
+		}
+		var item models.Item
+		var err error
+		if addFlags.parent != "" {
+			item, err = s.CreateSubthread(addFlags.parent, addFlags.title, addFlags.body, models.ItemType(addFlags.itype), models.Status(addFlags.status))
+		} else {
+			item, err = s.CreateItem(models.Channel(addFlags.channel), addFlags.title, addFlags.body, models.ItemType(addFlags.itype), models.Status(addFlags.status), "")
+		}
 		if err != nil {
+			return err
+		}
+		for _, related := range addFlags.related {
+			if _, err := s.AddRelated(item.ID, related); err != nil {
+				return err
+			}
+		}
+		fmt.Println(item.ID)
+		return nil
+	},
+}
+
+var suggestFlags struct {
+	channel string
+	title   string
+	body    string
+	related string
+}
+
+var itemSuggestCmd = &cobra.Command{
+	Use:   "suggest --title <title> --body <body> --related <id>",
+	Short: "Create a proposed top-level item related to existing work",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		s := mustStore()
+		if _, err := s.GetItem(suggestFlags.related); err != nil {
+			return err
+		}
+		item, err := s.CreateItem(models.Channel(suggestFlags.channel), suggestFlags.title, suggestFlags.body, models.TypeThread, models.StatusProposed, "")
+		if err != nil {
+			return err
+		}
+		if _, err := s.AddRelated(item.ID, suggestFlags.related); err != nil {
 			return err
 		}
 		fmt.Println(item.ID)
 		return nil
 	},
+}
+
+func init() {
+	f := itemSuggestCmd.Flags()
+	f.StringVarP(&suggestFlags.channel, "channel", "c", string(models.ChannelInbox), "inbox")
+	f.StringVar(&suggestFlags.title, "title", "", "single-line label for list views (required)")
+	f.StringVar(&suggestFlags.body, "body", "", "opening description (required)")
+	f.StringVar(&suggestFlags.related, "related", "", "existing top-level item ID (required)")
+	itemSuggestCmd.MarkFlagRequired("title")
+	itemSuggestCmd.MarkFlagRequired("body")
+	itemSuggestCmd.MarkFlagRequired("related")
 }
 
 // ── item list ────────────────────────────────────────────────────────────────
@@ -335,10 +385,19 @@ var itemShowCmd = &cobra.Command{
 		if item.Parent != "" {
 			fmt.Println("parent:", item.Parent)
 		}
+		if len(item.Related) > 0 {
+			fmt.Println("related:", strings.Join(item.Related, ", "))
+		}
 		fmt.Println()
 		fmt.Println(item.Body)
 		for _, turn := range item.Turns {
 			fmt.Printf("\n── %s · %s ──\n%s\n", turn.Actor, turn.Timestamp.Format("2006-01-02 15:04:05"), turn.Content)
+		}
+		if activities, err := s.ListActivities(item.ID); err == nil && len(activities) > 0 {
+			fmt.Println("\n── activity ──")
+			for _, activity := range activities {
+				fmt.Printf("%s %s %s [%s]\n", activity.Timestamp.Format("2006-01-02 15:04:05"), activity.Type, activity.ChildID, activity.Result)
+			}
 		}
 		return nil
 	},
@@ -465,6 +524,7 @@ func itemToJSON(item models.Item) map[string]any {
 		"status":  item.Status,
 		"created": item.Created.Format(time.RFC3339Nano),
 		"parent":  item.Parent,
+		"related": item.Related,
 		"title":   item.Title,
 		"body":    item.Body,
 		"turns":   turns,

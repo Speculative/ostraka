@@ -21,6 +21,7 @@ const (
 	StatusActive       Status = "active"
 	StatusPendingUser  Status = "pending-user"
 	StatusPendingAgent Status = "pending-agent"
+	StatusProposed     Status = "proposed"
 	// StatusAgentAcknowledged sits between pending-agent and the agent's
 	// reply: the supervisor sets it when a dispatch starts, so a turn that is
 	// being worked on is distinguishable from one still sitting in the queue.
@@ -52,6 +53,20 @@ type Turn struct {
 	Content   string
 }
 
+// Activity is structured metadata about a related conversation. Activities
+// are persisted separately from turns so lifecycle notifications do not
+// masquerade as something a user or agent said.
+type Activity struct {
+	ID         string    `json:"id"`
+	Type       string    `json:"type"`
+	ChildID    string    `json:"child_id,omitempty"`
+	ChildTitle string    `json:"child_title,omitempty"`
+	Result     string    `json:"result,omitempty"`
+	Actor      Actor     `json:"actor"`
+	Timestamp  time.Time `json:"timestamp"`
+	Handled    bool      `json:"handled"`
+}
+
 type Item struct {
 	ID      string
 	Channel Channel
@@ -59,6 +74,7 @@ type Item struct {
 	Status  Status
 	Created time.Time
 	Parent  string // empty if none
+	Related []string
 	// Title is a single line: it is the item's label in list views, where a
 	// multi-line one would crowd out every other row. Body carries the
 	// opening description at whatever length it needs.

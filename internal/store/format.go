@@ -18,13 +18,14 @@ const turnSep = "\n\n---\n"
 var attributionRe = regexp.MustCompile(`^\*\*(\w+) · (.+?)\*\*$`)
 
 type frontmatter struct {
-	ID      string `yaml:"id"`
-	Channel string `yaml:"channel"`
-	Type    string `yaml:"type"`
-	Status  string `yaml:"status"`
-	Created string `yaml:"created"`
-	Parent  string `yaml:"parent,omitempty"`
-	Title   string `yaml:"title,omitempty"`
+	ID      string   `yaml:"id"`
+	Channel string   `yaml:"channel"`
+	Type    string   `yaml:"type"`
+	Status  string   `yaml:"status"`
+	Created string   `yaml:"created"`
+	Parent  string   `yaml:"parent,omitempty"`
+	Related []string `yaml:"related,omitempty"`
+	Title   string   `yaml:"title,omitempty"`
 }
 
 // titleMaxLen bounds a derived title. Only items written before title existed
@@ -147,6 +148,7 @@ func ParseItem(path string) (models.Item, error) {
 		Status:  status,
 		Created: created,
 		Parent:  fm.Parent,
+		Related: append([]string(nil), fm.Related...),
 		Title:   title,
 		Body:    itemBody,
 		Turns:   turns,
@@ -164,6 +166,7 @@ func WriteItem(item models.Item, path string) error {
 		Status:  string(item.Status),
 		Created: item.Created.UTC().Format(time.RFC3339Nano),
 		Parent:  item.Parent,
+		Related: append([]string(nil), item.Related...),
 		Title:   item.Title,
 	}
 

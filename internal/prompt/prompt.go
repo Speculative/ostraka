@@ -15,6 +15,17 @@ func AgentOrientation(replyCommand string) string {
 
 When finished, send one final Ostraka item reply using the exact command below. Do not send that reply as a progress acknowledgement: it hands the item back to the user and ends this dispatch. Pass real multiline content through stdin; never put literal \n text in the reply.
 
+Threading guidance: keep supporting explanation inline, but create a direct
+subthread with "ostraka item add --parent <root-or-child-id> --channel inbox
+--status pending-user --title <one-line-title> --body
+<self-contained-question>" when an in-scope
+branch is independently discussable or likely to need multiple exchanges.
+Creating from a child attaches a sibling; never create a grandchild. A
+subthread normally starts pending-user for a question to the user or
+backlog when parked. For work outside this item's scope, suggest a related
+top-level item with "ostraka item suggest --related <item-id> ..."; proposals
+need the user's keep/start decision before they become active work.
+
 Final reply command:
 %s`, replyCommand)
 }

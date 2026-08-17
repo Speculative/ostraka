@@ -53,9 +53,10 @@ var statusRank = map[models.Status]int{
 	models.StatusPendingAgent:      1,
 	models.StatusPendingUser:       2,
 	models.StatusActive:            3,
-	models.StatusBacklog:           4,
-	models.StatusDone:              5,
-	models.StatusArchived:          6,
+	models.StatusProposed:          4,
+	models.StatusBacklog:           5,
+	models.StatusDone:              6,
+	models.StatusArchived:          7,
 }
 
 // rankOf places statuses this build does not know about at the end rather than
@@ -108,6 +109,122 @@ func (v listView) prepare(all []models.Item, showBacklog bool) ([]models.Item, i
 	}
 	sortForDisplay(out)
 	return out, hidden
+}
+
+// rootID identifies the shallow tree owner used by the inbox renderer. A
+// malformed grandchild is still displayed under its recorded parent; the
+// store rejects new ones, while the UI remains tolerant of older files.
+func rootID(item models.Item) string {
+	if item.Parent != "" {
+		return item.Parent
+	}
+	return item.ID
+}
+
+// prepareGrouped filters and sorts roots as families, then expands each root
+// into its direct children unless that root is folded. The returned slice is
+// still a flat selection model, which keeps keyboard navigation and existing
+// conversation code simple while rendering a one-level tree.
+func (v listView) prepareGrouped(all []models.Item, showBacklog bool, collapsed map[string]bool) ([]models.Item, int) {
+	// Unit-level view tests and a partially written legacy file may have no
+	// stable ID. Grouping such rows would merge unrelated roots under the empty
+	// map key, so retain the old flat behavior until IDs are available.
+	for _, item := range all {
+		if item.ID == "" {
+			return v.prepare(all, showBacklog)
+		}
+	}
+	visible := make(map[string]models.Item)
+	hidden := 0
+	for _, item := range all {
+		if v.includes(item, showBacklog) {
+			visible[item.ID] = item
+		} else if !showBacklog && v.includes(item, true) {
+			hidden++
+		}
+	}
+
+	groups := make(map[string][]models.Item)
+	for _, item := range visible {
+		groups[rootID(item)] = append(groups[rootID(item)], item)
+	}
+	roots := make([]models.Item, 0, len(groups))
+	for id, family := range groups {
+		root, ok := visible[id]
+		if !ok {
+			// A terminal child can outlive a root in hand-edited or legacy data.
+			// Keep it reachable as a root-shaped fallback rather than dropping it.
+			root = family[0]
+			root.Parent = ""
+		}
+		roots = append(roots, root)
+	}
+	sort.SliceStable(roots, func(i, j int) bool {
+		ri, rj := familyRank(roots[i], all), familyRank(roots[j], all)
+		if ri != rj {
+			return ri < rj
+		}
+		return familyActivity(roots[i], all).After(familyActivity(roots[j], all))
+	})
+
+	out := make([]models.Item, 0, len(visible))
+	for _, root := range roots {
+		if actual, ok := visible[root.ID]; ok {
+			// When the parent is outside this view, root is the detached
+			// fallback made above. Keep its cleared Parent; appending actual
+			// would render the child indented beneath an unrelated row.
+			if root.Parent == "" && actual.Parent != "" {
+				out = append(out, root)
+			} else {
+				out = append(out, actual)
+			}
+		}
+		if collapsed[root.ID] {
+			continue
+		}
+		children := append([]models.Item(nil), groups[root.ID]...)
+		sort.SliceStable(children, func(i, j int) bool { return children[i].Created.Before(children[j].Created) })
+		for _, child := range children {
+			if child.ID != root.ID {
+				out = append(out, child)
+			}
+		}
+	}
+	return out, hidden
+}
+
+func familyRank(root models.Item, all []models.Item) int {
+	rank := rankOf(root.Status)
+	for _, item := range all {
+		if rootID(item) == root.ID && rankOf(item.Status) < rank {
+			rank = rankOf(item.Status)
+		}
+	}
+	return rank
+}
+
+func familyActivity(root models.Item, all []models.Item) time.Time {
+	latest := lastActivity(root)
+	for _, item := range all {
+		if rootID(item) == root.ID && lastActivity(item).After(latest) {
+			latest = lastActivity(item)
+		}
+	}
+	return latest
+}
+
+func familyCounts(root models.Item, all []models.Item) (open, done int) {
+	for _, item := range all {
+		if rootID(item) != root.ID {
+			continue
+		}
+		if models.TerminalStatuses[item.Status] {
+			done++
+		} else if item.ID != root.ID {
+			open++
+		}
+	}
+	return open, done
 }
 
 // listMinContentWidth is the narrowest the list column ever gets: listWidth

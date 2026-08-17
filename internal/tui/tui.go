@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 	"unsafe"
@@ -62,6 +63,10 @@ type supervisorClient interface {
 	StartNewSession(string, supervisor.Provider, string, string) error
 	AvailableModels(context.Context, supervisor.Provider) ([]supervisor.ModelOption, error)
 	Busy() (string, bool)
+}
+
+type activityWaker interface {
+	EnqueuePendingActivityRoots()
 }
 
 // ── styles ───────────────────────────────────────────────────────────────────
@@ -129,7 +134,7 @@ func startWatcher(root string) (<-chan struct{}, error) {
 	// until another action happens to trigger a reload. Legacy channel
 	// directories may remain on disk, but they are no longer part of the store
 	// schema or TUI.
-	for _, name := range []string{"INBOX", "ARCHIVE", "supervisor"} {
+	for _, name := range []string{"INBOX", "ARCHIVE", "ACTIVITY", "supervisor"} {
 		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
 			w.Add(filepath.Join(root, name))
 		}
@@ -224,7 +229,11 @@ type model struct {
 	// hiddenBacklog is how many items the current view is suppressing.
 	hiddenBacklog int
 	items         []models.Item
+	allItems      []models.Item
 	selected      int
+	// collapsed is deliberately TUI-local state: folding is a presentation
+	// choice, not project protocol data. Keys are root IDs.
+	collapsed map[string]bool
 	// listOffset is the index of the first row shown in the list panel. It
 	// persists across renders so the panel stays put as selection moves
 	// within the visible window, only scrolling once selection would
@@ -241,6 +250,15 @@ type model struct {
 	draftItemID        string
 	draftSequence      int
 	pendingDraftItemID string
+	draftParent        string
+	// relatedDraftFrom is set by ctrl+n while composing an existing turn. The
+	// temporary title/body flow creates a new root, links it, then restores the
+	// original composer.
+	relatedDraftFrom   string
+	returnDraftItemID  string
+	returnDraftContent string
+	returnDraftRow     int
+	returnDraftCol     int
 
 	// draft marks an unsaved new item occupying a synthetic last row of the
 	// list while its title is typed. selected points one past the real items
@@ -270,6 +288,10 @@ type model struct {
 	// convTurns is the turn count of the item currently rendered into conv,
 	// so a reload can tell "new turn arrived" from "same item, redrawn".
 	convTurns int
+	// convActivities is the activity count rendered into conv. Activities are
+	// part of the conversation timeline, so a newly-created subthread needs
+	// the same bottom-follow behavior as a newly-posted turn.
+	convActivities int
 	// convLive is the length of the live progress block currently rendered,
 	// so a reload can tell a growing in-flight run from a static redraw.
 	convLive int
@@ -277,8 +299,9 @@ type model struct {
 	// changes it is a move to a different conversation, not an update to the
 	// one being read.
 	convItemID string
-	// newBelow marks that a turn landed off-screen below the reader, who was
-	// scrolled up at the time and so was not auto-followed down to it.
+	// newBelow marks that persisted conversation content landed off-screen
+	// below the reader, who was scrolled up at the time and so was not
+	// auto-followed down to it.
 	newBelow bool
 	// projectPane is 0 for item views, 1 for user instructions, and 2 for the
 	// agent-curated brief. Project documents use the existing reader/editor,
@@ -319,6 +342,7 @@ const (
 	modeSessionModel
 	modeSessionEffort
 	modeQuit
+	modeProposal
 )
 
 // allStatuses is the selector's running order, coarsest lifecycle first.
@@ -390,8 +414,9 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) mod
 			channelView(models.ChannelInbox),
 			archiveView,
 		},
-		input: ta,
-		title: ti,
+		input:     ta,
+		title:     ti,
+		collapsed: make(map[string]bool),
 	}
 }
 
@@ -455,20 +480,29 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prevID := m.selectedID()
 		prevRendered := m.convItemID
 		prevTurns := m.convTurns
+		prevActivities := m.convActivities
 		prevLive := m.convLive
 		// Sample before SetContent: appending lines can change the answer.
 		wasAtBottom := m.conv.AtBottom()
 
+		if msg.allItems != nil {
+			m.allItems = msg.allItems
+		}
 		if !m.backlogVisibilityInitialized && msg.allItems != nil && m.view == channelView(models.ChannelInbox) && m.listBaseAvailRows() > 0 {
 			m.showBacklog = m.initialBacklogFits(msg.allItems)
 			m.backlogVisibilityInitialized = true
-			m.items, m.hiddenBacklog = m.view.prepare(msg.allItems, m.showBacklog)
+			m.items, m.hiddenBacklog = m.view.prepareGrouped(msg.allItems, m.showBacklog, m.collapsed)
+		} else if msg.allItems != nil {
+			m.items, m.hiddenBacklog = m.view.prepareGrouped(msg.allItems, m.showBacklog, m.collapsed)
 		} else {
 			m.items = msg.items
 			m.hiddenBacklog = msg.hiddenBacklog
 		}
 		wasComposerVisible := m.composerVisible()
 		m.restoreSelection(prevID)
+		if m.mode == modeNav && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {
+			m.mode = modeProposal
+		}
 		m.refreshPendingDraft()
 		if wasComposerVisible != m.composerVisible() {
 			m = m.recalcLayout()
@@ -485,25 +519,40 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Only a genuinely new turn on the item already being read counts.
+		// Only genuinely new persisted content on the item already being read
+		// counts. Activities and turns share one chronological timeline in the
+		// pane, so either can make the bottom move.
 		// A first load, or a reload that landed on a different item, has no
 		// "before" to compare against.
 		sameItem := !m.draft && prevID != "" && m.selectedID() == prevID
-		if sameItem && m.convTurns > prevTurns {
+		// SetContent clamps an offset only when it is past the last content
+		// line, not when it is past the new viewport bottom. A disappearing
+		// live block can therefore leave blank rows below the reply unless we
+		// explicitly repair an offset that is now beyond the bottom.
+		if sameItem && m.conv.PastBottom() {
+			m.conv.GotoBottom()
+			m.newBelow = false
+		} else if sameItem && (m.convTurns > prevTurns || m.convActivities > prevActivities) {
 			if wasAtBottom {
 				m.conv.GotoBottom()
 			} else {
 				m.newBelow = true
 			}
-		} else if sameItem && m.convLive > prevLive && wasAtBottom {
+		} else if sameItem && m.convLive != prevLive {
 			// Live progress follows the same way, but never raises the
 			// "new messages below" bar: a run emitting a line a second would
-			// leave it permanently lit and stop meaning anything.
-			m.conv.GotoBottom()
+			// leave it permanently lit and stop meaning anything. This also
+			// handles the live block disappearing after its reply is written.
+			if wasAtBottom {
+				m.conv.GotoBottom()
+			}
 		}
 		return m, nil
 
 	case watchEventMsg:
+		if waker, ok := m.sup.(activityWaker); ok {
+			waker.EnqueuePendingActivityRoots()
+		}
 		// Re-arm the watcher and refresh project documents too: the CLI can
 		// replace the brief while the TUI is open.
 		if m.projectPane != 0 {
@@ -599,6 +648,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSessionEffortKey(msg)
 		case modeQuit:
 			return m.handleQuitKey(msg)
+		case modeProposal:
+			return m.handleProposalKey(msg)
 		}
 		return m.handleNavKey(msg)
 	}
@@ -715,12 +766,26 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// item parked there — it must stay reachable, not just tidy.
 		m.showBacklog = !m.showBacklog
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+	case "space", " ":
+		if m.selected < len(m.items) {
+			root := rootID(m.items[m.selected])
+			m.collapsed[root] = !m.collapsed[root]
+			m.reload()
+			m.restoreSelection(root)
+			m.updateConv()
+		}
+		return m, nil
 	case "r":
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "t":
-		if len(m.items) > 0 {
+		if len(m.items) > 0 && m.items[m.selected].Status != models.StatusProposed {
 			return m.openComposer()
 		}
+	case "c":
+		if m.view.archive || m.selected >= len(m.items) || m.items[m.selected].Status == models.StatusProposed {
+			return m, nil
+		}
+		return m.beginNewDraft(rootID(m.items[m.selected]))
 	case "a":
 		// The archive is a lifecycle state, not a channel, so there is nothing
 		// for a new item to be created *in*. Refuse rather than write an item
@@ -730,15 +795,13 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// A synthetic row past the end of items; selected follows it there so
 		// the conversation pane clears to the draft hint.
-		m.draft = true
-		m.selected = len(m.items)
-		m.mode = modeTitle
-		m.title.Reset()
-		m.title.Width = m.titleWidth()
-		m.updateConv()
-		return m, m.title.Focus()
+		return m.beginNewDraft("")
 	case "s":
 		if m.selected < len(m.items) {
+			if m.items[m.selected].Status == models.StatusProposed {
+				m.mode = modeProposal
+				return m, nil
+			}
 			m.mode = modeStatus
 			m.statusIdx = statusIndex(m.items[m.selected].Status)
 		}
@@ -750,6 +813,20 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m model) beginNewDraft(parent string) (tea.Model, tea.Cmd) {
+	m.draft = true
+	m.draftParent = parent
+	m.relatedDraftFrom = ""
+	m.draftItemID = ""
+	m.selected = len(m.items)
+	m.mode = modeTitle
+	m.title.Reset()
+	m.title.Width = m.titleWidth()
+	m.input.Reset()
+	m.updateConv()
+	return m, m.title.Focus()
 }
 
 func sessionProviderIndex(provider supervisor.Provider) int {
@@ -779,6 +856,33 @@ func (m model) openComposer() (tea.Model, tea.Cmd) {
 	}
 	m = m.recalcLayout()
 	return m, tea.Batch(m.input.Focus(), draftSafetyCheckpoint())
+}
+
+func textareaCursor(ta textarea.Model) (row, col int) {
+	v := reflect.ValueOf(&ta).Elem()
+	rowField, colField := v.FieldByName("row"), v.FieldByName("col")
+	if rowField.IsValid() && colField.IsValid() {
+		return int(rowField.Int()), int(colField.Int())
+	}
+	return 0, len([]rune(ta.Value()))
+}
+
+func (m model) beginRelatedDraft() (tea.Model, tea.Cmd) {
+	m.checkpointTurnDraft()
+	m.relatedDraftFrom = m.selectedID()
+	m.returnDraftItemID = m.relatedDraftFrom
+	m.returnDraftContent = m.input.Value()
+	m.returnDraftRow, m.returnDraftCol = textareaCursor(m.input)
+	m.draft = true
+	m.draftParent = ""
+	m.draftItemID = ""
+	m.selected = len(m.items)
+	m.mode = modeTitle
+	m.title.Reset()
+	m.title.Width = m.titleWidth()
+	m.input.Reset()
+	m.updateConv()
+	return m, m.title.Focus()
 }
 
 func draftSafetyCheckpoint() tea.Cmd {
@@ -821,12 +925,26 @@ func (m model) commitDraft(body string) model {
 	// Which the default filter hides — so creating one reveals backlog, or the
 	// item you just wrote would disappear the moment you finished it.
 	m.showBacklog = true
-	item, err := m.store.CreateItem(m.view.channel, m.title.Value(), body, models.TypeThread, models.StatusBacklog, "")
+	var item models.Item
+	var err error
+	if m.draftParent != "" {
+		item, err = m.store.CreateSubthread(m.draftParent, m.title.Value(), body, models.TypeThread, models.StatusBacklog)
+	} else {
+		item, err = m.store.CreateItem(m.view.channel, m.title.Value(), body, models.TypeThread, models.StatusBacklog, "")
+	}
 	if err != nil {
 		m.err = err
 		return m.cancelDraft()
 	}
+	if m.relatedDraftFrom != "" {
+		if _, err := m.store.AddRelated(item.ID, m.relatedDraftFrom); err != nil {
+			m.err = err
+			return m.cancelDraft()
+		}
+		return m.restoreRelatedComposer(item.ID)
+	}
 	m.draft = false
+	m.draftParent = ""
 	// Reload synchronously so the new item is selectable in this same frame
 	// rather than after a round trip through loadItemsCmd.
 	m.reload()
@@ -836,13 +954,57 @@ func (m model) commitDraft(body string) model {
 }
 
 func (m model) cancelDraft() model {
+	if m.relatedDraftFrom != "" {
+		return m.restoreRelatedComposer("")
+	}
+	parent := m.draftParent
 	m.draft = false
+	m.draftParent = ""
 	m.mode = modeNav
 	m.title.Blur()
-	if m.selected >= len(m.items) {
+	if parent != "" {
+		m.restoreSelection(parent)
+	} else if m.selected >= len(m.items) {
 		m.selected = max(0, len(m.items)-1)
 	}
 	m.updateConv()
+	return m
+}
+
+func (m model) restoreRelatedComposer(createdID string) model {
+	m.draft = false
+	m.draftParent = ""
+	m.relatedDraftFrom = ""
+	m.mode = modeCompose
+	m.selected = 0
+	for i, item := range m.items {
+		if item.ID == m.returnDraftItemID {
+			m.selected = i
+			break
+		}
+	}
+	m.input.Reset()
+	m.input.SetValue(m.returnDraftContent)
+	for i := 0; i < m.returnDraftRow; i++ {
+		m.input.CursorDown()
+	}
+	m.input.SetCursor(m.returnDraftCol)
+	m.draftItemID = m.returnDraftItemID
+	if m.returnDraftContent != "" {
+		m.pendingDraftItemID = m.returnDraftItemID
+	} else {
+		m.pendingDraftItemID = ""
+	}
+	m.title.Reset()
+	m.title.Blur()
+	m.input.Focus()
+	m.updateConv()
+	if createdID != "" {
+		m.err = nil
+		m.reload()
+		m.restoreSelection(m.returnDraftItemID)
+		m.updateConv()
+	}
 	return m
 }
 
@@ -997,6 +1159,42 @@ func (m model) handleQuitKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// handleProposalKey keeps an unaccepted suggestion from becoming a hidden
+// half-conversation. The decision changes its lifecycle explicitly: keep
+// parks it, start queues it, and reject removes it.
+func (m model) handleProposalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.selected >= len(m.items) {
+		m.mode = modeNav
+		return m, nil
+	}
+	item := m.items[m.selected]
+	switch msg.String() {
+	case "esc", "q":
+		m.mode = modeNav
+	case "k":
+		if _, err := m.store.SetStatus(item.ID, models.StatusBacklog); err != nil {
+			m.err = err
+		}
+		m.mode = modeNav
+		return m, loadItemsCmd(m.store, m.view, true)
+	case "s":
+		if _, err := m.store.SetStatus(item.ID, models.StatusPendingAgent); err != nil {
+			m.err = err
+		} else if m.sup != nil {
+			m.sup.Enqueue(item.ID)
+		}
+		m.mode = modeNav
+		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+	case "x":
+		if err := m.store.DeleteItem(item.ID); err != nil {
+			m.err = err
+		}
+		m.mode = modeNav
+		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+	}
+	return m, nil
+}
+
 // statusDot gives the colour of an item's list marker, and whether it has one
 // at all. Only the two statuses that mean "something is happening" are marked:
 // a dot on every row would carry no information.
@@ -1036,11 +1234,17 @@ func (m *model) reload() {
 		m.err = err
 		return
 	}
-	m.items, m.hiddenBacklog = m.view.prepare(items, m.showBacklog)
+	m.allItems = items
+	m.items, m.hiddenBacklog = m.view.prepareGrouped(items, m.showBacklog, m.collapsed)
 }
 
 func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "ctrl+n":
+		if !m.draft && !m.editingProject && m.selected < len(m.items) && m.items[m.selected].Status != models.StatusProposed {
+			return m.beginRelatedDraft()
+		}
+		return m, nil
 	case "ctrl+s":
 		content := strings.TrimSpace(m.input.Value())
 		if m.editingProject {
@@ -1067,7 +1271,11 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if content == "" {
 				return m, nil
 			}
+			branching := m.relatedDraftFrom != ""
 			m = m.commitDraft(content)
+			if branching {
+				return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+			}
 			m.mode = modeNav
 			m.input.Blur()
 			m = m.recalcLayout()
@@ -1098,6 +1306,9 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.conv.GotoBottom()
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "esc":
+		if m.relatedDraftFrom != "" {
+			return m.restoreRelatedComposer(""), nil
+		}
 		if m.editingProject {
 			m.editingProject = false
 			m.mode = modeNav
@@ -1117,6 +1328,17 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m = m.recalcLayout()
 		return m, nil
 	case "ctrl+c":
+		if m.relatedDraftFrom != "" {
+			return m.restoreRelatedComposer(""), nil
+		}
+		if m.draft {
+			m.input.Reset()
+			m.input.Blur()
+			m = m.cancelDraft()
+			m.draftItemID = ""
+			m = m.recalcLayout()
+			return m, nil
+		}
 		if err := m.store.ClearDraft(m.draftItemID); err != nil {
 			m.err = err
 		}
@@ -1352,6 +1574,8 @@ func (m model) renderConv() string {
 		lines = m.overlaySessionModelPopup(lines)
 	} else if m.mode == modeSessionEffort {
 		lines = m.overlaySessionEffortPopup(lines)
+	} else if m.mode == modeProposal {
+		lines = m.overlayProposalPopup(lines)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1540,6 +1764,15 @@ func (m model) overlayStatusPopup(lines []string) []string {
 	return overlayBox(lines, box, m.conv.Width)
 }
 
+func (m model) overlayProposalPopup(lines []string) []string {
+	box := popupStyle.Render("agent suggestion\n" +
+		"k keep for later\n" +
+		"s start now\n" +
+		"x reject\n" +
+		"esc cancel")
+	return overlayBox(lines, box, m.conv.Width)
+}
+
 func (m model) renderHeader() string {
 	tabs := make([]string, len(m.views))
 	for i, v := range m.views {
@@ -1576,7 +1809,7 @@ func (m model) renderFooter() string {
 	var text string
 	switch m.mode {
 	case modeCompose:
-		text = "ctrl+s submit  esc cancel  pgup/pgdn scroll"
+		text = "ctrl+s submit  ctrl+n related item  esc cancel  pgup/pgdn scroll"
 		if m.editingProject {
 			text = "ctrl+s save project document  esc cancel"
 		}
@@ -1585,7 +1818,7 @@ func (m model) renderFooter() string {
 		} else if m.selected < len(m.items) && !dispatchable(m.items[m.selected].Status) {
 			// Silent submit is the surprising case, so name it rather than
 			// leaving the reader to discover the agent never woke up.
-			text = "ctrl+s save (no dispatch — backlog)  esc cancel  pgup/pgdn scroll"
+			text = "ctrl+s save (no dispatch — backlog)  ctrl+n related item  esc cancel  pgup/pgdn scroll"
 		}
 	case modeTitle:
 		text = "enter next (body)  esc cancel"
@@ -1599,19 +1832,21 @@ func (m model) renderFooter() string {
 		text = "j/k select  enter start fresh session  esc back"
 	case modeQuit:
 		text = "y quit and stop the running turn  any other key stay"
+	case modeProposal:
+		text = "k keep for later  s start  x reject  esc cancel"
 	default:
 		if m.projectPane != 0 {
 			text = "j/k versions  tab switch document  e edit  1-3 view  q quit"
 			break
 		}
-		text = "q quit  j/k nav  a add  s status  S session  t turn  1-3 view  b backlog  pgup/pgdn scroll  r refresh"
+		text = "q quit  j/k nav  a add  c subthread  s status  S session  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-			text = "q quit  j/k nav  a add  s status  S fresh context recommended  t turn  1-3 view  b backlog  pgup/pgdn scroll  r refresh"
+			text = "q quit  j/k nav  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
 		}
 		if m.showBacklog {
-			text = "q quit  j/k nav  a add  s status  S session  t turn  1-3 view  b hide backlog  pgup/pgdn scroll  r refresh"
+			text = "q quit  j/k nav  a add  c subthread  s status  S session  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-				text = "q quit  j/k nav  a add  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  pgup/pgdn scroll  r refresh"
+				text = "q quit  j/k nav  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
 			}
 		}
 	}
@@ -1690,18 +1925,39 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 	colW := m.listWidth() - 2
 	textW := colW - badgeW
 
-	lines := make([]string, len(m.items))
+	draftRow := m.draftRowIndex()
+	lines := make([]string, 0, len(m.items)+1)
 	for i, item := range m.items {
+		if m.draft && draftRow == i {
+			rowSty := lipgloss.NewStyle().Background(selectedBg).Bold(true)
+			metaSty := lipgloss.NewStyle().Width(colW).Background(selectedBg).Foreground(lipgloss.Color("245"))
+			m.title.Width = m.titleWidth()
+			lines = append(lines,
+				renderDraftTitlePrefix(rowSty, colW, m.draftTitlePrefix(), m.title.View())+"\n"+
+					metaSty.Render(m.draftIndent()+"  new item [backlog]"))
+		}
 		isSelected := i == m.selected
 		dotFg, hasDot := statusDot(item.Status)
 
 		preview := item.Title
+		indent := ""
+		if item.Parent != "" {
+			indent = "  ├─ "
+		} else if m.hasChildren(item.ID) {
+			open, done := familyCounts(item, m.allItems)
+			chevron := "▾"
+			if m.collapsed[item.ID] {
+				chevron = "▸"
+			}
+			preview = fmt.Sprintf("%s %s (%d open, %d done)", chevron, preview, open, done)
+		}
 		meta := fmt.Sprintf("%s [%s]", item.ID, item.Status)
 
 		// Word-wrap the preview manually so we control each line's prefix and
 		// background independently — JoinHorizontal pads shorter columns with
 		// unstyled spaces, losing the background on wrapped continuation lines.
-		previewLines := truncateLines(wordWrap(preview, textW), previewMaxLines, textW)
+		rowTextW := max(1, textW-lipgloss.Width(indent))
+		previewLines := truncateLines(wordWrap(preview, rowTextW), previewMaxLines, rowTextW)
 
 		var rowLineSty, metaSty lipgloss.Style
 		if isSelected {
@@ -1714,9 +1970,9 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 
 		var parts []string
 		for j, pl := range previewLines {
-			prefix := "  "
+			prefix := indent + "  "
 			if j == 0 && hasDot {
-				prefix = "● "
+				prefix = indent + "● "
 				if isSelected {
 					// Apply the dot colour directly in the style rather than via
 					// an embedded ANSI string that would clobber the background.
@@ -1730,18 +1986,19 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 			}
 			parts = append(parts, rowLineSty.Render(prefix+pl))
 		}
-		parts = append(parts, metaSty.Render("  "+meta))
-		lines[i] = strings.Join(parts, "\n")
+		parts = append(parts, metaSty.Render(indent+"  "+meta))
+		lines = append(lines, strings.Join(parts, "\n"))
 	}
 
 	// The draft is a synthetic row: it has no file behind it yet, so it is
 	// rendered from the title input rather than from an item.
-	if m.draft {
+	if m.draft && draftRow == len(m.items) {
 		rowSty := lipgloss.NewStyle().Background(selectedBg).Bold(true)
 		metaSty := lipgloss.NewStyle().Width(colW).Background(selectedBg).Foreground(lipgloss.Color("245"))
 		m.title.Width = m.titleWidth()
 		lines = append(lines,
-			renderDraftTitle(rowSty, colW, m.title.View())+"\n"+metaSty.Render("  new item [backlog]"))
+			renderDraftTitlePrefix(rowSty, colW, m.draftTitlePrefix(), m.title.View())+"\n"+
+				metaSty.Render(m.draftIndent()+"  new item [backlog]"))
 	}
 	// Clamp to the panel's height so a long list scrolls instead of pushing
 	// the header and footer off screen. Reserve a line for the marker row
@@ -1750,7 +2007,11 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 	if marker != "" {
 		rowBudget--
 	}
-	window, offset, total := windowListRows(lines, m.listOffset, m.selected, rowBudget)
+	selectedRow := m.selected
+	if m.draft {
+		selectedRow = draftRow
+	}
+	window, offset, total := windowListRows(lines, m.listOffset, selectedRow, rowBudget)
 	if marker != "" {
 		total++ // the marker row itself, appended below outside the window
 	}
@@ -1881,10 +2142,14 @@ func (m model) listRowHeights() []int {
 		return heights
 	}
 	heights := make([]int, 0, len(m.items)+1)
-	for _, it := range m.items {
+	draftRow := m.draftRowIndex()
+	for i, it := range m.items {
+		if m.draft && draftRow == i {
+			heights = append(heights, 2)
+		}
 		heights = append(heights, m.listRowHeight(it))
 	}
-	if m.draft {
+	if m.draft && draftRow == len(m.items) {
 		heights = append(heights, 2)
 	}
 	return heights
@@ -1902,7 +2167,16 @@ func (m model) projectRowHeight(entry projectEntry) int {
 func (m model) listRowHeight(item models.Item) int {
 	colW := m.listWidth() - 2
 	textW := colW - badgeW
-	return len(truncateLines(wordWrap(item.Title, textW), previewMaxLines, textW)) + 1
+	indent := ""
+	preview := item.Title
+	if item.Parent != "" {
+		indent = "  ├─ "
+	} else if m.hasChildren(item.ID) {
+		open, done := familyCounts(item, m.allItems)
+		preview = fmt.Sprintf("▾ %s (%d open, %d done)", preview, open, done)
+	}
+	textW = max(1, textW-lipgloss.Width(indent))
+	return len(truncateLines(wordWrap(preview, textW), previewMaxLines, textW)) + 1
 }
 
 // listBaseAvailRows is the list's row budget without the hidden-backlog
@@ -1949,6 +2223,9 @@ func (m model) ensureListOffsetVisible() int {
 		return 0
 	}
 	selected := m.selected
+	if m.draft {
+		selected = m.draftRowIndex()
+	}
 	if selected < 0 {
 		selected = 0
 	}
@@ -1977,12 +2254,45 @@ func (m model) ensureListOffsetVisible() int {
 	return start
 }
 
+// draftRowIndex returns the synthetic draft row's position among the visible
+// rows. A child draft follows the complete parent family, so it stays with
+// its siblings even when the parent has more than one child.
+func (m model) draftRowIndex() int {
+	if !m.draft || m.draftParent == "" {
+		return len(m.items)
+	}
+	last := -1
+	for i, item := range m.items {
+		if item.ID == m.draftParent || rootID(item) == m.draftParent {
+			last = i
+		}
+	}
+	if last < 0 {
+		return len(m.items)
+	}
+	return last + 1
+}
+
+func (m model) draftIndent() string {
+	if m.draftParent != "" {
+		return "  ├─ "
+	}
+	return ""
+}
+
+func (m model) draftTitlePrefix() string {
+	return m.draftIndent() + "› "
+}
+
 // renderDraftTitle paints the part of the draft row after textinput explicitly.
 // textinput's cursor renderer closes its ANSI style when the cursor is visible;
 // relying on a parent style with Width then left the trailing cells unpainted
 // until the cursor blinked off.
 func renderDraftTitle(style lipgloss.Style, width int, title string) string {
-	prefix := "› "
+	return renderDraftTitlePrefix(style, width, "› ", title)
+}
+
+func renderDraftTitlePrefix(style lipgloss.Style, width int, prefix, title string) string {
 	pad := max(0, width-lipgloss.Width(prefix+title))
 	// textinput emits a reset after its cursor. Render each text segment in its
 	// own selected style so that reset cannot erase the row background for the
@@ -2125,6 +2435,9 @@ func wrapLine(line string, width int) []string {
 // content. Opening an item at the top means scrolling past the entire history
 // to reach the part that changed, which is almost never what the reader wants.
 func (m *model) showSelected() {
+	if m.mode == modeNav && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {
+		m.mode = modeProposal
+	}
 	wasComposerVisible := m.composerVisible()
 	m.refreshPendingDraft()
 	if wasComposerVisible != m.composerVisible() {
@@ -2206,6 +2519,7 @@ func (m *model) updateConv() {
 			m.conv.SetContent("")
 		}
 		m.convTurns = 0
+		m.convActivities = 0
 		m.convLive = 0
 		m.convItemID = ""
 		return
@@ -2213,6 +2527,13 @@ func (m *model) updateConv() {
 	item := m.items[m.selected]
 	m.convItemID = item.ID
 	m.convTurns = len(item.Turns)
+	var activities []models.Activity
+	if item.Parent == "" && m.store != nil {
+		if loaded, err := m.store.ListActivities(item.ID); err == nil {
+			activities = loaded
+		}
+	}
+	m.convActivities = len(activities)
 	w := m.conv.Width
 
 	// Rules are drawn to the pane, not to fixed 60/40 — a fixed rule in a
@@ -2223,24 +2544,50 @@ func (m *model) updateConv() {
 	var sb strings.Builder
 	meta := fmt.Sprintf("[%s]  %s  %s", item.Channel, item.Status, item.ID)
 	if item.Parent != "" {
-		meta += "  parent: " + item.Parent
+		parentTitle := item.Parent
+		for _, candidate := range m.allItems {
+			if candidate.ID == item.Parent {
+				parentTitle = candidate.Title
+				break
+			}
+		}
+		meta += "  Inbox / " + parentTitle + " / " + item.Title
 	}
 	sb.WriteString(wrapText(item.Title, w) + "\n")
 	sb.WriteString(wrapText(meta, w) + "\n" + headRule + "\n\n")
 	sb.WriteString(wrapText(item.Body, w))
-	for _, turn := range item.Turns {
-		ts := turn.Timestamp.Format("2006-01-02 15:04")
-		sb.WriteString(fmt.Sprintf("\n\n%s\n%s  ·  %s\n\n%s",
-			turnRule, turn.Actor, ts, wrapText(turn.Content, w)))
+	if m.store != nil {
+		if related, err := m.store.RelatedItems(item.ID); err == nil && len(related) > 0 {
+			sb.WriteString("\n\nrelated\n")
+			for _, peer := range related {
+				sb.WriteString(wrapText(peer.Title+"  ["+peer.ID+"]", w) + "\n")
+			}
+		}
+	}
+	for _, event := range conversationEvents(item, activities) {
+		switch event.kind {
+		case conversationTurn:
+			ts := event.turn.Timestamp.Format("2006-01-02 15:04")
+			sb.WriteString(fmt.Sprintf("\n\n%s\n%s  ·  %s\n\n%s",
+				turnRule, event.turn.Actor, ts, wrapText(event.turn.Content, w)))
+		case conversationActivity:
+			status := "pending"
+			if event.activity.Handled {
+				status = "handled"
+			}
+			title := event.activity.ChildTitle
+			if title == "" {
+				title = event.activity.ChildID
+			}
+			sb.WriteString(fmt.Sprintf("\n\n%s\nactivity  ·  %s  ·  %s [%s]",
+				turnRule, event.activity.Type, title, status))
+		}
 	}
 
 	// Live progress from an in-flight dispatch, appended below the last real
 	// turn. It is transient by construction: the supervisor deletes the log
 	// when the run ends, and the turn the agent posts takes its place.
-	live := ""
-	if item.Status == models.StatusAgentAcknowledged {
-		live = strings.TrimSpace(supervisor.ReadLive(m.store.Root, item.ID))
-	}
+	live := liveTrace(m.store, item)
 	if live != "" {
 		// Body deliberately unstyled — the default foreground is the one
 		// colour guaranteed readable, since it is what every other line of
@@ -2256,10 +2603,65 @@ func (m *model) updateConv() {
 	m.conv.SetContent(sb.String())
 }
 
+// liveTrace is keyed by the ephemeral live file rather than by the item status.
+// A load started just before the supervisor marks an item acknowledged can
+// arrive after the live file exists and still carry the old pending-agent (or
+// pending-user) status. The supervisor clears the file before a new dispatch
+// and after a finished one, so the file itself is the reliable in-flight
+// marker; status and the previous turn can both be stale during a resume.
+func liveTrace(s *store.Store, item models.Item) string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(supervisor.ReadLive(s.Root, item.ID))
+}
+
+type conversationEventKind uint8
+
+const (
+	conversationTurn conversationEventKind = iota
+	conversationActivity
+)
+
+type conversationEvent struct {
+	kind     conversationEventKind
+	time     time.Time
+	turn     models.Turn
+	activity models.Activity
+}
+
+// conversationEvents merges turns and lifecycle activities into one stable
+// timeline. Activities live in a separate journal, but their timestamps are
+// the ordering contract: a child created before a parent reply appears before
+// that reply, including when the child was created during an in-flight agent
+// turn whose live trace is still being shown.
+func conversationEvents(item models.Item, activities []models.Activity) []conversationEvent {
+	events := make([]conversationEvent, 0, len(item.Turns)+len(activities))
+	for _, turn := range item.Turns {
+		events = append(events, conversationEvent{
+			kind: conversationTurn,
+			time: turn.Timestamp,
+			turn: turn,
+		})
+	}
+	for _, activity := range activities {
+		events = append(events, conversationEvent{
+			kind:     conversationActivity,
+			time:     activity.Timestamp,
+			activity: activity,
+		})
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		return events[i].time.Before(events[j].time)
+	})
+	return events
+}
+
 func (m *model) updateProjectConv() {
 	if len(m.projectEntries) == 0 || m.selected >= len(m.projectEntries) {
 		m.conv.SetContent("")
 		m.convTurns = 0
+		m.convActivities = 0
 		m.convLive = 0
 		m.convItemID = ""
 		return
@@ -2276,6 +2678,7 @@ func (m *model) updateProjectConv() {
 	m.conv.SetContent(wrapText(title+"\n\n"+entry.title+"\n"+entry.meta+"\n"+
 		strings.Repeat("─", clampRule(m.conv.Width, 40))+"\n\n"+content, m.conv.Width))
 	m.convTurns = 0
+	m.convActivities = 0
 	m.convLive = 0
 	m.convItemID = "project-" + strings.ToLower(strings.ReplaceAll(entry.title, " ", "-"))
 }
@@ -2304,7 +2707,9 @@ func clampRule(paneW, prefer int) int {
 // its horizontal scroll offset from Width during Update, so a mismatch would
 // scroll against a different column count than the one being drawn.
 func (m model) titleWidth() int {
-	return max(1, m.listWidth()-5)
+	// textinput renders Width+1 columns (the extra cell is where its cursor
+	// sits), so reserve that cell along with the draft's visual prefix.
+	return max(1, m.listWidth()-2-lipgloss.Width(m.draftTitlePrefix())-1)
 }
 
 func (m model) listWidth() int {
@@ -2457,10 +2862,30 @@ func (m model) recalcLayout() model {
 // ── selection helpers ─────────────────────────────────────────────────────────
 
 func (m model) selectedID() string {
+	if m.draft {
+		return ""
+	}
 	if m.selected < len(m.items) {
 		return m.items[m.selected].ID
 	}
 	return ""
+}
+
+func (m model) hasChildren(root string) bool {
+	if root == "" {
+		return false
+	}
+	for _, item := range m.allItems {
+		if item.Parent == root {
+			return true
+		}
+	}
+	for _, item := range m.items {
+		if item.Parent == root {
+			return true
+		}
+	}
+	return false
 }
 
 // restoreSelection puts the cursor back on the item it was on, wherever that
@@ -2502,6 +2927,12 @@ func (m model) pendingCount(v listView) int {
 // ── entry point ───────────────────────────────────────────────────────────────
 
 func Run(s *store.Store) error {
+	instance, err := acquireInstanceLock(s.Root)
+	if err != nil {
+		return err
+	}
+	defer instance.Close()
+
 	// Construct the supervisor first: it creates .ostraka/supervisor/, and the
 	// watcher only picks up subdirectories that exist when it starts. Without
 	// this ordering, a freshly initialised project would never see live
@@ -2517,6 +2948,7 @@ func Run(s *store.Store) error {
 		return fmt.Errorf("watcher: %w", err)
 	}
 	sup.Start()
+	sup.EnqueuePendingActivityRoots()
 	p := tea.NewProgram(newModel(s, watchCh, sup), tea.WithAltScreen())
 	_, err = p.Run()
 	return err
