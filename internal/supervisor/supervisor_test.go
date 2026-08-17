@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"ostraka/internal/models"
-	"ostraka/internal/prompt"
-	"ostraka/internal/store"
+	"github.com/Speculative/ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/prompt"
+	"github.com/Speculative/ostraka/internal/store"
 )
 
 // noModelDiscovery satisfies the Harness interface's discovery method for

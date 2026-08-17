@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"ostraka/internal/models"
-	"ostraka/internal/prompt"
-	"ostraka/internal/store"
-	"ostraka/internal/tui"
+	"github.com/Speculative/ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/prompt"
+	"github.com/Speculative/ostraka/internal/store"
+	"github.com/Speculative/ostraka/internal/tui"
 
 	"github.com/spf13/cobra"
 )

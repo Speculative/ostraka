@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/models"
 )
 
 const activityDir = "ACTIVITY"

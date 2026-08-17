@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/models"
 )
 
 func TestDispatchableWakesOnlyLiveStatuses(t *testing.T) {

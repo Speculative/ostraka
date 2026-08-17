@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"ostraka/internal/models"
-	"ostraka/internal/store"
+	"github.com/Speculative/ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/store"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"

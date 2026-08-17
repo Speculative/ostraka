@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/models"
 )
 
 // listView is what the item list is showing. The inbox is one kind of view;

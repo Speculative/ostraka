@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"ostraka/internal/models"
-	"ostraka/internal/store"
+	"github.com/Speculative/ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/store"
 )
 
 func newTestStore(t *testing.T) *store.Store {

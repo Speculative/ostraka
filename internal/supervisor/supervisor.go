@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"ostraka/internal/models"
-	agentprompt "ostraka/internal/prompt"
-	"ostraka/internal/store"
+	"github.com/Speculative/ostraka/internal/models"
+	agentprompt "github.com/Speculative/ostraka/internal/prompt"
+	"github.com/Speculative/ostraka/internal/store"
 )
 
 // nudgePrompt is deliberately short because the provider session already has

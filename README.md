@@ -15,3 +15,13 @@ providers may retain cache entries longer.
 Run `ostraka preamble` when an agent needs the static orientation and final
 reply guidance. Normal dispatched sessions receive the same guidance directly
 in their initial prompt.
+
+## Installation
+
+Once a release is published, install the CLI with
+`go install github.com/Speculative/ostraka/cmd/ostraka@latest`, then run
+`ostraka init` in each project that should have an Ostraka inbox. The
+supervisor supplies item context directly and `ostraka preamble` provides the
+static agent guidance, so no separate Ostraka skill installation is required.
+See [docs/deploying.md](docs/deploying.md) for release, local checkout, and
+Carthage setup details.

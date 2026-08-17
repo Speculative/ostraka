@@ -8,8 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"ostraka/internal/models"
-	"ostraka/internal/supervisor"
+	"github.com/Speculative/ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/supervisor"
 )
 
 type agentInfoSupervisor struct {

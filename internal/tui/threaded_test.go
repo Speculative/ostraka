@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"ostraka/internal/models"
-	"ostraka/internal/store"
-	"ostraka/internal/supervisor"
+	"github.com/Speculative/ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/store"
+	"github.com/Speculative/ostraka/internal/supervisor"
 )
 
 func TestPrepareGroupedSortsByFamilyAttentionAndFoldsPerRoot(t *testing.T) {

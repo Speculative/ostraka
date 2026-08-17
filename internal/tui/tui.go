@@ -11,9 +11,9 @@ import (
 	"time"
 	"unsafe"
 
-	"ostraka/internal/models"
-	"ostraka/internal/store"
-	"ostraka/internal/supervisor"
+	"github.com/Speculative/ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/store"
+	"github.com/Speculative/ostraka/internal/supervisor"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"

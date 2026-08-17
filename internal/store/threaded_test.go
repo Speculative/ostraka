@@ -3,7 +3,7 @@ package store_test
 import (
 	"testing"
 
-	"ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/models"
 )
 
 func TestSubthreadsStayOneLevelAndCreateActivity(t *testing.T) {

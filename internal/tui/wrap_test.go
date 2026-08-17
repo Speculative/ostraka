@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"ostraka/internal/models"
-	"ostraka/internal/store"
+	"github.com/Speculative/ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/store"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
