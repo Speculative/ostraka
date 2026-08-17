@@ -148,44 +148,62 @@ func (v listView) prepareGrouped(all []models.Item, showBacklog bool, collapsed 
 	for _, item := range visible {
 		groups[rootID(item)] = append(groups[rootID(item)], item)
 	}
-	roots := make([]models.Item, 0, len(groups))
-	for id, family := range groups {
-		root, ok := visible[id]
-		if !ok {
-			// A terminal child can outlive a root in hand-edited or legacy data.
-			// Keep it reachable as a root-shaped fallback rather than dropping it.
-			root = family[0]
-			root.Parent = ""
-		}
-		roots = append(roots, root)
+	type itemFamily struct {
+		key     string
+		root    models.Item
+		members []models.Item
+		hasRoot bool
 	}
-	sort.SliceStable(roots, func(i, j int) bool {
-		ri, rj := familyRank(roots[i], all), familyRank(roots[j], all)
+	families := make([]itemFamily, 0, len(groups))
+	for id, family := range groups {
+		root, hasRoot := visible[id]
+		if !hasRoot {
+			// A terminal child can be visible in the archive while its live
+			// parent remains in the inbox. There is no parent row to render in
+			// this view, so keep every child as a detached row. Using the first
+			// child as a fake root loses its siblings and makes folding use the
+			// wrong ID.
+			root = family[0]
+		}
+		families = append(families, itemFamily{key: id, root: root, members: family, hasRoot: hasRoot})
+	}
+	sort.SliceStable(families, func(i, j int) bool {
+		ri, rj := familyRank(families[i].key, families[i].root, all), familyRank(families[j].key, families[j].root, all)
 		if ri != rj {
 			return ri < rj
 		}
-		return familyActivity(roots[i], all).After(familyActivity(roots[j], all))
+		ai, aj := familyActivity(families[i].key, families[i].root, all), familyActivity(families[j].key, families[j].root, all)
+		if !ai.Equal(aj) {
+			return ai.After(aj)
+		}
+		return families[i].key < families[j].key
 	})
 
 	out := make([]models.Item, 0, len(visible))
-	for _, root := range roots {
-		if actual, ok := visible[root.ID]; ok {
-			// When the parent is outside this view, root is the detached
-			// fallback made above. Keep its cleared Parent; appending actual
-			// would render the child indented beneath an unrelated row.
-			if root.Parent == "" && actual.Parent != "" {
-				out = append(out, root)
-			} else {
-				out = append(out, actual)
+	for _, family := range families {
+		members := append([]models.Item(nil), family.members...)
+		sort.SliceStable(members, func(i, j int) bool {
+			if !members[i].Created.Equal(members[j].Created) {
+				return members[i].Created.Before(members[j].Created)
 			}
-		}
-		if collapsed[root.ID] {
+			return members[i].ID < members[j].ID
+		})
+		if !family.hasRoot {
+			// The parent is outside this view. Do not imply that one child is
+			// the parent of its siblings; all terminal members remain directly
+			// selectable in the archive.
+			for _, member := range members {
+				member.Parent = ""
+				out = append(out, member)
+			}
 			continue
 		}
-		children := append([]models.Item(nil), groups[root.ID]...)
-		sort.SliceStable(children, func(i, j int) bool { return children[i].Created.Before(children[j].Created) })
-		for _, child := range children {
-			if child.ID != root.ID {
+		out = append(out, visible[family.root.ID])
+		if collapsed[family.key] {
+			continue
+		}
+		for _, child := range members {
+			if child.ID != family.root.ID {
 				out = append(out, child)
 			}
 		}
@@ -193,20 +211,20 @@ func (v listView) prepareGrouped(all []models.Item, showBacklog bool, collapsed 
 	return out, hidden
 }
 
-func familyRank(root models.Item, all []models.Item) int {
+func familyRank(key string, root models.Item, all []models.Item) int {
 	rank := rankOf(root.Status)
 	for _, item := range all {
-		if rootID(item) == root.ID && rankOf(item.Status) < rank {
+		if rootID(item) == key && rankOf(item.Status) < rank {
 			rank = rankOf(item.Status)
 		}
 	}
 	return rank
 }
 
-func familyActivity(root models.Item, all []models.Item) time.Time {
+func familyActivity(key string, root models.Item, all []models.Item) time.Time {
 	latest := lastActivity(root)
 	for _, item := range all {
-		if rootID(item) == root.ID && lastActivity(item).After(latest) {
+		if rootID(item) == key && lastActivity(item).After(latest) {
 			latest = lastActivity(item)
 		}
 	}

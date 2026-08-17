@@ -40,6 +40,40 @@ func TestPrepareGroupedDetachesChildWhenParentIsOutsideView(t *testing.T) {
 	}
 }
 
+func TestPrepareGroupedArchiveKeepsAllChildrenWhenRootIsOutsideView(t *testing.T) {
+	created := time.Date(2026, 8, 17, 5, 0, 0, 0, time.UTC)
+	root := models.Item{ID: "root", Channel: models.ChannelInbox, Status: models.StatusActive, Created: created, Title: "Root"}
+	first := models.Item{ID: "first", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusDone, Created: created.Add(time.Minute), Title: "First"}
+	second := models.Item{ID: "second", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusDone, Created: created.Add(2 * time.Minute), Title: "Second"}
+
+	items, _ := archiveView.prepareGrouped([]models.Item{root, second, first}, false, nil)
+	if len(items) != 2 || items[0].ID != first.ID || items[1].ID != second.ID {
+		t.Fatalf("archived children = %+v, want both children in creation order", items)
+	}
+	for _, item := range items {
+		if item.Parent != "" {
+			t.Errorf("child %q retained invisible parent %q", item.ID, item.Parent)
+		}
+	}
+}
+
+func TestPrepareGroupedArchiveExpandsArchivedRootWithDoneChildren(t *testing.T) {
+	created := time.Date(2026, 8, 17, 5, 0, 0, 0, time.UTC)
+	root := models.Item{ID: "root", Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created, Title: "Root"}
+	first := models.Item{ID: "first", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusDone, Created: created.Add(time.Minute), Title: "First"}
+	second := models.Item{ID: "second", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusDone, Created: created.Add(2 * time.Minute), Title: "Second"}
+	all := []models.Item{root, second, first}
+
+	items, _ := archiveView.prepareGrouped(all, false, nil)
+	if len(items) != 3 || items[0].ID != root.ID || items[1].ID != first.ID || items[2].ID != second.ID {
+		t.Fatalf("expanded archived family = %+v, want root followed by both children", items)
+	}
+	items, _ = archiveView.prepareGrouped(all, false, map[string]bool{root.ID: true})
+	if len(items) != 1 || items[0].ID != root.ID {
+		t.Fatalf("collapsed archived family = %+v, want root only", items)
+	}
+}
+
 func TestConversationEventsFollowTimestamps(t *testing.T) {
 	base := time.Date(2026, 8, 17, 4, 0, 0, 0, time.UTC)
 	root := models.Item{Turns: []models.Turn{
