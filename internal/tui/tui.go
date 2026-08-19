@@ -2568,7 +2568,7 @@ func (m *model) updateConv() {
 	}
 	sb.WriteString(wrapText(item.Title, w) + "\n")
 	sb.WriteString(wrapText(meta, w) + "\n" + headRule + "\n\n")
-	sb.WriteString(wrapText(item.Body, w))
+	sb.WriteString(renderMarkdown(item.Body, w))
 	if m.store != nil {
 		if related, err := m.store.RelatedItems(item.ID); err == nil && len(related) > 0 {
 			sb.WriteString("\n\nrelated\n")
@@ -2582,7 +2582,7 @@ func (m *model) updateConv() {
 		case conversationTurn:
 			ts := event.turn.Timestamp.Format("2006-01-02 15:04")
 			sb.WriteString(fmt.Sprintf("\n\n%s\n%s  ·  %s\n\n%s",
-				turnRule, event.turn.Actor, ts, wrapText(event.turn.Content, w)))
+				turnRule, event.turn.Actor, ts, renderMarkdown(event.turn.Content, w)))
 		case conversationActivity:
 			status := "pending"
 			if event.activity.Handled {
@@ -2609,7 +2609,7 @@ func (m *model) updateConv() {
 		// the block as transient without tinting the text under it.
 		sb.WriteString("\n\n" + turnRule + "\n" +
 			liveHeaderStyle.Render("agent  ·  working") + "\n\n" +
-			wrapText(live, w))
+			renderMarkdown(live, w))
 	}
 	m.convLive = len(live)
 
@@ -2700,8 +2700,9 @@ func (m *model) updateProjectConv() {
 	if content == "" {
 		content = "(empty)"
 	}
-	m.conv.SetContent(wrapText(title+"\n\n"+entry.title+"\n"+entry.meta+"\n"+
-		strings.Repeat("─", clampRule(m.conv.Width, 40))+"\n\n"+content, m.conv.Width))
+	prefix := wrapText(title+"\n\n"+entry.title+"\n"+entry.meta+"\n"+
+		strings.Repeat("─", clampRule(m.conv.Width, 40))+"\n\n", m.conv.Width)
+	m.conv.SetContent(prefix + renderMarkdown(content, m.conv.Width))
 	m.convTurns = 0
 	m.convActivities = 0
 	m.convLive = 0
