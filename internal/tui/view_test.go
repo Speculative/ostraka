@@ -38,6 +38,32 @@ func TestChannelViewExcludesTerminalItems(t *testing.T) {
 	}
 }
 
+func TestConversationShowsPersistedDispatchFailure(t *testing.T) {
+	st, err := store.NewStore(filepath.Join(t.TempDir(), ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := st.CreateItem(models.ChannelInbox, "failed agent", "body", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup := &fakeSupervisor{dispatchError: "codex: turn failed: quota exceeded"}
+	m := newModel(st, nil, sup)
+	m.items = []models.Item{item}
+	m.selected = 0
+	m.conv.Width = 80
+	m.conv.Height = 20
+	m.updateConv()
+
+	view := m.conv.View()
+	if !strings.Contains(view, "agent dispatch failed") || !strings.Contains(view, "quota exceeded") {
+		t.Fatalf("conversation omitted dispatch failure: %q", view)
+	}
+	if m.convFailure == 0 {
+		t.Fatal("conversation did not track the dispatch failure")
+	}
+}
+
 func TestChannelViewExcludesOtherChannels(t *testing.T) {
 	v := channelView(models.ChannelInbox)
 	if v.includes(item(models.Channel("other"), models.StatusActive, t0), true) {

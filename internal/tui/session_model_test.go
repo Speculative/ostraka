@@ -31,6 +31,8 @@ func (s *agentInfoSupervisor) LastTurnInfo(string) (supervisor.TurnInfo, bool) {
 	return s.info, s.hasInfo
 }
 
+func (*agentInfoSupervisor) DispatchError(string) (string, bool) { return "", false }
+
 func (*agentInfoSupervisor) PreferredModel(supervisor.Provider) string  { return "" }
 func (*agentInfoSupervisor) PreferredEffort(supervisor.Provider) string { return "" }
 

@@ -75,23 +75,7 @@ func (l *liveLog) append(line string) {
 	// Replace the log atomically. os.WriteFile truncates the existing path
 	// before writing, so the TUI watcher can otherwise observe a brief empty
 	// file between every two live lines and make the trace flicker.
-	f, err := os.CreateTemp(filepath.Dir(l.path), ".live-*")
-	if err != nil {
-		return
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp) // no-op once the rename below succeeds
-	if _, err := f.Write([]byte(l.buf.String())); err != nil {
-		f.Close()
-		return
-	}
-	if err := f.Close(); err != nil {
-		return
-	}
-	if err := os.Chmod(tmp, 0644); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, l.path)
+	_ = writeAtomic(l.path, []byte(l.buf.String()))
 }
 
 // clear removes the log. Called when a dispatch ends, whichever way it ended:
@@ -100,4 +84,24 @@ func (l *liveLog) clear() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	os.Remove(l.path) //nolint:errcheck
+}
+
+func writeAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".atomic-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // no-op once the rename below succeeds
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

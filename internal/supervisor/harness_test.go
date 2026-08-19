@@ -227,10 +227,20 @@ func TestParseAppServerEventMarksFailedTurn(t *testing.T) {
 	result := TurnResult{}
 	parseAppServerEvent(appServerMessage{
 		Method: "turn/completed",
-		Params: json.RawMessage(`{"turn":{"status":"failed"}}`),
+		Params: json.RawMessage(`{"turn":{"status":"failed","error":{"message":"quota exceeded"}}}`),
 	}, &result, nil)
 	if !result.IsError {
 		t.Error("failed turn was not marked as an error")
+	}
+	if result.ErrorText != "quota exceeded" {
+		t.Errorf("failure text = %q, want quota exceeded", result.ErrorText)
+	}
+}
+
+func TestTurnErrorTextFallsBackToResultText(t *testing.T) {
+	got := turnErrorText(TurnResult{ResultText: "provider stopped"})
+	if got != "provider stopped" {
+		t.Errorf("error text = %q", got)
 	}
 }
 

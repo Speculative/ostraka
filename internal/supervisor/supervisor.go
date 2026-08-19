@@ -293,6 +293,14 @@ func (s *Supervisor) LastTurnInfo(itemID string) (TurnInfo, bool) {
 	return info, ok
 }
 
+// DispatchError returns the most recent provider failure for itemID. It is
+// persisted so the TUI can still show the warning after the transient live
+// trace has been removed or the supervisor has been restarted.
+func (s *Supervisor) DispatchError(itemID string) (string, bool) {
+	message := ReadDispatchError(s.root, itemID)
+	return message, message != ""
+}
+
 func (s *Supervisor) setTurnInfo(itemID string, info TurnInfo) {
 	s.turnInfoMu.Lock()
 	defer s.turnInfoMu.Unlock()
@@ -628,6 +636,9 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		s.logger.Printf("item %s: skipping stale dispatch; item is no longer pending-agent", msg.itemID)
 		return
 	}
+	if err := clearDispatchError(s.root, msg.itemID); err != nil {
+		s.logger.Printf("item %s: cannot clear previous dispatch error: %v", msg.itemID, err)
+	}
 	s.setBusy(msg.itemID)
 	defer s.setBusy("")
 
@@ -650,6 +661,9 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		prompt = bootstrapPrompt(msg.itemID, instructions, brief, context, replyCommand(s.root, msg.itemID))
 	}
 	result, err := s.harnessFor(sf.Provider).RunTurn(s.runContext(), prompt, sf.SessionID, sf.Model, sf.Effort, live.append)
+	if err == nil && result.IsError {
+		err = fmt.Errorf("%s: turn failed: %s", sf.Provider, turnErrorText(result))
+	}
 	if result.Model != "" || result.Context.UsedTokens > 0 || result.Context.WindowTokens > 0 {
 		model := result.Model
 		// Codex's usage notification does not include the resolved model. The
@@ -663,6 +677,9 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	}
 	if err != nil {
 		s.logger.Printf("item %s: dispatch failed: %v", msg.itemID, err)
+		if writeErr := writeDispatchError(s.root, msg.itemID, err); writeErr != nil {
+			s.logger.Printf("item %s: cannot persist dispatch error: %v", msg.itemID, writeErr)
+		}
 		// Put it back in the queue's state so it doesn't sit forever showing
 		// as in-progress for a run that is already over.
 		s.revertAcknowledged(msg.itemID, models.StatusPendingAgent)
@@ -672,6 +689,9 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		// known from the stream's opening event, long before the result.
 		s.persistSession(msg.itemID, sf, result.SessionID)
 		return
+	}
+	if clearErr := clearDispatchError(s.root, msg.itemID); clearErr != nil {
+		s.logger.Printf("item %s: cannot clear dispatch error after success: %v", msg.itemID, clearErr)
 	}
 	// A successful run whose agent never posted a turn leaves the marker
 	// behind — hand it back rather than showing work that isn't happening.

@@ -31,7 +31,8 @@ const (
 // fakeSupervisor keeps the integration suite at the TUI boundary: the real
 // Bubble Tea program runs, but a test never starts claude or codex.
 type fakeSupervisor struct {
-	enqueued []string
+	enqueued      []string
+	dispatchError string
 }
 
 func (s *fakeSupervisor) Enqueue(itemID string) {
@@ -46,6 +47,10 @@ func (s *fakeSupervisor) SessionIsStale(string) bool { return false }
 
 func (s *fakeSupervisor) LastTurnInfo(string) (supervisor.TurnInfo, bool) {
 	return supervisor.TurnInfo{}, false
+}
+
+func (s *fakeSupervisor) DispatchError(string) (string, bool) {
+	return s.dispatchError, s.dispatchError != ""
 }
 
 func (s *fakeSupervisor) PreferredModel(supervisor.Provider) string { return "" }

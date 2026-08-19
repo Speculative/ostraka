@@ -58,6 +58,7 @@ type supervisorClient interface {
 	Session(string) (supervisor.Provider, string, string, string, time.Time)
 	SessionIsStale(string) bool
 	LastTurnInfo(string) (supervisor.TurnInfo, bool)
+	DispatchError(string) (string, bool)
 	PreferredModel(supervisor.Provider) string
 	PreferredEffort(supervisor.Provider) string
 	StartNewSession(string, supervisor.Provider, string, string) error
@@ -100,11 +101,12 @@ var (
 	newBelowStyle    = lipgloss.NewStyle().Bold(true).
 				Foreground(lipgloss.Color("16")).
 				Background(pendingFg)
-	liveHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(workingFg)
-	popupStyle      = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("12")).
-			Padding(0, 1)
+	liveHeaderStyle    = lipgloss.NewStyle().Bold(true).Foreground(workingFg)
+	warningHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(pendingFg)
+	popupStyle         = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("12")).
+				Padding(0, 1)
 	// The confirmation is the one popup that reports a consequence rather than
 	// offering a choice, so it is drawn heavier than the selectors: a thick
 	// border in the pending amber, and a blank line of padding so the warning
@@ -295,6 +297,9 @@ type model struct {
 	// convLive is the length of the live progress block currently rendered,
 	// so a reload can tell a growing in-flight run from a static redraw.
 	convLive int
+	// convFailure is the length of the persisted dispatch warning currently
+	// rendered, so a new warning follows the same bottom behavior as a turn.
+	convFailure int
 	// convItemID is the item the pane is currently rendering. A reload that
 	// changes it is a move to a different conversation, not an update to the
 	// one being read.
@@ -482,6 +487,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prevTurns := m.convTurns
 		prevActivities := m.convActivities
 		prevLive := m.convLive
+		prevFailure := m.convFailure
 		// Sample before SetContent: appending lines can change the answer.
 		wasAtBottom := m.conv.AtBottom()
 
@@ -545,6 +551,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// handles the live block disappearing after its reply is written.
 			if wasAtBottom {
 				m.conv.GotoBottom()
+			}
+		} else if sameItem && m.convFailure != prevFailure {
+			if wasAtBottom {
+				m.conv.GotoBottom()
+			} else {
+				m.newBelow = true
 			}
 		}
 		return m, nil
@@ -2521,6 +2533,7 @@ func (m *model) updateConv() {
 		m.convTurns = 0
 		m.convActivities = 0
 		m.convLive = 0
+		m.convFailure = 0
 		m.convItemID = ""
 		return
 	}
@@ -2600,6 +2613,17 @@ func (m *model) updateConv() {
 	}
 	m.convLive = len(live)
 
+	failure := ""
+	if m.sup != nil {
+		failure, _ = m.sup.DispatchError(item.ID)
+	}
+	if failure != "" {
+		sb.WriteString("\n\n" + turnRule + "\n" +
+			warningHeaderStyle.Render("⚠ agent dispatch failed") + "\n\n" +
+			wrapText(failure, w))
+	}
+	m.convFailure = len(failure)
+
 	m.conv.SetContent(sb.String())
 }
 
@@ -2663,6 +2687,7 @@ func (m *model) updateProjectConv() {
 		m.convTurns = 0
 		m.convActivities = 0
 		m.convLive = 0
+		m.convFailure = 0
 		m.convItemID = ""
 		return
 	}
@@ -2680,6 +2705,7 @@ func (m *model) updateProjectConv() {
 	m.convTurns = 0
 	m.convActivities = 0
 	m.convLive = 0
+	m.convFailure = 0
 	m.convItemID = "project-" + strings.ToLower(strings.ReplaceAll(entry.title, " ", "-"))
 }
 

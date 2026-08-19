@@ -19,9 +19,13 @@ type TurnResult struct {
 	// Model is the provider's resolved primary model for this turn. It is
 	// reported rather than inferred from a requested alias because a provider
 	// may fall back or use helper models during a turn.
-	Model        string
-	ResultText   string
-	IsError      bool
+	Model      string
+	ResultText string
+	IsError    bool
+	// ErrorText is the provider's explanation when IsError is true. It is
+	// separate from ResultText because a failed turn must not look like an
+	// agent reply to the supervisor or the TUI.
+	ErrorText    string
 	DurationMs   int64
 	TotalCostUSD float64
 	NumTurns     int
@@ -240,6 +244,7 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID, model, e
 		Model:        telemetry.Model,
 		ResultText:   raw.Result,
 		IsError:      raw.IsError,
+		ErrorText:    raw.Result,
 		DurationMs:   raw.DurationMs,
 		TotalCostUSD: raw.TotalCostUSD,
 		NumTurns:     raw.NumTurns,
@@ -248,6 +253,9 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID, model, e
 	applyClaudeResultTelemetry(&result, raw)
 	if runErr != nil {
 		return result, fmt.Errorf("claude exited with error: %w (stderr=%q)", runErr, truncate(stderr.String(), 500))
+	}
+	if result.IsError {
+		return result, fmt.Errorf("claude: turn failed: %s", turnErrorText(result))
 	}
 	return result, nil
 }
@@ -439,6 +447,9 @@ func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID, mode
 		}
 		if message.Method == "turn/completed" {
 			parseAppServerEvent(message, &result, onEvent)
+			if result.IsError {
+				return result, fmt.Errorf("codex app-server: turn failed: %s", turnErrorText(result))
+			}
 			return result, nil
 		}
 		parseAppServerEvent(message, &result, onEvent)
@@ -561,6 +572,16 @@ func appServerFailure(err error, stderr string) error {
 	return fmt.Errorf("codex app-server: %w (stderr=%q)", err, truncate(stderr, 500))
 }
 
+func turnErrorText(result TurnResult) string {
+	if text := strings.TrimSpace(result.ErrorText); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(result.ResultText); text != "" {
+		return text
+	}
+	return "provider reported an unsuccessful turn"
+}
+
 // parseAppServerEvent translates the provider's notifications into the small
 // provider-neutral surface exposed by Harness. Unknown notifications are
 // intentionally ignored so App Server additions do not break dispatch.
@@ -637,11 +658,21 @@ func parseAppServerEvent(message appServerMessage, result *TurnResult, onEvent f
 			Turn struct {
 				DurationMs int64  `json:"durationMs"`
 				Status     string `json:"status"`
+				Error      *struct {
+					Message           string `json:"message"`
+					AdditionalDetails string `json:"additionalDetails"`
+				} `json:"error"`
 			} `json:"turn"`
 		}
 		if json.Unmarshal(message.Params, &params) == nil {
 			result.DurationMs = params.Turn.DurationMs
 			result.IsError = params.Turn.Status != "" && params.Turn.Status != "completed"
+			if params.Turn.Error != nil {
+				result.ErrorText = strings.TrimSpace(params.Turn.Error.Message)
+				if result.ErrorText == "" {
+					result.ErrorText = strings.TrimSpace(params.Turn.Error.AdditionalDetails)
+				}
+			}
 		}
 	}
 }

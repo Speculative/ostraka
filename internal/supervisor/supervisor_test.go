@@ -208,6 +208,60 @@ func TestDispatchErrorIsLoggedNotFatal(t *testing.T) {
 	}
 }
 
+func TestDispatchFailureIsPersistedForTheUser(t *testing.T) {
+	fh := &fakeHarness{err: context.DeadlineExceeded}
+	s, st := newStoreBackedSupervisor(t, fh)
+	item, err := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.dispatch(enqueueMsg{itemID: item.ID})
+
+	failure, ok := s.DispatchError(item.ID)
+	if !ok || !strings.Contains(failure, "deadline exceeded") {
+		t.Fatalf("dispatch error = %q, present=%v", failure, ok)
+	}
+	after, _ := st.GetItem(item.ID)
+	if after.Status != models.StatusPendingAgent {
+		t.Errorf("status after failed dispatch = %q, want pending-agent", after.Status)
+	}
+}
+
+func TestProviderReportedFailureIsTreatedAsDispatchError(t *testing.T) {
+	fh := &fakeHarness{result: TurnResult{IsError: true, ErrorText: "quota exceeded"}}
+	s, st := newStoreBackedSupervisor(t, fh)
+	item, err := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.dispatch(enqueueMsg{itemID: item.ID})
+
+	failure, ok := s.DispatchError(item.ID)
+	if !ok || !strings.Contains(failure, "quota exceeded") {
+		t.Fatalf("dispatch error = %q, present=%v", failure, ok)
+	}
+}
+
+func TestSuccessfulDispatchClearsPreviousError(t *testing.T) {
+	fh := &fakeHarness{}
+	s, st := newStoreBackedSupervisor(t, fh)
+	item, err := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDispatchError(s.root, item.ID, context.DeadlineExceeded); err != nil {
+		t.Fatal(err)
+	}
+
+	s.dispatch(enqueueMsg{itemID: item.ID})
+
+	if failure, ok := s.DispatchError(item.ID); ok || failure != "" {
+		t.Errorf("stale dispatch error = %q, present=%v", failure, ok)
+	}
+}
+
 // statusSpyHarness records the item's status as observed from inside the run,
 // which is the only place the in-progress marker is visible.
 type statusSpyHarness struct {
