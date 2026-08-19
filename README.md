@@ -20,8 +20,10 @@ in their initial prompt.
 
 Once a release is published, install the CLI with
 `go install github.com/Speculative/ostraka/cmd/ostraka@latest`, then run
-`ostraka init` in each project that should have an Ostraka inbox. The
-supervisor supplies item context directly and `ostraka preamble` provides the
-static agent guidance, so no separate Ostraka skill installation is required.
+`ostraka init` in each project that should have an Ostraka inbox, or launch
+`ostraka tui` and accept its offer to initialise the current directory when no
+project exists in the current directory or an ancestor. The supervisor supplies
+item context directly and `ostraka preamble` provides the static agent guidance,
+so no separate Ostraka skill installation is required.
 See [docs/deploying.md](docs/deploying.md) for release, local checkout, and
 Carthage setup details.

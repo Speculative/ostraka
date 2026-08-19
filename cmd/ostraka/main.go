@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -195,9 +196,51 @@ var tuiCmd = &cobra.Command{
 	Use:   "tui",
 	Short: "Launch the interactive TUI",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		s := mustStore()
-		return tui.Run(s)
+		s, err := storeForTUI(cmd)
+		if err != nil || s == nil {
+			return err
+		}
+		return runTUI(s)
 	},
+}
+
+var runTUI = tui.Run
+
+// storeForTUI finds the nearest existing project, or offers to initialise the
+// current directory before the interactive program starts. Keeping the
+// prompt outside Bubble Tea means a cancelled or failed initialisation never
+// has to enter the alternate screen or create supervisor state.
+func storeForTUI(cmd *cobra.Command) (*store.Store, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	root, err := store.FindRoot(cwd)
+	if err == nil {
+		return store.NewStore(root)
+	}
+
+	out := cmd.OutOrStdout()
+	newRoot := filepath.Join(cwd, ".ostraka")
+	fmt.Fprintf(out, "No .ostraka/ directory found in %s or any parent.\n", cwd)
+	fmt.Fprintf(out, "Initialize Ostraka in %s and open the TUI? [y/N] ", newRoot)
+	answer, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+	fmt.Fprintln(out)
+	if readErr != nil && readErr != io.EOF {
+		return nil, fmt.Errorf("read initialization choice: %w", readErr)
+	}
+	choice := strings.TrimSpace(answer)
+	if !strings.EqualFold(choice, "y") && !strings.EqualFold(choice, "yes") {
+		fmt.Fprintln(out, "initialization cancelled")
+		return nil, nil
+	}
+
+	s, err := store.NewStore(newRoot)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Ostraka in %s: %w", newRoot, err)
+	}
+	fmt.Fprintf(out, "initialised %s\n", newRoot)
+	return s, nil
 }
 
 // ── ostraka item ─────────────────────────────────────────────────────────────

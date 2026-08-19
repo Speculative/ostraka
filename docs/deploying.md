@@ -28,13 +28,17 @@ go install github.com/Speculative/ostraka/cmd/ostraka@v0.1.0
 is empty. Put that directory on `PATH`. `go get` is not the install command
 for executables anymore; it manages dependencies in a module's `go.mod`.
 
-Initialise each project once, then launch the TUI from that project:
+Initialise a project explicitly, then launch the TUI from that project:
 
 ```bash
 cd /path/to/project
 ostraka init
 ostraka tui
 ```
+
+Alternatively, `ostraka tui` from an uninitialised directory offers to create
+`.ostraka/` there before opening the TUI. Declining the offer exits cleanly;
+initialisation errors are reported without starting the TUI.
 
 The TUI's agent provider is separate: the `claude` and/or `codex` command must
 also be installed and authenticated for the provider the user selects.
