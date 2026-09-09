@@ -46,6 +46,8 @@ func (*agentInfoSupervisor) AvailableModels(context.Context, supervisor.Provider
 
 func (*agentInfoSupervisor) Busy() (string, bool) { return "", false }
 
+func (*agentInfoSupervisor) Interrupt() error { return nil }
+
 func TestSessionKeyEnterAdvancesToModelStepAndTriggersLoad(t *testing.T) {
 	m := newModel(nil, nil, nil)
 	m.mode = modeSession

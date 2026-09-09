@@ -200,6 +200,7 @@ type Supervisor struct {
 
 	turnInfoMu sync.Mutex
 	turnInfo   map[string]TurnInfo
+	active     activeTurnGuard
 
 	// A dispatch runs under this context, so Shutdown can end an agent turn
 	// that is still in flight. Without it the agent outlives the process that
@@ -224,6 +225,18 @@ type busyGuard struct {
 	itemID string
 }
 
+type activeTurn struct {
+	itemID    string
+	cancel    context.CancelFunc
+	interrupt func() error
+	requested bool
+}
+
+type activeTurnGuard struct {
+	mu   sync.Mutex
+	turn *activeTurn
+}
+
 // Busy reports the item currently being dispatched, if any.
 func (s *Supervisor) Busy() (string, bool) {
 	s.busy.mu.Lock()
@@ -235,6 +248,45 @@ func (s *Supervisor) setBusy(itemID string) {
 	s.busy.mu.Lock()
 	defer s.busy.mu.Unlock()
 	s.busy.itemID = itemID
+}
+
+func (s *Supervisor) clearActiveTurn(turn *activeTurn) {
+	s.active.mu.Lock()
+	if s.active.turn == turn {
+		s.active.turn = nil
+	}
+	s.active.mu.Unlock()
+}
+
+// Interrupt asks the active provider turn to stop. Providers with a native
+// protocol use it first; the per-turn context is the fallback, which causes
+// process cleanup without shutting down the supervisor itself. It is safe and
+// successful when idle.
+func (s *Supervisor) Interrupt() error {
+	s.active.mu.Lock()
+	turn := s.active.turn
+	if turn != nil {
+		turn.requested = true
+	}
+	s.active.mu.Unlock()
+	if turn == nil {
+		return nil
+	}
+	if turn.interrupt != nil {
+		if err := turn.interrupt(); err == nil {
+			return nil
+		} else {
+			s.logger.Printf("item %s: provider interrupt failed, using process cancellation: %v", turn.itemID, err)
+		}
+	}
+	turn.cancel()
+	return nil
+}
+
+func (s *Supervisor) interruptRequested(turn *activeTurn) bool {
+	s.active.mu.Lock()
+	defer s.active.mu.Unlock()
+	return turn.requested
 }
 
 // Shutdown ends any in-flight dispatch and waits for the worker to stop. It is
@@ -660,10 +712,24 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		}
 		prompt = bootstrapPrompt(msg.itemID, instructions, brief, context, replyCommand(s.root, msg.itemID))
 	}
-	result, err := s.harnessFor(sf.Provider).RunTurn(s.runContext(), prompt, sf.SessionID, sf.Model, sf.Effort, live.append)
+	harness := s.harnessFor(sf.Provider)
+	turnCtx, turnCancel := context.WithCancel(s.runContext())
+	active := &activeTurn{itemID: msg.itemID, cancel: turnCancel}
+	if interruptible, ok := harness.(interruptibleHarness); ok {
+		active.interrupt = interruptible.Interrupt
+	}
+	s.active.mu.Lock()
+	s.active.turn = active
+	s.active.mu.Unlock()
+	defer func() {
+		turnCancel()
+		s.clearActiveTurn(active)
+	}()
+	result, err := harness.RunTurn(turnCtx, prompt, sf.SessionID, sf.Model, sf.Effort, live.append)
 	if err == nil && result.IsError {
 		err = fmt.Errorf("%s: turn failed: %s", sf.Provider, turnErrorText(result))
 	}
+	interrupted := s.interruptRequested(active)
 	if result.Model != "" || result.Context.UsedTokens > 0 || result.Context.WindowTokens > 0 {
 		model := result.Model
 		// Codex's usage notification does not include the resolved model. The
@@ -676,9 +742,16 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		s.setTurnInfo(msg.itemID, TurnInfo{Model: model, Context: result.Context})
 	}
 	if err != nil {
-		s.logger.Printf("item %s: dispatch failed: %v", msg.itemID, err)
-		if writeErr := writeDispatchError(s.root, msg.itemID, err); writeErr != nil {
-			s.logger.Printf("item %s: cannot persist dispatch error: %v", msg.itemID, writeErr)
+		if interrupted {
+			s.logger.Printf("item %s: turn interrupted; retaining session recovery", msg.itemID)
+			if clearErr := clearDispatchError(s.root, msg.itemID); clearErr != nil {
+				s.logger.Printf("item %s: cannot clear dispatch error after interrupt: %v", msg.itemID, clearErr)
+			}
+		} else {
+			s.logger.Printf("item %s: dispatch failed: %v", msg.itemID, err)
+			if writeErr := writeDispatchError(s.root, msg.itemID, err); writeErr != nil {
+				s.logger.Printf("item %s: cannot persist dispatch error: %v", msg.itemID, writeErr)
+			}
 		}
 		// Put it back in the queue's state so it doesn't sit forever showing
 		// as in-progress for a run that is already over.

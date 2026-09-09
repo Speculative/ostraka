@@ -64,6 +64,7 @@ type supervisorClient interface {
 	StartNewSession(string, supervisor.Provider, string, string) error
 	AvailableModels(context.Context, supervisor.Provider) ([]supervisor.ModelOption, error)
 	Busy() (string, bool)
+	Interrupt() error
 }
 
 type activityWaker interface {
@@ -689,6 +690,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "esc" || msg.String() == "ctrl+c" {
+		if _, busy := m.busyDispatch(); busy {
+			// Interrupt is deliberately fire-and-observe: the provider finishes
+			// unwinding asynchronously, and the watcher will refresh the item
+			// back to pending-agent once dispatch recovery persists.
+			_ = m.sup.Interrupt()
+			return m, nil
+		}
+		if msg.String() == "esc" {
+			return m, nil
+		}
+	}
 	if m.projectPane != 0 {
 		switch msg.String() {
 		case "1":
@@ -1848,17 +1861,17 @@ func (m model) renderFooter() string {
 		text = "k keep for later  s start  x reject  esc cancel"
 	default:
 		if m.projectPane != 0 {
-			text = "j/k versions  tab switch document  e edit  1-3 view  q quit"
+			text = "j/k versions  tab switch document  e edit  esc/ctrl+c interrupt  1-3 view  q quit"
 			break
 		}
-		text = "q quit  j/k nav  a add  c subthread  s status  S session  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
+		text = "q quit  esc/ctrl+c interrupt  j/k nav  a add  c subthread  s status  S session  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-			text = "q quit  j/k nav  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
+			text = "q quit  esc/ctrl+c interrupt  j/k nav  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
 		}
 		if m.showBacklog {
-			text = "q quit  j/k nav  a add  c subthread  s status  S session  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
+			text = "q quit  esc/ctrl+c interrupt  j/k nav  a add  c subthread  s status  S session  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-				text = "q quit  j/k nav  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
+				text = "q quit  esc/ctrl+c interrupt  j/k nav  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
 			}
 		}
 	}

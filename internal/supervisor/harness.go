@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // TurnResult is the outcome of one harness turn.
@@ -79,14 +80,30 @@ type Harness interface {
 	AvailableModels(ctx context.Context) ([]ModelOption, error)
 }
 
+// interruptibleHarness adds provider-native cancellation to Harness. The
+// supervisor falls back to the per-turn context when a provider cannot accept
+// an interrupt, so third-party test harnesses do not need to implement it.
+type interruptibleHarness interface {
+	Interrupt() error
+}
+
 // claudeHarness drives the Claude Code CLI in headless mode.
 type claudeHarness struct {
-	bin string
+	bin     string
+	process processControl
 }
 
 // codexHarness drives Codex through its local App Server protocol. Protocol
 // details stay inside the adapter; callers use the normal Harness contract.
-type codexHarness struct{ bin string }
+type codexHarness struct {
+	bin          string
+	process      processControl
+	mu           sync.Mutex
+	active       *appServerConn
+	thread       string
+	turn         string
+	interrupting bool
+}
 
 func newCodexHarness() *codexHarness { return &codexHarness{bin: "codex"} }
 
@@ -114,6 +131,10 @@ var claudeModelAliases = []ModelOption{
 
 func (h *claudeHarness) AvailableModels(ctx context.Context) ([]ModelOption, error) {
 	return claudeModelAliases, nil
+}
+
+func (h *claudeHarness) Interrupt() error {
+	return h.process.interrupt()
 }
 
 type claudeJSONResult struct {
@@ -202,6 +223,8 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID, model, e
 	if err := cmd.Start(); err != nil {
 		return TurnResult{}, fmt.Errorf("claude: start: %w", err)
 	}
+	h.process.attach(cmd)
+	defer h.process.clear(cmd)
 
 	var raw claudeJSONResult
 	var sawResult bool
@@ -300,10 +323,11 @@ type appServerMessage struct {
 // sharing a process across calls, and a short-lived one keeps discovery from
 // needing to coordinate with an in-flight turn.
 type appServerConn struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	reader *bufio.Reader
-	stderr *bytes.Buffer
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	reader  *bufio.Reader
+	stderr  *bytes.Buffer
+	writeMu sync.Mutex
 }
 
 func startAppServerConn(ctx context.Context, bin string) (*appServerConn, error) {
@@ -326,14 +350,18 @@ func startAppServerConn(ctx context.Context, bin string) (*appServerConn, error)
 }
 
 func (c *appServerConn) close() {
+	c.writeMu.Lock()
 	_ = c.stdin.Close()
+	c.writeMu.Unlock()
 	if c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
+		_ = killProcess(c.cmd)
 	}
 	_ = c.cmd.Wait()
 }
 
 func (c *appServerConn) send(id int, method string, params any) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	return json.NewEncoder(c.stdin).Encode(struct {
 		ID     int    `json:"id"`
 		Method string `json:"method"`
@@ -383,8 +411,17 @@ func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID, mode
 	if err != nil {
 		return result, err
 	}
-	defer conn.close()
-	onNotify := func(message appServerMessage) { parseAppServerEvent(message, &result, onEvent) }
+	h.setActive(conn, "", "")
+	defer func() {
+		h.clearActive(conn)
+		conn.close()
+	}()
+	onNotify := func(message appServerMessage) {
+		parseAppServerEvent(message, &result, onEvent)
+		if id := appServerTurnID(message); id != "" {
+			h.setTurnID(id)
+		}
+	}
 
 	if err := conn.send(1, "initialize", appServerInitializeParams()); err != nil {
 		return result, fmt.Errorf("codex app-server: initialize: %w", err)
@@ -428,6 +465,7 @@ func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID, mode
 		return result, fmt.Errorf("codex app-server: %s returned no thread id", method)
 	}
 	result.SessionID = thread.Thread.ID
+	h.setThreadID(result.SessionID)
 
 	turnEffort := ""
 	if sessionID == "" {
@@ -436,8 +474,12 @@ func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID, mode
 	if err := conn.send(3, "turn/start", appServerTurnParams(result.SessionID, prompt, turnEffort)); err != nil {
 		return result, fmt.Errorf("codex app-server: turn/start: %w", err)
 	}
-	if _, err := conn.waitForResult(3, onNotify); err != nil {
+	turnResponse, err := conn.waitForResult(3, onNotify)
+	if err != nil {
 		return result, appServerFailure(err, conn.stderr.String())
+	}
+	if id := appServerTurnID(turnResponse); id != "" {
+		h.setTurnID(id)
 	}
 
 	for {
@@ -454,6 +496,90 @@ func (h *codexHarness) runAppServer(ctx context.Context, prompt, sessionID, mode
 		}
 		parseAppServerEvent(message, &result, onEvent)
 	}
+}
+
+func (h *codexHarness) Interrupt() error {
+	h.mu.Lock()
+	conn, threadID, turnID := h.active, h.thread, h.turn
+	if conn != nil && h.interrupting {
+		h.mu.Unlock()
+		return nil
+	}
+	if conn != nil {
+		h.interrupting = true
+	}
+	h.mu.Unlock()
+	if conn == nil {
+		return errNoActiveProviderProcess
+	}
+	if threadID != "" && turnID != "" {
+		if err := conn.send(4, "turn/interrupt", map[string]string{
+			"threadId": threadID,
+			"turnId":   turnID,
+		}); err != nil {
+			h.mu.Lock()
+			if h.active == conn {
+				h.interrupting = false
+			}
+			h.mu.Unlock()
+			return err
+		}
+		// The server should report turn/completed with an interrupted status.
+		// Kill the app-server only if that graceful protocol path stalls.
+		h.process.scheduleKill()
+		return nil
+	}
+	// The process may still be negotiating the thread or turn. There is no
+	// protocol identity to interrupt yet, so use the provider process's
+	// graceful OS signal and its hard-kill fallback.
+	return h.process.interrupt()
+}
+
+func (h *codexHarness) setActive(conn *appServerConn, threadID, turnID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.active, h.thread, h.turn = conn, threadID, turnID
+	h.interrupting = false
+	h.process.attach(conn.cmd)
+}
+
+func (h *codexHarness) setThreadID(threadID string) {
+	h.mu.Lock()
+	h.thread = threadID
+	h.mu.Unlock()
+}
+
+func (h *codexHarness) setTurnID(turnID string) {
+	h.mu.Lock()
+	h.turn = turnID
+	h.mu.Unlock()
+}
+
+func (h *codexHarness) clearActive(conn *appServerConn) {
+	h.mu.Lock()
+	if h.active == conn {
+		h.active, h.thread, h.turn, h.interrupting = nil, "", "", false
+	}
+	h.mu.Unlock()
+	h.process.clear(conn.cmd)
+}
+
+func appServerTurnID(message appServerMessage) string {
+	if len(message.Result) == 0 {
+		if message.Method != "turn/started" {
+			return ""
+		}
+		message.Result = message.Params
+	}
+	var payload struct {
+		Turn struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+	}
+	if json.Unmarshal(message.Result, &payload) != nil {
+		return ""
+	}
+	return payload.Turn.ID
 }
 
 // codexModelListResult is the subset of the App Server's model/list response

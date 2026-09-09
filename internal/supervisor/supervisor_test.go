@@ -473,6 +473,51 @@ func TestShutdownStopsAnInFlightTurn(t *testing.T) {
 	s.Shutdown() // idempotent: a second call must not block or panic
 }
 
+func TestInterruptStopsOnlyTheActiveTurnAndPreservesRecovery(t *testing.T) {
+	fh := &blockingHarness{running: make(chan struct{}), sessionID: "session-partial"}
+	s, st := newStoreBackedSupervisor(t, fh)
+	item, err := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Start()
+	s.Enqueue(item.ID)
+	select {
+	case <-fh.running:
+	case <-time.After(2 * time.Second):
+		t.Fatal("harness never started")
+	}
+
+	if err := s.Interrupt(); err != nil {
+		t.Fatal(err)
+	}
+	if s.ctx.Err() != nil {
+		t.Fatalf("per-turn interrupt cancelled the supervisor context: %v", s.ctx.Err())
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, busy := s.Busy(); !busy {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("interrupted dispatch did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	after, _ := st.GetItem(item.ID)
+	if after.Status != models.StatusPendingAgent {
+		t.Errorf("status after interrupt = %q, want pending-agent", after.Status)
+	}
+	if failure, ok := s.DispatchError(item.ID); ok || failure != "" {
+		t.Errorf("intentional interrupt left a dispatch warning: %q", failure)
+	}
+	sf, err := loadItemSession(s.root, item.ID)
+	if err != nil || sf.SessionID != "session-partial" {
+		t.Errorf("session after interrupt = %+v, %v; want preserved partial session", sf, err)
+	}
+	s.Shutdown()
+}
+
 func TestShutdownIsSafeWithoutStart(t *testing.T) {
 	// Constructed then abandoned — Run returns this way when the watcher fails.
 	s := newTestSupervisor(t, &fakeHarness{})

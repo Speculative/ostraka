@@ -33,6 +33,8 @@ const (
 type fakeSupervisor struct {
 	enqueued      []string
 	dispatchError string
+	busyID        string
+	interrupts    int
 }
 
 func (s *fakeSupervisor) Enqueue(itemID string) {
@@ -65,7 +67,12 @@ func (s *fakeSupervisor) AvailableModels(context.Context, supervisor.Provider) (
 	return []supervisor.ModelOption{{DisplayName: "Default", Default: true}}, nil
 }
 
-func (s *fakeSupervisor) Busy() (string, bool) { return "", false }
+func (s *fakeSupervisor) Busy() (string, bool) { return s.busyID, s.busyID != "" }
+
+func (s *fakeSupervisor) Interrupt() error {
+	s.interrupts++
+	return nil
+}
 
 func writeIntegrationItem(t *testing.T, s *store.Store, id, title string, status models.Status) {
 	t.Helper()

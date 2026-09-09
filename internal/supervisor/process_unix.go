@@ -21,12 +21,25 @@ const killDelay = 3 * time.Second
 func detachProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		// Negative pid addresses the group. The group id is the child's pid
-		// because Setpgid made it the leader.
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return killProcess(cmd)
 	}
 	cmd.WaitDelay = killDelay
+}
+
+func interruptProcess(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return errNoActiveProviderProcess
+	}
+	// Negative pid addresses the group. The group id is the child's pid
+	// because Setpgid made it the leader.
+	return syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
+}
+
+func killProcess(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return nil
+	}
+	// Negative pid addresses the whole provider/tool process group, not just
+	// the CLI parent that owns the stdio pipes.
+	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }

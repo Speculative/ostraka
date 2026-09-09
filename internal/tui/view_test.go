@@ -64,6 +64,27 @@ func TestConversationShowsPersistedDispatchFailure(t *testing.T) {
 	}
 }
 
+func TestInterruptKeysStopTheActiveDispatch(t *testing.T) {
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyEsc},
+		{Type: tea.KeyCtrlC},
+	} {
+		t.Run(key.String(), func(t *testing.T) {
+			sup := &fakeSupervisor{busyID: "item-1"}
+			m := newModel(nil, nil, sup)
+			m.items = []models.Item{{ID: "item-1", Status: models.StatusAgentAcknowledged}}
+			m.selected = 0
+
+			if _, cmd := m.handleNavKey(key); cmd != nil {
+				t.Fatal("interrupt key unexpectedly returned a command")
+			}
+			if sup.interrupts != 1 {
+				t.Fatalf("interrupt calls = %d, want 1", sup.interrupts)
+			}
+		})
+	}
+}
+
 func TestChannelViewExcludesOtherChannels(t *testing.T) {
 	v := channelView(models.ChannelInbox)
 	if v.includes(item(models.Channel("other"), models.StatusActive, t0), true) {

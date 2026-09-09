@@ -1,12 +1,17 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+type closeBuffer struct{ bytes.Buffer }
+
+func (*closeBuffer) Close() error { return nil }
 
 // Lines below are the real shapes emitted by
 // `claude -p --output-format stream-json --verbose`.
@@ -346,5 +351,45 @@ func TestParseCodexModelListDropsHiddenEntriesAndKeepsDefault(t *testing.T) {
 	}
 	if got[1].ID != "gpt-5.6-terra" || got[1].Default {
 		t.Errorf("second option = %+v", got[1])
+	}
+}
+
+func TestAppServerTurnIDReadsStartResponseAndNotification(t *testing.T) {
+	for name, message := range map[string]appServerMessage{
+		"start response":       {Result: json.RawMessage(`{"turn":{"id":"turn-from-response"}}`)},
+		"started notification": {Method: "turn/started", Params: json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-from-notification"}}`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := "turn-from-response"
+			if name == "started notification" {
+				want = "turn-from-notification"
+			}
+			if got := appServerTurnID(message); got != want {
+				t.Fatalf("turn id = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestCodexInterruptSendsThreadAndTurnIDs(t *testing.T) {
+	var output closeBuffer
+	h := &codexHarness{
+		active: &appServerConn{stdin: &output},
+		thread: "thread-123",
+		turn:   "turn-456",
+	}
+	if err := h.Interrupt(); err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		ID     int            `json:"id"`
+		Method string         `json:"method"`
+		Params map[string]any `json:"params"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Method != "turn/interrupt" || request.Params["threadId"] != "thread-123" || request.Params["turnId"] != "turn-456" {
+		t.Fatalf("interrupt request = %+v", request)
 	}
 }

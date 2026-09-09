@@ -10,7 +10,23 @@ import (
 func TestAgentOrientationIncludesExactReplyCommand(t *testing.T) {
 	command := "go run ./cmd/ostraka item turn <item-id> --actor agent --content-stdin"
 	got := AgentOrientation(command)
-	for _, want := range []string{command, "real multiline content", "ends this dispatch", "project brief replace --content-stdin", "complete replacement"} {
+	for _, want := range []string{
+		command,
+		"real multiline content",
+		"ends this dispatch",
+		"project brief replace --content-stdin",
+		"complete replacement",
+		"both long-lived and broadly relevant to most items",
+		"supervisor includes the brief when initiating every item",
+		"project description, goals, and norms",
+		"not a log of recent changes",
+		"medium-duration state",
+		"recently fixed decision",
+		"item-specific findings",
+		"only matters to a subset of work",
+		"linking dependent items to the item that established it",
+		"do not duplicate it in the brief",
+	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("orientation missing %q: %q", want, got)
 		}
