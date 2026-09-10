@@ -27,7 +27,7 @@ func TestDispatchableWakesOnlyLiveStatuses(t *testing.T) {
 }
 
 func TestStatusIndexRoundTripsEveryStatus(t *testing.T) {
-	for i, s := range allStatuses {
+	for i, s := range userStatuses {
 		if got := statusIndex(s); got != i {
 			t.Errorf("statusIndex(%q) = %d, want %d", s, got, i)
 		}
@@ -42,27 +42,28 @@ func TestStatusIndexFallsBackForUnknown(t *testing.T) {
 	}
 }
 
-func TestAllStatusesCoversEveryModelStatus(t *testing.T) {
-	// The selector is the only way to set a status from the TUI, so a status
-	// missing here is unreachable.
-	known := []models.Status{
-		models.StatusBacklog, models.StatusActive, models.StatusPendingUser,
-		models.StatusPendingAgent, models.StatusAgentAcknowledged,
-		models.StatusArchived,
+func TestStatusSelectorContainsOnlyUserSettableStatuses(t *testing.T) {
+	want := models.UserSettableStatuses()
+	if len(userStatuses) != len(want) {
+		t.Fatalf("userStatuses has %d entries, want %d", len(userStatuses), len(want))
 	}
-	if len(allStatuses) != len(known) {
-		t.Fatalf("allStatuses has %d entries, models defines %d", len(allStatuses), len(known))
-	}
-	for _, s := range known {
-		found := false
-		for _, c := range allStatuses {
-			if c == s {
-				found = true
-				break
-			}
+	for i, status := range want {
+		if userStatuses[i] != status {
+			t.Errorf("userStatuses[%d] = %q, want %q", i, userStatuses[i], status)
 		}
-		if !found {
-			t.Errorf("status %q is not reachable from the selector", s)
+	}
+}
+
+func TestWorkflowStatusesAreAbsentFromSelector(t *testing.T) {
+	for _, workflowStatus := range []models.Status{
+		models.StatusPendingAgent,
+		models.StatusAgentAcknowledged,
+		models.StatusProposed,
+	} {
+		for _, status := range userStatuses {
+			if status == workflowStatus {
+				t.Errorf("workflow status %q is present in selector", workflowStatus)
+			}
 		}
 	}
 }

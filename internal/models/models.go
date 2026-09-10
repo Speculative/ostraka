@@ -45,6 +45,29 @@ var TerminalStatuses = map[Status]bool{
 	StatusArchived: true,
 }
 
+// UserSettableStatuses returns the statuses a user may choose directly. Other
+// statuses describe supervisor-owned transitions or dedicated workflows and
+// must only be reached through those paths.
+func UserSettableStatuses() []Status {
+	return []Status{
+		StatusBacklog,
+		StatusActive,
+		StatusPendingUser,
+		StatusArchived,
+	}
+}
+
+// UserSettableStatus reports whether status may be supplied through a public
+// create or status-change interface.
+func UserSettableStatus(status Status) bool {
+	for _, allowed := range UserSettableStatuses() {
+		if status == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 // NormalizeStatus maps statuses written by older Ostraka versions onto the
 // current lifecycle. "done" and "archived" were behaviorally identical, so
 // archived is now the single terminal status.

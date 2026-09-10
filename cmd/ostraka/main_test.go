@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Speculative/ostraka/internal/models"
 	"github.com/Speculative/ostraka/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -57,6 +58,30 @@ func TestItemTurnArgumentRules(t *testing.T) {
 	}
 	if err := itemTurnCmd.Args(itemTurnCmd, []string{"id", "content"}); err == nil {
 		t.Fatal("stdin form accepted positional content")
+	}
+}
+
+func TestUserSettableStatus(t *testing.T) {
+	for _, status := range models.UserSettableStatuses() {
+		got, err := userSettableStatus(string(status))
+		if err != nil {
+			t.Errorf("userSettableStatus(%q) returned error: %v", status, err)
+		}
+		if got != status {
+			t.Errorf("userSettableStatus(%q) = %q", status, got)
+		}
+	}
+
+	for _, status := range []models.Status{
+		models.StatusPendingAgent,
+		models.StatusAgentAcknowledged,
+		models.StatusProposed,
+		models.Status("unknown"),
+		models.Status("done"),
+	} {
+		if _, err := userSettableStatus(string(status)); err == nil {
+			t.Errorf("userSettableStatus(%q) accepted non-user status", status)
+		}
 	}
 }
 

@@ -268,7 +268,7 @@ func addItemAddFlags() {
 	f.StringVar(&addFlags.title, "title", "", "single-line label for list views (required)")
 	f.StringVar(&addFlags.body, "body", "", "opening description, any length (required)")
 	f.StringVarP(&addFlags.itype, "type", "t", "thread", "thread|doc")
-	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|pending-agent|agent-acknowledged|proposed|archived")
+	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|archived")
 	f.StringVarP(&addFlags.parent, "parent", "p", "", "parent item ID")
 	f.StringSliceVar(&addFlags.related, "related", nil, "top-level item IDs to relate")
 	itemAddCmd.MarkFlagRequired("channel")
@@ -284,6 +284,10 @@ var itemAddCmd = &cobra.Command{
 	Short: "Create a new item and print its ID",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		status, err := userSettableStatus(addFlags.status)
+		if err != nil {
+			return err
+		}
 		s := mustStore()
 		for _, related := range addFlags.related {
 			if _, err := s.GetItem(related); err != nil {
@@ -291,11 +295,10 @@ var itemAddCmd = &cobra.Command{
 			}
 		}
 		var item models.Item
-		var err error
 		if addFlags.parent != "" {
-			item, err = s.CreateSubthread(addFlags.parent, addFlags.title, addFlags.body, models.ItemType(addFlags.itype), models.Status(addFlags.status))
+			item, err = s.CreateSubthread(addFlags.parent, addFlags.title, addFlags.body, models.ItemType(addFlags.itype), status)
 		} else {
-			item, err = s.CreateItem(models.Channel(addFlags.channel), addFlags.title, addFlags.body, models.ItemType(addFlags.itype), models.Status(addFlags.status), "")
+			item, err = s.CreateItem(models.Channel(addFlags.channel), addFlags.title, addFlags.body, models.ItemType(addFlags.itype), status, "")
 		}
 		if err != nil {
 			return err
@@ -511,12 +514,29 @@ var itemStatusCmd = &cobra.Command{
 	Short: "Change the status of an item",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		status, err := userSettableStatus(args[1])
+		if err != nil {
+			return err
+		}
 		s := mustStore()
-		if _, err := s.SetStatus(args[0], models.Status(args[1])); err != nil {
+		if _, err := s.SetStatus(args[0], status); err != nil {
 			die(err)
 		}
 		return nil
 	},
+}
+
+func userSettableStatus(value string) (models.Status, error) {
+	status := models.Status(value)
+	if !models.UserSettableStatus(status) {
+		allowed := models.UserSettableStatuses()
+		values := make([]string, len(allowed))
+		for i, candidate := range allowed {
+			values[i] = string(candidate)
+		}
+		return "", fmt.Errorf("status %q cannot be set by a user (choose %s)", value, strings.Join(values, ", "))
+	}
+	return status, nil
 }
 
 // ── item rm ──────────────────────────────────────────────────────────────────

@@ -273,7 +273,7 @@ type model struct {
 	// list while its title is typed. selected points one past the real items
 	// for its duration, which the existing range guards already handle.
 	draft bool
-	// statusIdx is the cursor into allStatuses while the selector is open.
+	// statusIdx is the cursor into userStatuses while the selector is open.
 	statusIdx int
 	// sessionIdx picks a fresh harness session in the deliberately small v0
 	// session menu. Full session history and switching comes later.
@@ -376,15 +376,10 @@ const (
 	focusReadingPane
 )
 
-// allStatuses is the selector's running order, coarsest lifecycle first.
-var allStatuses = []models.Status{
-	models.StatusBacklog,
-	models.StatusActive,
-	models.StatusPendingUser,
-	models.StatusPendingAgent,
-	models.StatusAgentAcknowledged,
-	models.StatusArchived,
-}
+// userStatuses is the selector's running order, coarsest lifecycle first.
+// Supervisor-owned lifecycle states remain visible in item metadata but are
+// deliberately unavailable here.
+var userStatuses = models.UserSettableStatuses()
 
 var sessionProviders = []supervisor.Provider{
 	supervisor.ProviderClaude,
@@ -998,7 +993,7 @@ func draftSafetyCheckpoint() tea.Cmd {
 }
 
 func statusIndex(s models.Status) int {
-	for i, c := range allStatuses {
+	for i, c := range userStatuses {
 		if c == s {
 			return i
 		}
@@ -1122,7 +1117,7 @@ func (m model) handleStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "q":
 		m.mode = modeNav
 	case "j", "down":
-		if m.statusIdx < len(allStatuses)-1 {
+		if m.statusIdx < len(userStatuses)-1 {
 			m.statusIdx++
 		}
 	case "k", "up":
@@ -1132,7 +1127,7 @@ func (m model) handleStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if m.selected < len(m.items) {
 			item := m.items[m.selected]
-			status := allStatuses[m.statusIdx]
+			status := userStatuses[m.statusIdx]
 			// Moving an item the agent already owes a reply on into a working
 			// status is itself the "go" signal — otherwise you have to set
 			// active and then post a turn you have nothing to say in.
@@ -1869,8 +1864,8 @@ func overlayCentered(frame, box string, width int) string {
 const ansiReset = "\x1b[0m"
 
 func (m model) overlayStatusPopup(lines []string) []string {
-	rows := make([]string, len(allStatuses))
-	for i, s := range allStatuses {
+	rows := make([]string, len(userStatuses))
+	for i, s := range userStatuses {
 		marker, sty := "  ", lipgloss.NewStyle()
 		if i == m.statusIdx {
 			marker, sty = "› ", lipgloss.NewStyle().Bold(true).Foreground(pendingFg)
