@@ -20,6 +20,7 @@ const activityDir = "ACTIVITY"
 const (
 	ActivitySubthreadCreated = "subthread.created"
 	ActivitySubthreadClosed  = "subthread.closed"
+	ActivityAgentInterrupted = "agent.interrupted"
 )
 
 func (s *Store) activityPath(rootID string) string {
@@ -85,6 +86,16 @@ func (s *Store) MarkActivitiesHandled(rootID string, ids []string) error {
 		set[id] = true
 	}
 	return s.markActivities(rootID, set)
+}
+
+// AddActivity records a non-turn timeline event. It is used by the supervisor
+// for interruptions, while subthread lifecycle events continue to use the
+// more specific store methods below.
+func (s *Store) AddActivity(itemID string, activity models.Activity) error {
+	if activity.Timestamp.IsZero() {
+		activity.Timestamp = time.Now().UTC()
+	}
+	return s.appendActivity(itemID, activity)
 }
 
 func activityID(now time.Time) string {

@@ -132,12 +132,13 @@ func startWatcher(root string) (<-chan struct{}, error) {
 		w.Close()
 		return nil, err
 	}
-	// Watch the supported item locations and supervisor state. Live progress is
-	// written under supervisor/, so omitting it leaves the reading pane stale
-	// until another action happens to trigger a reload. Legacy channel
+	// Watch the supported item locations, retained partial traces, and
+	// supervisor state. Live progress is written under supervisor/, while a
+	// completed trace is written under PARTIALS/; omitting either leaves the
+	// reading pane stale until another action happens to trigger a reload. Legacy channel
 	// directories may remain on disk, but they are no longer part of the store
 	// schema or TUI.
-	for _, name := range []string{"INBOX", "ARCHIVE", "ACTIVITY", "supervisor"} {
+	for _, name := range []string{"INBOX", "ARCHIVE", "ACTIVITY", "PARTIALS", "supervisor"} {
 		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
 			w.Add(filepath.Join(root, name))
 		}
@@ -234,6 +235,7 @@ type model struct {
 	items         []models.Item
 	allItems      []models.Item
 	selected      int
+	focus         paneFocus
 	// collapsed is deliberately TUI-local state: folding is a presentation
 	// choice, not project protocol data. Keys are root IDs.
 	collapsed map[string]bool
@@ -298,6 +300,18 @@ type model struct {
 	// convLive is the length of the live progress block currently rendered,
 	// so a reload can tell a growing in-flight run from a static redraw.
 	convLive int
+	// convPartials is the number of durable partial traces rendered for the
+	// current item. Partial responses are collapsed by default, but their
+	// disclosure state is kept locally in this model, keyed by item and turn.
+	convPartials int
+	// convSelection indexes selectable conversation entries (turns and
+	// standalone partial traces) for the reading-pane cursor. Item selection
+	// remains in selected and is only changed while the list has focus.
+	convSelection    int
+	convSelectable   []conversationEvent
+	convSelectTop    int
+	convSelectBottom int
+	traceExpanded    map[string]bool
 	// convFailure is the length of the persisted dispatch warning currently
 	// rendered, so a new warning follows the same bottom behavior as a turn.
 	convFailure int
@@ -351,6 +365,13 @@ const (
 	modeProposal
 )
 
+type paneFocus uint8
+
+const (
+	focusItemList paneFocus = iota
+	focusReadingPane
+)
+
 // allStatuses is the selector's running order, coarsest lifecycle first.
 var allStatuses = []models.Status{
 	models.StatusBacklog,
@@ -378,6 +399,14 @@ func dispatchable(s models.Status) bool {
 		return true
 	}
 	return false
+}
+
+// isSpaceKey accepts Bubble Tea's dedicated KeySpace event as well as the
+// string forms emitted by older input paths. This is intentionally checked by
+// type before the general navigation switch: terminal multiplexers can pass a
+// literal space through differently even though it remains the same command.
+func isSpaceKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeySpace || msg.String() == "space" || msg.String() == " "
 }
 
 func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) model {
@@ -420,9 +449,11 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) mod
 			channelView(models.ChannelInbox),
 			archiveView,
 		},
-		input:     ta,
-		title:     ti,
-		collapsed: make(map[string]bool),
+		input:         ta,
+		title:         ti,
+		collapsed:     make(map[string]bool),
+		convSelection: -1,
+		traceExpanded: make(map[string]bool),
 	}
 }
 
@@ -488,6 +519,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prevTurns := m.convTurns
 		prevActivities := m.convActivities
 		prevLive := m.convLive
+		prevPartials := m.convPartials
 		prevFailure := m.convFailure
 		// Sample before SetContent: appending lines can change the answer.
 		wasAtBottom := m.conv.AtBottom()
@@ -507,6 +539,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		wasComposerVisible := m.composerVisible()
 		m.restoreSelection(prevID)
+		if prevID != m.selectedID() {
+			m.convSelection = -1
+		}
 		if m.mode == modeNav && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {
 			m.mode = modeProposal
 		}
@@ -552,6 +587,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// handles the live block disappearing after its reply is written.
 			if wasAtBottom {
 				m.conv.GotoBottom()
+			}
+		} else if sameItem && m.convPartials != prevPartials {
+			if wasAtBottom {
+				m.conv.GotoBottom()
+			} else {
+				m.newBelow = true
 			}
 		} else if sameItem && m.convFailure != prevFailure {
 			if wasAtBottom {
@@ -690,7 +731,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "esc" || msg.String() == "ctrl+c" {
+	if msg.String() == "ctrl+c" {
 		if _, busy := m.busyDispatch(); busy {
 			// Interrupt is deliberately fire-and-observe: the provider finishes
 			// unwinding asynchronously, and the watcher will refresh the item
@@ -698,9 +739,44 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = m.sup.Interrupt()
 			return m, nil
 		}
-		if msg.String() == "esc" {
+	}
+	switch {
+	case msg.Type == tea.KeyLeft || msg.Type == tea.KeyShiftLeft || msg.String() == "h":
+		m.focus = focusItemList
+		m.convSelection = -1
+		m.updateConv()
+		return m, nil
+	case msg.Type == tea.KeyRight || msg.Type == tea.KeyShiftRight || msg.String() == "l":
+		m.focus = focusReadingPane
+		m.updateConv()
+		m.convSelection = len(m.convSelectable) - 1
+		m.updateConv()
+		m.revealConversationSelection()
+		return m, nil
+	}
+	if m.projectPane == 0 && m.focus == focusReadingPane {
+		switch {
+		case msg.Type == tea.KeyUp || msg.Type == tea.KeyShiftUp || msg.String() == "k":
+			m.moveConversationSelection(-1)
+			return m, nil
+		case msg.Type == tea.KeyDown || msg.Type == tea.KeyShiftDown || msg.String() == "j":
+			m.moveConversationSelection(1)
 			return m, nil
 		}
+	}
+	if m.projectPane == 0 && isSpaceKey(msg) {
+		if m.selected < len(m.items) {
+			if m.focus == focusReadingPane {
+				m.toggleSelectedTrace()
+				return m, nil
+			}
+			root := rootID(m.items[m.selected])
+			m.collapsed[root] = !m.collapsed[root]
+			m.reload()
+			m.restoreSelection(root)
+			m.updateConv()
+		}
+		return m, nil
 	}
 	if m.projectPane != 0 {
 		switch msg.String() {
@@ -708,13 +784,13 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.switchView(channelView(models.ChannelInbox))
 		case "2":
 			return m.switchView(archiveView)
-		case "j", "down":
+		case "j", "down", "shift+down":
 			if m.selected < len(m.projectEntries)-1 {
 				m.selected++
 				m.showSelectedProjectEntry()
 			}
 			return m, nil
-		case "k", "up":
+		case "k", "up", "shift+up":
 			if m.selected > 0 {
 				m.selected--
 				m.showSelectedProjectEntry()
@@ -765,12 +841,12 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, tea.Quit
-	case "j", "down":
+	case "j", "down", "shift+down":
 		if m.selected < len(m.items)-1 {
 			m.selected++
 			m.showSelected()
 		}
-	case "k", "up":
+	case "k", "up", "shift+up":
 		if m.selected > 0 {
 			m.selected--
 			m.showSelected()
@@ -784,6 +860,7 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "2":
 		return m.switchView(archiveView)
 	case "3":
+		m.focus = focusItemList
 		m.projectPane = 1
 		m.showProjectContext()
 	case "b":
@@ -791,15 +868,6 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// item parked there — it must stay reachable, not just tidy.
 		m.showBacklog = !m.showBacklog
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
-	case "space", " ":
-		if m.selected < len(m.items) {
-			root := rootID(m.items[m.selected])
-			m.collapsed[root] = !m.collapsed[root]
-			m.reload()
-			m.restoreSelection(root)
-			m.updateConv()
-		}
-		return m, nil
 	case "r":
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "t":
@@ -1455,6 +1523,8 @@ func (m model) switchView(v listView) (model, tea.Cmd) {
 	m.projectPane = 0
 	m.projectEntries = nil
 	m.view = v
+	m.focus = focusItemList
+	m.convSelection = -1
 	m.selected = 0
 	m.items = nil
 	m.showSelected()
@@ -1464,6 +1534,7 @@ func (m model) switchView(v listView) (model, tea.Cmd) {
 func (m *model) showProjectContext() {
 	m.items = nil
 	m.selected = 0
+	m.convSelection = -1
 	m.listOffset = 0
 	m.projectEntries = nil
 	m.err = nil
@@ -1822,7 +1893,6 @@ func (m model) renderHeader() string {
 		tabs = append(tabs, headerTabStyle.Render(project))
 	}
 	row := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
-	// Pad to full width with header background.
 	pad := m.width - lipgloss.Width(row)
 	if pad > 0 {
 		row += lipgloss.NewStyle().Background(headerBg).Render(strings.Repeat(" ", pad))
@@ -1861,17 +1931,17 @@ func (m model) renderFooter() string {
 		text = "k keep for later  s start  x reject  esc cancel"
 	default:
 		if m.projectPane != 0 {
-			text = "j/k versions  tab switch document  e edit  esc/ctrl+c interrupt  1-3 view  q quit"
+			text = "←/→/h/l pane  j/k versions  tab switch document  e edit  esc/ctrl+c interrupt  1-3 view  q quit"
 			break
 		}
-		text = "q quit  esc/ctrl+c interrupt  j/k nav  a add  c subthread  s status  S session  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
+		text = "←/→/h/l focus  ↑/↓/j/k select  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S session  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-			text = "q quit  esc/ctrl+c interrupt  j/k nav  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
 		}
 		if m.showBacklog {
-			text = "q quit  esc/ctrl+c interrupt  j/k nav  a add  c subthread  s status  S session  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S session  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-				text = "q quit  esc/ctrl+c interrupt  j/k nav  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
+				text = "←/→/h/l focus  ↑/↓/j/k select  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
 			}
 		}
 	}
@@ -1884,7 +1954,10 @@ func (m model) renderFooter() string {
 
 	// The hint text grows with the keymap; drop it rather than overflow the row.
 	if len(text)+len(right) > m.width {
-		text = ""
+		text = "←/→/h/l focus"
+		if len(text)+len(right) > m.width {
+			text = ""
+		}
 	}
 	if pad := m.width - len(text) - len(right); pad > 0 {
 		text += strings.Repeat(" ", pad)
@@ -2460,6 +2533,7 @@ func wrapLine(line string, width int) []string {
 // content. Opening an item at the top means scrolling past the entire history
 // to reach the part that changed, which is almost never what the reader wants.
 func (m *model) showSelected() {
+	m.convSelection = -1
 	if m.mode == modeNav && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {
 		m.mode = modeProposal
 	}
@@ -2513,6 +2587,77 @@ func (m *model) syncNewBelow() {
 	}
 }
 
+// toggleSelectedTrace expands or collapses the retained partial response for
+// the selected conversation entry. It is available only while the reading
+// pane has focus; space in the item list continues to fold item families.
+func (m *model) toggleSelectedTrace() {
+	if m.focus != focusReadingPane || m.convSelection < 0 || m.convSelection >= len(m.convSelectable) {
+		return
+	}
+	itemID := m.selectedID()
+	if itemID == "" {
+		return
+	}
+	wasAtBottom := m.conv.AtBottom()
+	if m.traceExpanded == nil {
+		m.traceExpanded = make(map[string]bool)
+	}
+	key := traceSelectionKey(itemID, m.convSelectable[m.convSelection])
+	m.traceExpanded[key] = !m.traceExpanded[key]
+	m.updateConv()
+	if wasAtBottom || m.conv.PastBottom() {
+		m.conv.GotoBottom()
+	}
+}
+
+// moveConversationSelection changes the reading-pane cursor without touching
+// the item-list cursor. The latest entry is selected when focus enters the
+// pane, so Up moves naturally toward older turns and Down toward newer ones.
+func (m *model) moveConversationSelection(delta int) {
+	if len(m.convSelectable) == 0 {
+		return
+	}
+	next := m.convSelection
+	if next < 0 {
+		if delta < 0 {
+			next = len(m.convSelectable) - 1
+		} else {
+			next = 0
+		}
+	} else {
+		next += delta
+	}
+	if next < 0 {
+		next = 0
+	}
+	if next >= len(m.convSelectable) {
+		next = len(m.convSelectable) - 1
+	}
+	if next == m.convSelection {
+		return
+	}
+	m.convSelection = next
+	m.updateConv()
+	m.revealConversationSelection()
+}
+
+// revealConversationSelection keeps the highlighted turn on screen when the
+// reading cursor moves. The bounds are recorded while updateConv renders the
+// selected block, so this works even when the conversation contains wrapped
+// markdown and retained traces.
+func (m *model) revealConversationSelection() {
+	if m.convSelectBottom <= m.convSelectTop || m.conv.Height <= 0 {
+		return
+	}
+	if m.convSelectTop < m.conv.YOffset {
+		m.conv.SetYOffset(m.convSelectTop)
+		return
+	}
+	if m.convSelectBottom > m.conv.YOffset+m.conv.Height {
+		m.conv.SetYOffset(m.convSelectBottom - m.conv.Height)
+	}
+}
+
 // pageConversation keeps half of the current pane visible across page-key
 // presses, so a reader retains context instead of jumping by a whole screen.
 // A one-line pane is the only case where half its height would not move at all.
@@ -2546,6 +2691,11 @@ func (m *model) updateConv() {
 		m.convTurns = 0
 		m.convActivities = 0
 		m.convLive = 0
+		m.convPartials = 0
+		m.convSelection = -1
+		m.convSelectable = nil
+		m.convSelectTop = 0
+		m.convSelectBottom = 0
 		m.convFailure = 0
 		m.convItemID = ""
 		return
@@ -2554,12 +2704,30 @@ func (m *model) updateConv() {
 	m.convItemID = item.ID
 	m.convTurns = len(item.Turns)
 	var activities []models.Activity
-	if item.Parent == "" && m.store != nil {
+	if m.store != nil {
 		if loaded, err := m.store.ListActivities(item.ID); err == nil {
 			activities = loaded
 		}
 	}
 	m.convActivities = len(activities)
+	var partials []models.PartialTrace
+	if m.store != nil {
+		if loaded, err := m.store.ListPartialTraces(item.ID); err == nil {
+			partials = loaded
+		}
+	}
+	m.convPartials = len(partials)
+	events := conversationEventsWithPartials(item, activities, partials)
+	m.convSelectable = selectableConversationEvents(events)
+	if len(m.convSelectable) == 0 {
+		m.convSelection = -1
+	} else if m.convSelection >= len(m.convSelectable) {
+		m.convSelection = len(m.convSelectable) - 1
+	} else if m.focus == focusReadingPane && m.convSelection < 0 {
+		m.convSelection = len(m.convSelectable) - 1
+	}
+	m.convSelectTop = 0
+	m.convSelectBottom = 0
 	w := m.conv.Width
 
 	// Rules are drawn to the pane, not to fixed 60/40 — a fixed rule in a
@@ -2590,13 +2758,44 @@ func (m *model) updateConv() {
 			}
 		}
 	}
-	for _, event := range conversationEvents(item, activities) {
+	selectedKey := ""
+	if m.focus == focusReadingPane && m.convSelection >= 0 && m.convSelection < len(m.convSelectable) {
+		selectedKey = conversationSelectionKey(m.convSelectable[m.convSelection])
+	}
+	for _, event := range events {
 		switch event.kind {
 		case conversationTurn:
 			ts := event.turn.Timestamp.Format("2006-01-02 15:04")
-			sb.WriteString(fmt.Sprintf("\n\n%s\n%s  ·  %s\n\n%s",
-				turnRule, event.turn.Actor, ts, renderMarkdown(event.turn.Content, w)))
+			turnHeader := fmt.Sprintf("%s  ·  %s", event.turn.Actor, ts)
+			if status := partialStatusForTurn(partials, event.turn.Timestamp); status != "" {
+				turnHeader += "  ·  " + status
+			}
+			parts := []conversationPart{{content: turnHeader}}
+			for _, partial := range partials {
+				if !partial.TurnTimestamp.IsZero() && partial.TurnTimestamp.Equal(event.turn.Timestamp) {
+					if m.traceExpanded[traceSelectionKey(item.ID, event)] {
+						parts = append(parts, conversationPart{
+							content: renderMarkdown(partial.Content, w),
+							muted:   true,
+						})
+					}
+				}
+			}
+			parts = append(parts, conversationPart{content: renderMarkdown(event.turn.Content, w)})
+			selected := conversationSelectionKey(event) == selectedKey
+			turnContent := renderConversationParts(parts, selected, w)
+			turn := turnRule + "\n" + turnContent
+			if selected {
+				m.convSelectTop = strings.Count(sb.String(), "\n") + 3
+				m.convSelectBottom = m.convSelectTop + strings.Count(turnContent, "\n") + 1
+			}
+			sb.WriteString("\n\n" + turn)
 		case conversationActivity:
+			if event.activity.Type == store.ActivityAgentInterrupted {
+				sb.WriteString(fmt.Sprintf("\n\n%s\n%s", turnRule,
+					warningHeaderStyle.Render("Interrupted")))
+				break
+			}
 			status := "pending"
 			if event.activity.Handled {
 				status = "handled"
@@ -2607,12 +2806,28 @@ func (m *model) updateConv() {
 			}
 			sb.WriteString(fmt.Sprintf("\n\n%s\nactivity  ·  %s  ·  %s [%s]",
 				turnRule, event.activity.Type, title, status))
+		case conversationPartial:
+			parts := []conversationPart{{content: renderStandalonePartialHeader(event.partial)}}
+			if m.traceExpanded[traceSelectionKey(item.ID, event)] {
+				parts = append(parts, conversationPart{
+					content: renderMarkdown(event.partial.Content, w),
+					muted:   true,
+				})
+			}
+			selected := conversationSelectionKey(event) == selectedKey
+			partialContent := renderConversationParts(parts, selected, w)
+			partial := turnRule + "\n" + partialContent
+			if selected {
+				m.convSelectTop = strings.Count(sb.String(), "\n") + 3
+				m.convSelectBottom = m.convSelectTop + strings.Count(partialContent, "\n") + 1
+			}
+			sb.WriteString("\n\n" + partial)
 		}
 	}
 
 	// Live progress from an in-flight dispatch, appended below the last real
-	// turn. It is transient by construction: the supervisor deletes the log
-	// when the run ends, and the turn the agent posts takes its place.
+	// turn. The completed buffer is retained separately; this block is only the
+	// still-growing run.
 	live := liveTrace(m.store, item)
 	if live != "" {
 		// Body deliberately unstyled — the default foreground is the one
@@ -2658,6 +2873,7 @@ type conversationEventKind uint8
 const (
 	conversationTurn conversationEventKind = iota
 	conversationActivity
+	conversationPartial
 )
 
 type conversationEvent struct {
@@ -2665,6 +2881,7 @@ type conversationEvent struct {
 	time     time.Time
 	turn     models.Turn
 	activity models.Activity
+	partial  models.PartialTrace
 }
 
 // conversationEvents merges turns and lifecycle activities into one stable
@@ -2673,7 +2890,11 @@ type conversationEvent struct {
 // that reply, including when the child was created during an in-flight agent
 // turn whose live trace is still being shown.
 func conversationEvents(item models.Item, activities []models.Activity) []conversationEvent {
-	events := make([]conversationEvent, 0, len(item.Turns)+len(activities))
+	return conversationEventsWithPartials(item, activities, nil)
+}
+
+func conversationEventsWithPartials(item models.Item, activities []models.Activity, partials []models.PartialTrace) []conversationEvent {
+	events := make([]conversationEvent, 0, len(item.Turns)+len(activities)+len(partials))
 	for _, turn := range item.Turns {
 		events = append(events, conversationEvent{
 			kind: conversationTurn,
@@ -2688,10 +2909,116 @@ func conversationEvents(item models.Item, activities []models.Activity) []conver
 			activity: activity,
 		})
 	}
+	for _, partial := range partials {
+		if !partial.TurnTimestamp.IsZero() {
+			continue
+		}
+		events = append(events, conversationEvent{
+			kind:    conversationPartial,
+			time:    partial.Timestamp,
+			partial: partial,
+		})
+	}
 	sort.SliceStable(events, func(i, j int) bool {
 		return events[i].time.Before(events[j].time)
 	})
 	return events
+}
+
+func selectableConversationEvents(events []conversationEvent) []conversationEvent {
+	selectable := make([]conversationEvent, 0, len(events))
+	for _, event := range events {
+		if event.kind == conversationTurn || event.kind == conversationPartial {
+			selectable = append(selectable, event)
+		}
+	}
+	return selectable
+}
+
+func conversationSelectionKey(event conversationEvent) string {
+	switch event.kind {
+	case conversationTurn:
+		return "turn:" + event.turn.Timestamp.UTC().Format(time.RFC3339Nano)
+	case conversationPartial:
+		if event.partial.ID != "" {
+			return "partial:" + event.partial.ID
+		}
+		return "partial:" + event.partial.Timestamp.UTC().Format(time.RFC3339Nano)
+	default:
+		return ""
+	}
+}
+
+func traceSelectionKey(itemID string, event conversationEvent) string {
+	return itemID + "\x00" + conversationSelectionKey(event)
+}
+
+func partialStatus(partial models.PartialTrace) string {
+	status := partial.Status
+	if status == "" {
+		status = "retained"
+	}
+	return status
+}
+
+func partialStatusForTurn(partials []models.PartialTrace, timestamp time.Time) string {
+	statuses := make([]string, 0, 1)
+	seen := make(map[string]bool)
+	for _, partial := range partials {
+		if partial.TurnTimestamp.IsZero() || !partial.TurnTimestamp.Equal(timestamp) {
+			continue
+		}
+		status := partialStatus(partial)
+		if !seen[status] {
+			statuses = append(statuses, status)
+			seen[status] = true
+		}
+	}
+	return strings.Join(statuses, ", ")
+}
+
+type conversationPart struct {
+	content string
+	muted   bool
+}
+
+func renderStandalonePartialHeader(partial models.PartialTrace) string {
+	header := "agent"
+	if !partial.Timestamp.IsZero() {
+		header += "  ·  " + partial.Timestamp.Format("2006-01-02 15:04")
+	}
+	header += "  ·  " + partialStatus(partial)
+	return header
+}
+
+func renderConversationParts(parts []conversationPart, selected bool, width int) string {
+	if !selected {
+		rendered := make([]string, len(parts))
+		for i, part := range parts {
+			rendered[i] = part.content
+			if part.muted {
+				rendered[i] = dimStyle.Render(ansi.Strip(part.content))
+			}
+		}
+		return strings.Join(rendered, "\n\n")
+	}
+
+	style := lipgloss.NewStyle().Width(max(1, width)).Background(selectedBg).Bold(true)
+	mutedStyle := style.Foreground(dimFg)
+	lines := make([]string, 0)
+	for i, part := range parts {
+		if i > 0 {
+			lines = append(lines, style.Render(""))
+		}
+		lineStyle := style
+		if part.muted {
+			lineStyle = mutedStyle
+		}
+		for _, line := range strings.Split(ansi.Strip(part.content), "\n") {
+			lines = append(lines, lineStyle.Render(line))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *model) updateProjectConv() {
@@ -2700,6 +3027,11 @@ func (m *model) updateProjectConv() {
 		m.convTurns = 0
 		m.convActivities = 0
 		m.convLive = 0
+		m.convPartials = 0
+		m.convSelection = -1
+		m.convSelectable = nil
+		m.convSelectTop = 0
+		m.convSelectBottom = 0
 		m.convFailure = 0
 		m.convItemID = ""
 		return
@@ -2719,6 +3051,11 @@ func (m *model) updateProjectConv() {
 	m.convTurns = 0
 	m.convActivities = 0
 	m.convLive = 0
+	m.convPartials = 0
+	m.convSelection = -1
+	m.convSelectable = nil
+	m.convSelectTop = 0
+	m.convSelectBottom = 0
 	m.convFailure = 0
 	m.convItemID = "project-" + strings.ToLower(strings.ReplaceAll(entry.title, " ", "-"))
 }

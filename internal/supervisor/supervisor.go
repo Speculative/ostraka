@@ -185,6 +185,7 @@ const queueCapacity = 64
 type enqueueMsg struct {
 	itemID   string
 	activity bool
+	pending  bool
 }
 
 // Supervisor drives a background coding-agent harness, resuming it whenever
@@ -216,6 +217,9 @@ type Supervisor struct {
 	queueMu        sync.Mutex
 	activityQueued map[string]bool
 	activityBusy   map[string]bool
+	pendingQueued  map[string]bool
+	turnMu         sync.Mutex
+	turnCounts     map[string]int
 }
 
 // busyGuard tracks the item being dispatched right now, so the UI can ask
@@ -440,6 +444,7 @@ func New(root string) *Supervisor {
 		s.logger.Printf("no store, status will not be marked during dispatch: %v", err)
 	}
 	s.recoverStaleDispatches()
+	s.seedTurnCounts()
 	return s
 }
 
@@ -454,8 +459,29 @@ func New(root string) *Supervisor {
 // assumes one supervisor per root, which is also what the serial queue and the
 // single session file already assume.
 func (s *Supervisor) recoverStaleDispatches() {
-	for _, itemID := range sweepLive(s.root) {
-		s.logger.Printf("item %s: discarded live log from an unfinished dispatch", itemID)
+	for _, log := range sweepLiveLogs(s.root) {
+		if strings.TrimSpace(log.content) != "" && s.store != nil {
+			if err := s.store.AppendPartialTrace(log.id, models.PartialTrace{
+				Timestamp: time.Now().UTC(),
+				Status:    "interrupted",
+				Content:   log.content,
+			}); err != nil {
+				s.logger.Printf("item %s: cannot retain stale partial trace: %v", log.id, err)
+			}
+		}
+		if s.store != nil {
+			if _, err := s.store.GetItem(log.id); err == nil {
+				if err := s.store.AddActivity(log.id, models.Activity{
+					Type:      store.ActivityAgentInterrupted,
+					Actor:     models.ActorAgent,
+					Result:    "interrupted",
+					Timestamp: time.Now().UTC(),
+				}); err != nil {
+					s.logger.Printf("item %s: cannot record recovered interruption: %v", log.id, err)
+				}
+			}
+		}
+		s.logger.Printf("item %s: retained partial trace from an unfinished dispatch", log.id)
 	}
 	if s.store == nil {
 		return
@@ -491,10 +517,38 @@ func (s *Supervisor) Start() {
 // request is dropped and logged rather than blocking the caller (the TUI
 // event loop).
 func (s *Supervisor) Enqueue(itemID string) {
+	if s.store != nil {
+		s.enqueuePending(itemID)
+		return
+	}
 	select {
 	case s.queue <- enqueueMsg{itemID: itemID}:
 	default:
 		s.logger.Printf("queue full, dropping dispatch for item %s", itemID)
+	}
+}
+
+// enqueuePending coalesces requests for one item. The latest item contents are
+// read when the queued dispatch starts, so multiple writes while a run is
+// active need only one follow-up turn.
+func (s *Supervisor) enqueuePending(itemID string) {
+	s.queueMu.Lock()
+	if s.pendingQueued == nil {
+		s.pendingQueued = make(map[string]bool)
+	}
+	if s.pendingQueued[itemID] {
+		s.queueMu.Unlock()
+		return
+	}
+	s.pendingQueued[itemID] = true
+	s.queueMu.Unlock()
+	select {
+	case s.queue <- enqueueMsg{itemID: itemID, pending: true}:
+	default:
+		s.queueMu.Lock()
+		delete(s.pendingQueued, itemID)
+		s.queueMu.Unlock()
+		s.logger.Printf("queue full, dropping pending dispatch for item %s", itemID)
 	}
 }
 
@@ -519,9 +573,10 @@ func (s *Supervisor) enqueueActivity(itemID string) {
 	}
 }
 
-// EnqueuePendingActivityRoots wakes roots affected by child closure events.
-// It is safe to call after every filesystem notification; queue de-duplication
-// keeps a burst of child writes to one family from launching duplicate runs.
+// EnqueuePendingActivityRoots wakes roots affected by child closure events and
+// dispatches newly appended user turns. It is safe to call after every
+// filesystem notification; queue de-duplication keeps a burst of writes from
+// launching duplicate runs.
 func (s *Supervisor) EnqueuePendingActivityRoots() {
 	if s.store == nil {
 		return
@@ -567,6 +622,76 @@ func (s *Supervisor) EnqueuePendingActivityRoots() {
 		}
 		s.enqueueActivity(root.ID)
 	}
+	s.enqueueNewUserTurns(items)
+}
+
+// seedTurnCounts establishes the baseline used to distinguish a newly
+// appended user turn from a supervisor-generated status or agent-turn write.
+// Existing pending work is still handled by the normal explicit enqueue
+// paths; this scan is for turns written while the TUI is already running.
+func (s *Supervisor) seedTurnCounts() {
+	if s.store == nil {
+		return
+	}
+	items, err := s.store.ListItems(store.ListOpts{})
+	if err != nil {
+		s.logger.Printf("cannot seed turn counts: %v", err)
+		return
+	}
+	s.turnMu.Lock()
+	if s.turnCounts == nil {
+		s.turnCounts = make(map[string]int)
+	}
+	for _, item := range items {
+		s.turnCounts[item.ID] = len(item.Turns)
+	}
+	s.turnMu.Unlock()
+}
+
+// enqueueNewUserTurns detects turns written by another client, including a
+// CLI invocation while a provider dispatch is in flight. The TUI's local
+// composer enqueues directly, but external writes only arrive here through
+// fsnotify. A turn count baseline avoids treating the supervisor's own agent
+// reply and status transitions as new work.
+func (s *Supervisor) enqueueNewUserTurns(items []models.Item) {
+	for _, item := range items {
+		current := len(item.Turns)
+		s.turnMu.Lock()
+		if s.turnCounts == nil {
+			s.turnCounts = make(map[string]int)
+		}
+		previous, seen := s.turnCounts[item.ID]
+		s.turnCounts[item.ID] = current
+		s.turnMu.Unlock()
+		if !seen || current <= previous || previous < 0 || previous > current {
+			continue
+		}
+		userTurn := false
+		for _, turn := range item.Turns[previous:] {
+			if turn.Actor == models.ActorUser {
+				userTurn = true
+				break
+			}
+		}
+		if !userTurn || item.Status == models.StatusBacklog || item.Status == models.StatusProposed || models.TerminalStatuses[item.Status] {
+			continue
+		}
+		s.queueMu.Lock()
+		busy := s.activityBusy[item.ID]
+		s.queueMu.Unlock()
+		if busy {
+			// The active dispatch checks for a user turn appended after its
+			// start and queues the serialized follow-up when it unwinds.
+			continue
+		}
+		if item.Status != models.StatusPendingAgent {
+			if _, err := s.store.SetStatusBy(item.ID, models.StatusPendingAgent, models.ActorAgent); err != nil {
+				s.logger.Printf("cannot queue item %s after user turn: %v", item.ID, err)
+				continue
+			}
+		}
+		s.enqueuePending(item.ID)
+	}
 }
 
 func (s *Supervisor) run() {
@@ -591,6 +716,11 @@ func (s *Supervisor) run() {
 			if msg.activity {
 				s.queueMu.Lock()
 				delete(s.activityQueued, msg.itemID)
+				s.queueMu.Unlock()
+			}
+			if msg.pending {
+				s.queueMu.Lock()
+				delete(s.pendingQueued, msg.itemID)
 				s.queueMu.Unlock()
 			}
 			s.dispatch(msg)
@@ -638,6 +768,7 @@ func (s *Supervisor) revertAcknowledged(itemID string, to models.Status) {
 }
 
 func (s *Supervisor) dispatch(msg enqueueMsg) {
+	var beforeTurns int
 	s.queueMu.Lock()
 	if s.activityBusy == nil {
 		s.activityBusy = make(map[string]bool)
@@ -645,6 +776,7 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	s.activityBusy[msg.itemID] = true
 	s.queueMu.Unlock()
 	defer func() {
+		s.queueUserFollowup(msg.itemID, beforeTurns)
 		s.queueMu.Lock()
 		delete(s.activityBusy, msg.itemID)
 		s.queueMu.Unlock()
@@ -654,7 +786,6 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		s.logger.Printf("item %s: no store available", msg.itemID)
 	}
 	var activities []models.Activity
-	var beforeTurns int
 	if s.store != nil {
 		activities, _ = s.store.PendingActivities(msg.itemID)
 		if item, err := s.store.GetItem(msg.itemID); err == nil {
@@ -682,12 +813,21 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	// a clear that failed, or by another process writing under the same root.
 	live := newLiveLog(s.root, msg.itemID)
 	live.clear()
-	defer live.clear()
+	startedAt := time.Now().UTC()
+	runStarted := false
+	partialStatus := "interrupted"
+	defer func() {
+		if runStarted {
+			s.retainPartialTrace(msg.itemID, beforeTurns, startedAt, partialStatus, ReadLive(s.root, msg.itemID))
+		}
+		live.clear()
+	}()
 
 	if !s.markAcknowledged(msg.itemID) {
 		s.logger.Printf("item %s: skipping stale dispatch; item is no longer pending-agent", msg.itemID)
 		return
 	}
+	runStarted = true
 	if err := clearDispatchError(s.root, msg.itemID); err != nil {
 		s.logger.Printf("item %s: cannot clear previous dispatch error: %v", msg.itemID, err)
 	}
@@ -729,7 +869,13 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	if err == nil && result.IsError {
 		err = fmt.Errorf("%s: turn failed: %s", sf.Provider, turnErrorText(result))
 	}
-	interrupted := s.interruptRequested(active)
+	interrupted := s.interruptRequested(active) || turnCtx.Err() != nil
+	if interrupted && err == nil {
+		// A provider may acknowledge an interrupt with a normal-looking
+		// completion envelope. The user's stop request still means this run did
+		// not produce a reply that should hand the item back to them.
+		err = context.Canceled
+	}
 	if result.Model != "" || result.Context.UsedTokens > 0 || result.Context.WindowTokens > 0 {
 		model := result.Model
 		// Codex's usage notification does not include the resolved model. The
@@ -742,6 +888,11 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		s.setTurnInfo(msg.itemID, TurnInfo{Model: model, Context: result.Context})
 	}
 	if err != nil {
+		if interrupted {
+			partialStatus = "interrupted"
+		} else {
+			partialStatus = "failed"
+		}
 		if interrupted {
 			s.logger.Printf("item %s: turn interrupted; retaining session recovery", msg.itemID)
 			if clearErr := clearDispatchError(s.root, msg.itemID); clearErr != nil {
@@ -763,6 +914,7 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		s.persistSession(msg.itemID, sf, result.SessionID)
 		return
 	}
+	partialStatus = "completed"
 	if clearErr := clearDispatchError(s.root, msg.itemID); clearErr != nil {
 		s.logger.Printf("item %s: cannot clear dispatch error after success: %v", msg.itemID, clearErr)
 	}
@@ -792,6 +944,83 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	s.logger.Printf("item %s: dispatch complete (session=%s is_error=%v duration_ms=%d cost_usd=%.4f num_turns=%d model=%s context_used=%d context_window=%d)",
 		msg.itemID, result.SessionID, result.IsError, result.DurationMs, result.TotalCostUSD, result.NumTurns,
 		result.Model, result.Context.UsedTokens, result.Context.WindowTokens)
+}
+
+// queueUserFollowup handles the race where a user writes a turn after this
+// dispatch starts but before it finishes. The provider's reply may otherwise
+// move the item back to pending-user and make the queued request stale; mark
+// it pending-agent again so the serialized follow-up is admitted.
+func (s *Supervisor) queueUserFollowup(itemID string, beforeTurns int) {
+	if s.store == nil {
+		return
+	}
+	item, err := s.store.GetItem(itemID)
+	if err != nil || beforeTurns >= len(item.Turns) {
+		return
+	}
+	userTurn := false
+	for _, turn := range item.Turns[beforeTurns:] {
+		if turn.Actor == models.ActorUser {
+			userTurn = true
+			break
+		}
+	}
+	if !userTurn || item.Status == models.StatusBacklog || item.Status == models.StatusProposed || models.TerminalStatuses[item.Status] {
+		return
+	}
+	s.turnMu.Lock()
+	if s.turnCounts == nil {
+		s.turnCounts = make(map[string]int)
+	}
+	s.turnCounts[itemID] = len(item.Turns)
+	s.turnMu.Unlock()
+	if item.Status != models.StatusPendingAgent {
+		if _, err := s.store.SetStatusBy(itemID, models.StatusPendingAgent, models.ActorAgent); err != nil {
+			s.logger.Printf("cannot queue follow-up for item %s: %v", itemID, err)
+			return
+		}
+	}
+	s.enqueuePending(itemID)
+}
+
+// retainPartialTrace moves the completed live buffer into durable item state.
+// A trace is attached to the latest newly-posted agent turn when one exists;
+// interrupted and failed runs without a reply remain standalone timeline
+// entries. The activity event is separate so an interruption stays visible
+// even when its provider emitted no output.
+func (s *Supervisor) retainPartialTrace(itemID string, beforeTurns int, startedAt time.Time, status, content string) {
+	if s.store == nil {
+		return
+	}
+	content = strings.TrimSpace(content)
+	var turnTimestamp time.Time
+	if item, err := s.store.GetItem(itemID); err == nil {
+		for i := beforeTurns; i < len(item.Turns); i++ {
+			if item.Turns[i].Actor == models.ActorAgent {
+				turnTimestamp = item.Turns[i].Timestamp
+			}
+		}
+	}
+	if content != "" {
+		if err := s.store.AppendPartialTrace(itemID, models.PartialTrace{
+			Timestamp:     startedAt,
+			TurnTimestamp: turnTimestamp,
+			Status:        status,
+			Content:       content,
+		}); err != nil {
+			s.logger.Printf("item %s: cannot retain partial trace: %v", itemID, err)
+		}
+	}
+	if status == "interrupted" {
+		if err := s.store.AddActivity(itemID, models.Activity{
+			Type:      store.ActivityAgentInterrupted,
+			Actor:     models.ActorAgent,
+			Result:    status,
+			Timestamp: time.Now().UTC(),
+		}); err != nil {
+			s.logger.Printf("item %s: cannot record interruption activity: %v", itemID, err)
+		}
+	}
 }
 
 // persistSession advances the resume cursor, but only if the session it was

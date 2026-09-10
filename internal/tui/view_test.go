@@ -64,24 +64,31 @@ func TestConversationShowsPersistedDispatchFailure(t *testing.T) {
 	}
 }
 
-func TestInterruptKeysStopTheActiveDispatch(t *testing.T) {
-	for _, key := range []tea.KeyMsg{
-		{Type: tea.KeyEsc},
-		{Type: tea.KeyCtrlC},
-	} {
-		t.Run(key.String(), func(t *testing.T) {
-			sup := &fakeSupervisor{busyID: "item-1"}
-			m := newModel(nil, nil, sup)
-			m.items = []models.Item{{ID: "item-1", Status: models.StatusAgentAcknowledged}}
-			m.selected = 0
+func TestCtrlCStopsTheActiveDispatch(t *testing.T) {
+	sup := &fakeSupervisor{busyID: "item-1"}
+	m := newModel(nil, nil, sup)
+	m.items = []models.Item{{ID: "item-1", Status: models.StatusAgentAcknowledged}}
+	m.selected = 0
 
-			if _, cmd := m.handleNavKey(key); cmd != nil {
-				t.Fatal("interrupt key unexpectedly returned a command")
-			}
-			if sup.interrupts != 1 {
-				t.Fatalf("interrupt calls = %d, want 1", sup.interrupts)
-			}
-		})
+	if _, cmd := m.handleNavKey(tea.KeyMsg{Type: tea.KeyCtrlC}); cmd != nil {
+		t.Fatal("interrupt key unexpectedly returned a command")
+	}
+	if sup.interrupts != 1 {
+		t.Fatalf("interrupt calls = %d, want 1", sup.interrupts)
+	}
+}
+
+func TestEscDoesNotStopTheActiveDispatch(t *testing.T) {
+	sup := &fakeSupervisor{busyID: "item-1"}
+	m := newModel(nil, nil, sup)
+	m.items = []models.Item{{ID: "item-1", Status: models.StatusAgentAcknowledged}}
+	m.selected = 0
+
+	if _, cmd := m.handleNavKey(tea.KeyMsg{Type: tea.KeyEsc}); cmd != nil {
+		t.Fatal("Esc unexpectedly returned a command")
+	}
+	if sup.interrupts != 0 {
+		t.Fatalf("Esc interrupt calls = %d, want 0", sup.interrupts)
 	}
 }
 

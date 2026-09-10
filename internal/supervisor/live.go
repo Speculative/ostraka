@@ -8,9 +8,9 @@ import (
 )
 
 // Live progress is written next to the supervisor's other state rather than
-// into the item file. Two reasons: it is explicitly ephemeral — the real turn
-// replaces it — and putting it in the item would make every line of in-flight
-// output a permanent part of the thread's history.
+// into the item file. It is a staging buffer while a turn is in flight; the
+// supervisor snapshots it into the item's durable partial-trace journal when
+// the run ends.
 //
 // It also sits directly in supervisor/ rather than a nested directory because
 // the TUI's watcher only watches the root and its immediate subdirectories, so
@@ -35,17 +35,38 @@ func ReadLive(root, itemID string) string {
 // outlived its run is indistinguishable on disk from one still being written.
 // It returns the ids whose logs were removed so the caller can report them.
 func sweepLive(root string) []string {
+	logs := sweepLiveLogs(root)
+	ids := make([]string, 0, len(logs))
+	for _, log := range logs {
+		ids = append(ids, log.id)
+	}
+	return ids
+}
+
+type sweptLiveLog struct {
+	id      string
+	content string
+}
+
+func sweepLiveLogs(root string) []sweptLiveLog {
 	matches, err := filepath.Glob(filepath.Join(supervisorDir(root), "live-*.txt"))
 	if err != nil {
 		return nil
 	}
-	var swept []string
+	var swept []sweptLiveLog
 	for _, path := range matches {
+		content, readErr := os.ReadFile(path)
 		if err := os.Remove(path); err != nil {
 			continue
 		}
 		name := filepath.Base(path)
-		swept = append(swept, strings.TrimSuffix(strings.TrimPrefix(name, "live-"), ".txt"))
+		if readErr != nil {
+			content = nil
+		}
+		swept = append(swept, sweptLiveLog{
+			id:      strings.TrimSuffix(strings.TrimPrefix(name, "live-"), ".txt"),
+			content: string(content),
+		})
 	}
 	return swept
 }

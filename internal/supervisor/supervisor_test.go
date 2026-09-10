@@ -518,6 +518,90 @@ func TestInterruptStopsOnlyTheActiveTurnAndPreservesRecovery(t *testing.T) {
 	s.Shutdown()
 }
 
+type userTurnFollowupHarness struct {
+	noModelDiscovery
+	store        *store.Store
+	itemID       string
+	firstStarted chan struct{}
+	releaseFirst chan struct{}
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (h *userTurnFollowupHarness) RunTurn(_ context.Context, _ string, _ string, _ string, _ string, _ func(string)) (TurnResult, error) {
+	h.mu.Lock()
+	h.calls++
+	call := h.calls
+	h.mu.Unlock()
+	if call == 1 {
+		close(h.firstStarted)
+		<-h.releaseFirst
+	} else {
+		if _, err := h.store.AddTurn(h.itemID, models.ActorAgent, "follow-up answer"); err != nil {
+			return TurnResult{}, err
+		}
+	}
+	return TurnResult{SessionID: "follow-up-session"}, nil
+}
+
+func TestUserTurnDuringDispatchQueuesSerializedFollowup(t *testing.T) {
+	h := &userTurnFollowupHarness{
+		firstStarted: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+	}
+	s, st := newStoreBackedSupervisor(t, h)
+	item, err := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.store, h.itemID = st, item.ID
+	s.seedTurnCounts()
+	s.Start()
+	s.Enqueue(item.ID)
+	defer s.Shutdown()
+
+	select {
+	case <-h.firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial dispatch did not start")
+	}
+	if _, err := st.AddTurn(item.ID, models.ActorUser, "work arrived during the run"); err != nil {
+		t.Fatal(err)
+	}
+	// This is the watcher response to the external item turn. The active
+	// dispatch must not overlap it; its unwind path owns the follow-up queue.
+	s.EnqueuePendingActivityRoots()
+	close(h.releaseFirst)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		h.mu.Lock()
+		calls := h.calls
+		h.mu.Unlock()
+		if calls == 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	h.mu.Lock()
+	calls := h.calls
+	h.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("harness calls = %d, want initial turn plus serialized follow-up", calls)
+	}
+	after, err := st.GetItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != models.StatusPendingUser {
+		t.Fatalf("item status after follow-up = %q, want pending-user", after.Status)
+	}
+	if len(after.Turns) != 2 || after.Turns[1].Content != "follow-up answer" {
+		t.Fatalf("turns after follow-up = %+v", after.Turns)
+	}
+}
+
 func TestShutdownIsSafeWithoutStart(t *testing.T) {
 	// Constructed then abandoned — Run returns this way when the watcher fails.
 	s := newTestSupervisor(t, &fakeHarness{})

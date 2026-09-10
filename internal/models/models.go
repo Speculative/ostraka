@@ -53,6 +53,19 @@ type Turn struct {
 	Content   string
 }
 
+// PartialTrace is the provider output captured while an agent turn was in
+// flight. It is deliberately separate from Turn: a provider can emit useful
+// work and then be interrupted (or fail) before it posts a substantive turn.
+// TurnTimestamp links a completed trace to the agent turn it preceded; a zero
+// value leaves it as a standalone partial response in the timeline.
+type PartialTrace struct {
+	ID            string    `json:"id"`
+	Timestamp     time.Time `json:"timestamp"`
+	TurnTimestamp time.Time `json:"turn_timestamp,omitempty"`
+	Status        string    `json:"status"`
+	Content       string    `json:"content"`
+}
+
 // Activity is structured metadata about a related conversation. Activities
 // are persisted separately from turns so lifecycle notifications do not
 // masquerade as something a user or agent said.

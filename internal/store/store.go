@@ -52,7 +52,7 @@ func FindRoot(start string) (string, error) {
 }
 
 func NewStore(root string) (*Store, error) {
-	for _, sub := range append(append(dirValues(), archiveDir), activityDir) {
+	for _, sub := range append(append(append(dirValues(), archiveDir), activityDir), partialTraceDir) {
 		if err := os.MkdirAll(filepath.Join(root, sub), 0755); err != nil {
 			return nil, err
 		}
@@ -473,5 +473,11 @@ func (s *Store) DeleteItem(id string) error {
 			return fmt.Errorf("cannot delete item %q while it has subthreads", id)
 		}
 	}
-	return os.Remove(path)
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	if err := s.deletePartialTraces(id); err != nil {
+		return err
+	}
+	return nil
 }
