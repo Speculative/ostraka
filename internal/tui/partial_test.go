@@ -23,9 +23,10 @@ func TestPartialTraceIsCollapsedAndCanBeSelectedAndShown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	traceAt := time.Now().UTC()
 	if err := s.AppendPartialTrace(item.ID, models.PartialTrace{
 		ID:        "trace-1",
-		Timestamp: time.Now().UTC(),
+		Timestamp: traceAt,
 		Status:    "interrupted",
 		Content:   "secret partial provider output",
 	}); err != nil {
@@ -39,7 +40,8 @@ func TestPartialTraceIsCollapsedAndCanBeSelectedAndShown(t *testing.T) {
 	m.conv.Height = 20
 	m.updateConv()
 	collapsed := ansi.Strip(m.conv.View())
-	if !strings.Contains(collapsed, agentEndedWithoutFinalResponse) || !strings.Contains(collapsed, "interrupted") ||
+	header := "agent  ·  " + traceAt.Format("2006-01-02 15:04") + "  ·  interrupted"
+	if !containsTurnWithBody(collapsed, header, agentEndedWithoutResponse) ||
 		strings.Contains(collapsed, "partial response") || strings.Contains(collapsed, "collapsed") ||
 		strings.Contains(collapsed, "expanded") || strings.Contains(collapsed, "secret partial provider output") {
 		t.Fatalf("collapsed trace view = %q", collapsed)
@@ -53,7 +55,7 @@ func TestPartialTraceIsCollapsedAndCanBeSelectedAndShown(t *testing.T) {
 	next, _ = m.handleNavKey(tea.KeyMsg{Type: tea.KeySpace})
 	m = next.(model)
 	expanded := ansi.Strip(m.conv.View())
-	if !strings.Contains(expanded, agentEndedWithoutFinalResponse) ||
+	if !strings.Contains(expanded, agentEndedWithoutResponse) ||
 		!strings.Contains(expanded, "secret partial provider output") ||
 		strings.Contains(expanded, "partial response") || strings.Contains(expanded, "collapsed") ||
 		strings.Contains(expanded, "expanded") {
@@ -78,10 +80,11 @@ func TestInterruptedActivityRendersAsAnActivityLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	interruptedAt := time.Now().UTC()
 	if err := s.AddActivity(item.ID, models.Activity{
 		Type:      store.ActivityAgentInterrupted,
 		Actor:     models.ActorAgent,
-		Timestamp: time.Now().UTC(),
+		Timestamp: interruptedAt,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -92,9 +95,20 @@ func TestInterruptedActivityRendersAsAnActivityLine(t *testing.T) {
 	m.conv.Height = 20
 	m.updateConv()
 	view := ansi.Strip(m.conv.View())
-	if !strings.Contains(view, agentEndedWithoutFinalResponse) || !strings.Contains(view, "Interrupted") {
+	header := "agent  ·  " + interruptedAt.Format("2006-01-02 15:04") + "  ·  interrupted"
+	if !containsTurnWithBody(view, header, agentEndedWithoutResponse) {
 		t.Fatalf("conversation omitted interruption: %q", ansi.Strip(m.conv.View()))
 	}
+}
+
+func containsTurnWithBody(view, header, body string) bool {
+	lines := strings.Split(view, "\n")
+	for i := 0; i+2 < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == header && strings.TrimSpace(lines[i+1]) == "" && strings.TrimSpace(lines[i+2]) == body {
+			return true
+		}
+	}
+	return false
 }
 
 func TestNoFinalResponseActivityRendersTheEndedMarker(t *testing.T) {
@@ -120,7 +134,7 @@ func TestNoFinalResponseActivityRendersTheEndedMarker(t *testing.T) {
 	m.conv.Width = 80
 	m.conv.Height = 20
 	m.updateConv()
-	if view := ansi.Strip(m.conv.View()); !strings.Contains(view, agentEndedWithoutFinalResponse) {
+	if view := ansi.Strip(m.conv.View()); !strings.Contains(view, "agent  ·  ") || !strings.Contains(view, agentEndedWithoutResponse) {
 		t.Fatalf("conversation omitted no-final-response marker: %q", view)
 	}
 }
@@ -164,7 +178,7 @@ func TestSpaceExpandsTraceAttachedToSelectedTurn(t *testing.T) {
 		t.Fatalf("attached trace did not expand: %q", ansi.Strip(m.conv.View()))
 	}
 	view := ansi.Strip(m.conv.View())
-	if strings.Contains(view, agentEndedWithoutFinalResponse) {
+	if strings.Contains(view, agentEndedWithoutResponse) {
 		t.Fatalf("normal completed turn was labeled as an ended response: %q", view)
 	}
 	if !strings.Contains(view, "agent  ·  "+turnAt.Format("2006-01-02 15:04")+"  ·  completed") ||

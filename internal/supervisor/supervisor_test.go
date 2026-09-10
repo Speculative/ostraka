@@ -505,8 +505,8 @@ func TestInterruptStopsOnlyTheActiveTurnAndPreservesRecovery(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	after, _ := st.GetItem(item.ID)
-	if after.Status != models.StatusPendingAgent {
-		t.Errorf("status after interrupt = %q, want pending-agent", after.Status)
+	if after.Status != models.StatusPendingUser {
+		t.Errorf("status after interrupt = %q, want pending-user", after.Status)
 	}
 	if failure, ok := s.DispatchError(item.ID); ok || failure != "" {
 		t.Errorf("intentional interrupt left a dispatch warning: %q", failure)

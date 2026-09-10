@@ -904,9 +904,15 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 				s.logger.Printf("item %s: cannot persist dispatch error: %v", msg.itemID, writeErr)
 			}
 		}
-		// Put it back in the queue's state so it doesn't sit forever showing
-		// as in-progress for a run that is already over.
-		s.revertAcknowledged(msg.itemID, models.StatusPendingAgent)
+		// Put it back in a stable state so it doesn't sit forever showing as
+		// in-progress for a run that is already over. An intentional interrupt
+		// hands control to the user; an operational failure remains work owed by
+		// the agent and can be retried.
+		nextStatus := models.StatusPendingAgent
+		if interrupted {
+			nextStatus = models.StatusPendingUser
+		}
+		s.revertAcknowledged(msg.itemID, nextStatus)
 		// A turn cut short still happened: the provider has a session holding
 		// whatever the agent did before it was stopped. Persisting the id is
 		// what stops the resume cursor rewinding past that work — the id is

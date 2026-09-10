@@ -2808,8 +2808,8 @@ func (m *model) updateConv() {
 			sb.WriteString("\n\n" + turn)
 		case conversationActivity:
 			if event.activity.Type == store.ActivityAgentEndedWithoutFinalResponse {
-				sb.WriteString(fmt.Sprintf("\n\n%s\n%s", turnRule,
-					warningHeaderStyle.Render(agentEndedWithoutFinalResponse)))
+				sb.WriteString("\n\n" + turnRule + "\n" +
+					renderAgentEndedWithoutResponse(event.activity.Timestamp, event.activity.Result, w))
 				break
 			}
 			if event.activity.Type == store.ActivityAgentInterrupted {
@@ -2820,8 +2820,8 @@ func (m *model) updateConv() {
 				if hasStandaloneInterruptedTrace(partials) {
 					break
 				}
-				sb.WriteString(fmt.Sprintf("\n\n%s\n%s", turnRule,
-					warningHeaderStyle.Render(agentEndedWithoutFinalResponse+"  ·  Interrupted")))
+				sb.WriteString("\n\n" + turnRule + "\n" +
+					renderAgentEndedWithoutResponse(event.activity.Timestamp, "interrupted", w))
 				break
 			}
 			status := "pending"
@@ -2842,6 +2842,7 @@ func (m *model) updateConv() {
 					muted:   true,
 				})
 			}
+			parts = append(parts, conversationPart{content: agentEndedWithoutResponse})
 			selected := conversationSelectionKey(event) == selectedKey
 			partialContent := renderConversationParts(parts, selected, w)
 			partial := turnRule + "\n" + partialContent
@@ -3011,7 +3012,7 @@ type conversationPart struct {
 }
 
 func renderStandalonePartialHeader(partial models.PartialTrace) string {
-	header := agentEndedWithoutFinalResponse
+	header := string(models.ActorAgent)
 	if !partial.Timestamp.IsZero() {
 		header += "  ·  " + partial.Timestamp.Format("2006-01-02 15:04")
 	}
@@ -3019,7 +3020,18 @@ func renderStandalonePartialHeader(partial models.PartialTrace) string {
 	return header
 }
 
-const agentEndedWithoutFinalResponse = "(agent ended without final response)"
+func renderAgentEndedWithoutResponse(timestamp time.Time, status string, width int) string {
+	header := string(models.ActorAgent)
+	if !timestamp.IsZero() {
+		header += "  ·  " + timestamp.Format("2006-01-02 15:04")
+	}
+	if status != "" {
+		header += "  ·  " + status
+	}
+	return header + "\n\n" + renderMarkdown(agentEndedWithoutResponse, width)
+}
+
+const agentEndedWithoutResponse = "(agent ended without a response)"
 
 func hasStandaloneInterruptedTrace(partials []models.PartialTrace) bool {
 	for _, partial := range partials {
