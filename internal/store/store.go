@@ -102,6 +102,7 @@ func (s *Store) pathForID(id string) (string, error) {
 }
 
 func (s *Store) itemPath(item models.Item) string {
+	item.Status = models.NormalizeStatus(item.Status)
 	if models.TerminalStatuses[item.Status] {
 		return filepath.Join(s.Root, archiveDir, item.ID+".md")
 	}
@@ -203,6 +204,7 @@ func (s *Store) GetItem(id string) (models.Item, error) {
 }
 
 func (s *Store) CreateItem(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent string) (models.Item, error) {
+	status = models.NormalizeStatus(status)
 	if err := ValidateChannel(channel); err != nil {
 		return models.Item{}, err
 	}
@@ -406,6 +408,7 @@ func (s *Store) SetStatus(id string, status models.Status) (models.Item, error) 
 }
 
 func (s *Store) SetStatusBy(id string, status models.Status, actor models.Actor) (models.Item, error) {
+	status = models.NormalizeStatus(status)
 	oldPath, err := s.pathForID(id)
 	if err != nil {
 		return models.Item{}, err

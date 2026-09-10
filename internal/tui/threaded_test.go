@@ -43,8 +43,8 @@ func TestPrepareGroupedDetachesChildWhenParentIsOutsideView(t *testing.T) {
 func TestPrepareGroupedArchiveKeepsAllChildrenWhenRootIsOutsideView(t *testing.T) {
 	created := time.Date(2026, 8, 17, 5, 0, 0, 0, time.UTC)
 	root := models.Item{ID: "root", Channel: models.ChannelInbox, Status: models.StatusActive, Created: created, Title: "Root"}
-	first := models.Item{ID: "first", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusDone, Created: created.Add(time.Minute), Title: "First"}
-	second := models.Item{ID: "second", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusDone, Created: created.Add(2 * time.Minute), Title: "Second"}
+	first := models.Item{ID: "first", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(time.Minute), Title: "First"}
+	second := models.Item{ID: "second", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(2 * time.Minute), Title: "Second"}
 
 	items, _ := archiveView.prepareGrouped([]models.Item{root, second, first}, false, nil)
 	if len(items) != 2 || items[0].ID != first.ID || items[1].ID != second.ID {
@@ -57,11 +57,11 @@ func TestPrepareGroupedArchiveKeepsAllChildrenWhenRootIsOutsideView(t *testing.T
 	}
 }
 
-func TestPrepareGroupedArchiveExpandsArchivedRootWithDoneChildren(t *testing.T) {
+func TestPrepareGroupedArchiveExpandsArchivedFamily(t *testing.T) {
 	created := time.Date(2026, 8, 17, 5, 0, 0, 0, time.UTC)
 	root := models.Item{ID: "root", Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created, Title: "Root"}
-	first := models.Item{ID: "first", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusDone, Created: created.Add(time.Minute), Title: "First"}
-	second := models.Item{ID: "second", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusDone, Created: created.Add(2 * time.Minute), Title: "Second"}
+	first := models.Item{ID: "first", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(time.Minute), Title: "First"}
+	second := models.Item{ID: "second", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(2 * time.Minute), Title: "Second"}
 	all := []models.Item{root, second, first}
 
 	items, _ := archiveView.prepareGrouped(all, false, nil)

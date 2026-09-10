@@ -39,10 +39,10 @@ func TestClosingSubthreadNotifiesRootAndRootCannotCloseEarly(t *testing.T) {
 	s := newTestStore(t)
 	root, _ := s.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusActive, "")
 	child, _ := s.CreateSubthread(root.ID, "child", "body", models.TypeThread, models.StatusActive)
-	if _, err := s.SetStatus(root.ID, models.StatusDone); err == nil {
+	if _, err := s.SetStatus(root.ID, models.StatusArchived); err == nil {
 		t.Fatal("root closed while child was open")
 	}
-	if _, err := s.SetStatus(child.ID, models.StatusDone); err != nil {
+	if _, err := s.SetStatus(child.ID, models.StatusArchived); err != nil {
 		t.Fatal(err)
 	}
 	activities, err := s.PendingActivities(root.ID)
@@ -55,7 +55,7 @@ func TestClosingSubthreadNotifiesRootAndRootCannotCloseEarly(t *testing.T) {
 			closed = activity
 		}
 	}
-	if closed.ChildID != child.ID || closed.Result != string(models.StatusDone) {
+	if closed.ChildID != child.ID || closed.Result != string(models.StatusArchived) {
 		t.Fatalf("closed activity = %+v", closed)
 	}
 	if err := s.MarkActivitiesHandled(root.ID, []string{closed.ID}); err != nil {
@@ -64,7 +64,7 @@ func TestClosingSubthreadNotifiesRootAndRootCannotCloseEarly(t *testing.T) {
 	if pending, err := s.PendingActivities(root.ID); err != nil || len(pending) != 1 {
 		t.Fatalf("pending after handling close = %+v, err=%v; creation events should remain", pending, err)
 	}
-	if _, err := s.SetStatus(root.ID, models.StatusDone); err != nil {
+	if _, err := s.SetStatus(root.ID, models.StatusArchived); err != nil {
 		t.Fatal(err)
 	}
 }

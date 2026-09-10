@@ -33,7 +33,7 @@ func TestChildActivityDispatchIncludesAndHandlesEvents(t *testing.T) {
 	s, st := newStoreBackedSupervisor(t, h)
 	root, _ := st.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusPendingAgent, "")
 	child, _ := st.CreateSubthread(root.ID, "child", "body", models.TypeThread, models.StatusActive)
-	if _, err := st.SetStatus(child.ID, models.StatusDone); err != nil {
+	if _, err := st.SetStatus(child.ID, models.StatusArchived); err != nil {
 		t.Fatal(err)
 	}
 	h.store, h.rootID = st, root.ID
@@ -51,7 +51,7 @@ func TestStaleActivityDispatchDoesNotLaunchSecondTurn(t *testing.T) {
 	s, st := newStoreBackedSupervisor(t, h)
 	root, _ := st.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusPendingAgent, "")
 	child, _ := st.CreateSubthread(root.ID, "child", "body", models.TypeThread, models.StatusActive)
-	if _, err := st.SetStatus(child.ID, models.StatusDone); err != nil {
+	if _, err := st.SetStatus(child.ID, models.StatusArchived); err != nil {
 		t.Fatal(err)
 	}
 	h.store, h.rootID = st, root.ID
@@ -130,7 +130,7 @@ func TestChildActivityDuringDispatchQueuesOneSerializedFollowUp(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("initial dispatch did not start")
 	}
-	if _, err := st.SetStatus(child.ID, models.StatusDone); err != nil {
+	if _, err := st.SetStatus(child.ID, models.StatusArchived); err != nil {
 		t.Fatal(err)
 	}
 	// The watcher can call this while the root is busy; it must defer the

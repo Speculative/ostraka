@@ -18,7 +18,6 @@ func TestDispatchableWakesOnlyLiveStatuses(t *testing.T) {
 		{models.StatusPendingAgent, true},
 		{models.StatusAgentAcknowledged, true},
 		// Terminal: there is no one left to answer.
-		{models.StatusDone, false},
 		{models.StatusArchived, false},
 	} {
 		if got := dispatchable(tc.status); got != tc.want {
@@ -49,7 +48,7 @@ func TestAllStatusesCoversEveryModelStatus(t *testing.T) {
 	known := []models.Status{
 		models.StatusBacklog, models.StatusActive, models.StatusPendingUser,
 		models.StatusPendingAgent, models.StatusAgentAcknowledged,
-		models.StatusDone, models.StatusArchived,
+		models.StatusArchived,
 	}
 	if len(allStatuses) != len(known) {
 		t.Fatalf("allStatuses has %d entries, models defines %d", len(allStatuses), len(known))
@@ -110,7 +109,6 @@ func TestWakesAgentIsNarrowerThanDispatchable(t *testing.T) {
 		// however recently the user wrote.
 		{models.StatusPendingUser, false},
 		{models.StatusBacklog, false},
-		{models.StatusDone, false},
 		{models.StatusArchived, false},
 	} {
 		if got := wakesAgent(tc.status); got != tc.want {
@@ -152,7 +150,6 @@ func TestStatusDotMarksOnlyLiveStates(t *testing.T) {
 		{models.StatusBacklog, false},
 		{models.StatusActive, false},
 		{models.StatusPendingAgent, false},
-		{models.StatusDone, false},
 		{models.StatusArchived, false},
 	} {
 		if _, got := statusDot(tc.status); got != tc.want {

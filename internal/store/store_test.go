@@ -157,7 +157,7 @@ func TestSetStatusArchives(t *testing.T) {
 	s := newTestStore(t)
 	item, _ := s.CreateItem(models.ChannelInbox, "q", "q", models.TypeThread, models.StatusActive, "")
 
-	if _, err := s.SetStatus(item.ID, models.StatusDone); err != nil {
+	if _, err := s.SetStatus(item.ID, models.StatusArchived); err != nil {
 		t.Fatal(err)
 	}
 
@@ -166,8 +166,21 @@ func TestSetStatusArchives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("item not found after archiving: %v", err)
 	}
-	if got.Status != models.StatusDone {
-		t.Errorf("Status: got %q want %q", got.Status, models.StatusDone)
+	if got.Status != models.StatusArchived {
+		t.Errorf("Status: got %q want %q", got.Status, models.StatusArchived)
+	}
+}
+
+func TestSetStatusNormalizesLegacyDoneInput(t *testing.T) {
+	s := newTestStore(t)
+	item, _ := s.CreateItem(models.ChannelInbox, "q", "q", models.TypeThread, models.StatusActive, "")
+
+	updated, err := s.SetStatus(item.ID, models.Status("done"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != models.StatusArchived {
+		t.Errorf("Status: got %q want %q", updated.Status, models.StatusArchived)
 	}
 }
 
@@ -212,7 +225,6 @@ func TestStatusAfterAgentTurn(t *testing.T) {
 		// Parked states: an agent turn is not a request for the user to act.
 		{models.StatusBacklog, models.StatusBacklog, false},
 		{models.StatusPendingUser, models.StatusPendingUser, false},
-		{models.StatusDone, models.StatusDone, false},
 		{models.StatusArchived, models.StatusArchived, false},
 	} {
 		got, moved := store.StatusAfterAgentTurn(tc.current)

@@ -55,8 +55,7 @@ var statusRank = map[models.Status]int{
 	models.StatusActive:            3,
 	models.StatusProposed:          4,
 	models.StatusBacklog:           5,
-	models.StatusDone:              6,
-	models.StatusArchived:          7,
+	models.StatusArchived:          6,
 }
 
 // rankOf places statuses this build does not know about at the end rather than

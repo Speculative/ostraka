@@ -135,6 +135,7 @@ func ParseItem(path string) (models.Item, error) {
 	if status == "" {
 		status = models.StatusActive
 	}
+	status = models.NormalizeStatus(status)
 
 	title := fm.Title
 	if title == "" {
@@ -159,6 +160,7 @@ func WriteItem(item models.Item, path string) error {
 	if err := ValidateChannel(item.Channel); err != nil {
 		return err
 	}
+	item.Status = models.NormalizeStatus(item.Status)
 	fm := frontmatter{
 		ID:      item.ID,
 		Channel: string(item.Channel),

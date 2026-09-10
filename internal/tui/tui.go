@@ -181,7 +181,7 @@ func waitForWatch(ch <-chan struct{}) tea.Cmd {
 // loadItemsCmd loads the items for a view in a bubbletea goroutine. It reads
 // the whole store and filters in memory: a view is a question about status as
 // well as channel, and the store's one-status filter cannot express "every
-// live status" or "either terminal status".
+// live status" or "the terminal status".
 func loadItemsCmd(s *store.Store, v listView, showBacklog bool) tea.Cmd {
 	return func() tea.Msg {
 		items, err := s.ListItems(store.ListOpts{})
@@ -379,7 +379,6 @@ var allStatuses = []models.Status{
 	models.StatusPendingUser,
 	models.StatusPendingAgent,
 	models.StatusAgentAcknowledged,
-	models.StatusDone,
 	models.StatusArchived,
 }
 

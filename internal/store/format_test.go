@@ -138,6 +138,47 @@ old ask
 	}
 }
 
+func TestParseNormalizesLegacyDoneStatus(t *testing.T) {
+	path := writeTemp(t, `---
+id: 20240101-120000
+channel: inbox
+type: thread
+status: done
+created: 2024-01-01T12:00:00Z
+---
+completed item
+`)
+	item, err := store.ParseItem(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Status != models.StatusArchived {
+		t.Errorf("Status: got %q want %q", item.Status, models.StatusArchived)
+	}
+}
+
+func TestWriteNormalizesLegacyDoneStatus(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "item.md")
+	item := models.Item{
+		ID:      "20240101-120000",
+		Channel: models.ChannelInbox,
+		Type:    models.TypeThread,
+		Status:  models.Status("done"),
+		Created: time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+		Body:    "completed item",
+	}
+	if err := store.WriteItem(item, path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "status: done") || !strings.Contains(string(data), "status: archived") {
+		t.Fatalf("legacy status was not normalized:\n%s", data)
+	}
+}
+
 func TestParseMultilineTurnContent(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	item := models.Item{

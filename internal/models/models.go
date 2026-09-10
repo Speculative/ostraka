@@ -26,7 +26,6 @@ const (
 	// reply: the supervisor sets it when a dispatch starts, so a turn that is
 	// being worked on is distinguishable from one still sitting in the queue.
 	StatusAgentAcknowledged Status = "agent-acknowledged"
-	StatusDone              Status = "done"
 	StatusArchived          Status = "archived"
 )
 
@@ -43,8 +42,17 @@ func ValidChannel(channel Channel) bool {
 }
 
 var TerminalStatuses = map[Status]bool{
-	StatusDone:     true,
 	StatusArchived: true,
+}
+
+// NormalizeStatus maps statuses written by older Ostraka versions onto the
+// current lifecycle. "done" and "archived" were behaviorally identical, so
+// archived is now the single terminal status.
+func NormalizeStatus(status Status) Status {
+	if status == "done" {
+		return StatusArchived
+	}
+	return status
 }
 
 type Turn struct {

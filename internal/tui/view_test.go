@@ -31,7 +31,7 @@ func TestChannelViewExcludesTerminalItems(t *testing.T) {
 	// Terminal items live in the archive and nowhere else — that is the whole
 	// point of the fourth tab.
 	v := channelView(models.ChannelInbox)
-	for _, st := range []models.Status{models.StatusDone, models.StatusArchived} {
+	for _, st := range []models.Status{models.StatusArchived} {
 		if v.includes(item(models.ChannelInbox, st, t0), true) {
 			t.Errorf("%q appeared in a channel view", st)
 		}

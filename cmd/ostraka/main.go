@@ -268,7 +268,7 @@ func addItemAddFlags() {
 	f.StringVar(&addFlags.title, "title", "", "single-line label for list views (required)")
 	f.StringVar(&addFlags.body, "body", "", "opening description, any length (required)")
 	f.StringVarP(&addFlags.itype, "type", "t", "thread", "thread|doc")
-	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|pending-agent|agent-acknowledged|proposed|done|archived")
+	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|pending-agent|agent-acknowledged|proposed|archived")
 	f.StringVarP(&addFlags.parent, "parent", "p", "", "parent item ID")
 	f.StringSliceVar(&addFlags.related, "related", nil, "top-level item IDs to relate")
 	itemAddCmd.MarkFlagRequired("channel")
