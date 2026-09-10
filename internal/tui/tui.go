@@ -235,7 +235,11 @@ type model struct {
 	items         []models.Item
 	allItems      []models.Item
 	selected      int
-	focus         paneFocus
+	// selectedByView remembers the item cursor independently for each list
+	// view. Switching views clears items while the next asynchronous load is
+	// pending, so the row index alone cannot restore the prior selection.
+	selectedByView map[listView]string
+	focus          paneFocus
 	// collapsed is deliberately TUI-local state: folding is a presentation
 	// choice, not project protocol data. Keys are root IDs.
 	collapsed map[string]bool
@@ -448,11 +452,12 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) mod
 			channelView(models.ChannelInbox),
 			archiveView,
 		},
-		input:         ta,
-		title:         ti,
-		collapsed:     make(map[string]bool),
-		convSelection: -1,
-		traceExpanded: make(map[string]bool),
+		input:          ta,
+		title:          ti,
+		collapsed:      make(map[string]bool),
+		selectedByView: make(map[listView]string),
+		convSelection:  -1,
+		traceExpanded:  make(map[string]bool),
 	}
 }
 
@@ -514,6 +519,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		prevID := m.selectedID()
+		if prevID == "" {
+			prevID = m.selectedByView[m.view]
+		}
 		prevRendered := m.convItemID
 		prevTurns := m.convTurns
 		prevActivities := m.convActivities
@@ -1527,6 +1535,12 @@ func (m *model) checkpointTurnDraft() {
 }
 
 func (m model) switchView(v listView) (model, tea.Cmd) {
+	if id := m.selectedID(); id != "" {
+		if m.selectedByView == nil {
+			m.selectedByView = make(map[listView]string)
+		}
+		m.selectedByView[m.view] = id
+	}
 	m.projectPane = 0
 	m.projectEntries = nil
 	m.view = v

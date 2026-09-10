@@ -945,6 +945,34 @@ func TestSelectionFollowsAnItemThatResorts(t *testing.T) {
 	}
 }
 
+func TestSelectionIsRetainedIndependentlyAcrossViews(t *testing.T) {
+	inbox := []models.Item{
+		mkItem("inbox-a", models.StatusPendingUser),
+		mkItem("inbox-b", models.StatusPendingUser),
+	}
+	archived := []models.Item{
+		mkItem("archive-a", models.StatusArchived),
+		mkItem("archive-b", models.StatusArchived),
+	}
+	m := newSelectionModel(t, inbox, 1)
+
+	m, _ = m.switchView(archiveView)
+	m = loadInto(t, m, archived)
+	m.selected = 1
+
+	m, _ = m.switchView(channelView(models.ChannelInbox))
+	m = loadInto(t, m, inbox)
+	if got := m.selectedID(); got != "inbox-b" {
+		t.Fatalf("inbox selection after returning = %q, want inbox-b", got)
+	}
+
+	m, _ = m.switchView(archiveView)
+	m = loadInto(t, m, archived)
+	if got := m.selectedID(); got != "archive-b" {
+		t.Fatalf("archive selection after returning = %q, want archive-b", got)
+	}
+}
+
 func TestSelectionHoldsItsRowWhenTheItemLeavesTheView(t *testing.T) {
 	// Archiving the selected item, or parking it in backlog with the filter
 	// on, removes it from this view. Leaving selected untouched pointed it
