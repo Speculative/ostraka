@@ -747,6 +747,9 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.updateConv()
 		return m, nil
 	case msg.Type == tea.KeyRight || msg.Type == tea.KeyShiftRight || msg.String() == "l":
+		if m.projectPane == 0 && len(m.convSelectable) == 0 {
+			return m, nil
+		}
 		m.focus = focusReadingPane
 		m.updateConv()
 		m.convSelection = len(m.convSelectable) - 1

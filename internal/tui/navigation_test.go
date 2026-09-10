@@ -17,8 +17,8 @@ func TestReadingPaneNavigationSelectsItemsAndKeepsListHighlight(t *testing.T) {
 	m.width = 100
 	m.height = 30
 	m.items = []models.Item{
-		{ID: "one", Channel: models.ChannelInbox, Status: models.StatusActive, Title: "one"},
-		{ID: "two", Channel: models.ChannelInbox, Status: models.StatusActive, Title: "two"},
+		{ID: "one", Channel: models.ChannelInbox, Status: models.StatusActive, Title: "one", Turns: []models.Turn{{Actor: models.ActorUser, Timestamp: t0, Content: "one turn"}}},
+		{ID: "two", Channel: models.ChannelInbox, Status: models.StatusActive, Title: "two", Turns: []models.Turn{{Actor: models.ActorUser, Timestamp: t0, Content: "two turn"}}},
 	}
 	m.allItems = append([]models.Item(nil), m.items...)
 	m.selected = 0
@@ -84,6 +84,15 @@ func TestReadingPaneNavigationSelectsItemsAndKeepsListHighlight(t *testing.T) {
 func TestPaneFocusIsNotRenderedInHeader(t *testing.T) {
 	m := newModel(nil, nil, nil)
 	m.width = 120
+	m.items = []models.Item{{
+		ID:      "one",
+		Channel: models.ChannelInbox,
+		Status:  models.StatusActive,
+		Title:   "one",
+		Turns:   []models.Turn{{Actor: models.ActorUser, Timestamp: t0, Content: "one turn"}},
+	}}
+	m.selected = 0
+	m.updateConv()
 
 	header := m.renderHeader()
 	if strings.Contains(header, "focus") {
@@ -98,6 +107,36 @@ func TestPaneFocusIsNotRenderedInHeader(t *testing.T) {
 	header = m.renderHeader()
 	if strings.Contains(header, "focus") {
 		t.Fatalf("reading header contains focus indicator = %q", header)
+	}
+}
+
+func TestReadingPaneFocusRequiresSelectableConversationEntry(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.items = []models.Item{
+		{ID: "one", Channel: models.ChannelInbox, Status: models.StatusActive, Title: "one", Body: "initial description"},
+		{ID: "two", Channel: models.ChannelInbox, Status: models.StatusActive, Title: "two", Body: "another description"},
+	}
+	m.allItems = append([]models.Item(nil), m.items...)
+	m.selected = 0
+	m.conv.Width = 70
+	m.conv.Height = 20
+	m.updateConv()
+
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRight},
+		{Type: tea.KeyRunes, Runes: []rune("l")},
+	} {
+		next, _ := m.handleNavKey(key)
+		m = next.(model)
+		if m.focus != focusItemList {
+			t.Fatalf("focus after %q = %v, want item list", key.String(), m.focus)
+		}
+	}
+
+	next, _ := m.handleNavKey(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(model)
+	if m.selected != 1 || m.focus != focusItemList {
+		t.Fatalf("after Down from empty reading pane: selected=%d focus=%v, want item 1 and item list", m.selected, m.focus)
 	}
 }
 
