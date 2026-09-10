@@ -987,7 +987,8 @@ func (s *Supervisor) queueUserFollowup(itemID string, beforeTurns int) {
 // A trace is attached to the latest newly-posted agent turn when one exists;
 // interrupted and failed runs without a reply remain standalone timeline
 // entries. The activity event is separate so an interruption stays visible
-// even when its provider emitted no output.
+// even when its provider emitted no output; the same marker is used for any
+// other no-turn run that emitted no trace to retain.
 func (s *Supervisor) retainPartialTrace(itemID string, beforeTurns int, startedAt time.Time, status, content string) {
 	if s.store == nil {
 		return
@@ -1009,6 +1010,16 @@ func (s *Supervisor) retainPartialTrace(itemID string, beforeTurns int, startedA
 			Content:       content,
 		}); err != nil {
 			s.logger.Printf("item %s: cannot retain partial trace: %v", itemID, err)
+		}
+	}
+	if turnTimestamp.IsZero() && content == "" && status != "interrupted" {
+		if err := s.store.AddActivity(itemID, models.Activity{
+			Type:      store.ActivityAgentEndedWithoutFinalResponse,
+			Actor:     models.ActorAgent,
+			Result:    status,
+			Timestamp: time.Now().UTC(),
+		}); err != nil {
+			s.logger.Printf("item %s: cannot record no-final-response marker: %v", itemID, err)
 		}
 	}
 	if status == "interrupted" {

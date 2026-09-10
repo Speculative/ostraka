@@ -54,6 +54,7 @@ type emittingTraceHarness struct {
 	store  *store.Store
 	itemID string
 	post   bool
+	err    error
 }
 
 func (h *emittingTraceHarness) RunTurn(_ context.Context, _ string, _ string, _ string, _ string, onEvent func(string)) (TurnResult, error) {
@@ -63,6 +64,9 @@ func (h *emittingTraceHarness) RunTurn(_ context.Context, _ string, _ string, _ 
 		if _, err := h.store.AddTurn(h.itemID, models.ActorAgent, "answer"); err != nil {
 			return TurnResult{}, err
 		}
+	}
+	if h.err != nil {
+		return TurnResult{SessionID: "trace-session"}, h.err
 	}
 	return TurnResult{SessionID: "trace-session"}, nil
 }
@@ -94,6 +98,83 @@ func TestDispatchRetainsPartialTraceAndLinksPostedTurn(t *testing.T) {
 	}
 	if got := ReadLive(s.root, item.ID); got != "" {
 		t.Fatalf("live log survived dispatch: %q", got)
+	}
+}
+
+func TestDispatchRetainsStandaloneTraceWhenNoTurnWasPosted(t *testing.T) {
+	h := &emittingTraceHarness{}
+	s, st := newStoreBackedSupervisor(t, h)
+	item, err := st.CreateItem(models.ChannelInbox, "trace", "body", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.dispatch(enqueueMsg{itemID: item.ID})
+
+	updated, err := st.GetItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	traces, err := st.ListPartialTraces(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Turns) != 0 || len(traces) != 1 || !traces[0].TurnTimestamp.IsZero() || traces[0].Status != "completed" {
+		t.Fatalf("standalone trace = %+v, item turns = %+v", traces, updated.Turns)
+	}
+}
+
+func TestFailedDispatchRetainsStandaloneTraceWhenNoTurnWasPosted(t *testing.T) {
+	h := &emittingTraceHarness{err: context.DeadlineExceeded}
+	s, st := newStoreBackedSupervisor(t, h)
+	item, err := st.CreateItem(models.ChannelInbox, "trace", "body", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.dispatch(enqueueMsg{itemID: item.ID})
+
+	traces, err := st.ListPartialTraces(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(traces) != 1 || !traces[0].TurnTimestamp.IsZero() || traces[0].Status != "failed" {
+		t.Fatalf("failed standalone trace = %+v", traces)
+	}
+}
+
+type noOutputHarness struct {
+	noModelDiscovery
+	err error
+}
+
+func (h *noOutputHarness) RunTurn(_ context.Context, _ string, _ string, _ string, _ string, _ func(string)) (TurnResult, error) {
+	return TurnResult{SessionID: "no-output-session"}, h.err
+}
+
+func TestNoOutputRunRecordsNoFinalResponseMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "completed", err: nil},
+		{name: "failed", err: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &noOutputHarness{err: tc.err}
+			s, st := newStoreBackedSupervisor(t, h)
+			item, err := st.CreateItem(models.ChannelInbox, "trace", "body", models.TypeThread, models.StatusPendingAgent, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.dispatch(enqueueMsg{itemID: item.ID})
+
+			activities, err := st.ListActivities(item.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(activities) != 1 || activities[0].Type != store.ActivityAgentEndedWithoutFinalResponse {
+				t.Fatalf("no-output activities = %+v", activities)
+			}
+		})
 	}
 }
 

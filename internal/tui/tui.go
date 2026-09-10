@@ -2794,9 +2794,21 @@ func (m *model) updateConv() {
 			}
 			sb.WriteString("\n\n" + turn)
 		case conversationActivity:
-			if event.activity.Type == store.ActivityAgentInterrupted {
+			if event.activity.Type == store.ActivityAgentEndedWithoutFinalResponse {
 				sb.WriteString(fmt.Sprintf("\n\n%s\n%s", turnRule,
-					warningHeaderStyle.Render("Interrupted")))
+					warningHeaderStyle.Render(agentEndedWithoutFinalResponse)))
+				break
+			}
+			if event.activity.Type == store.ActivityAgentInterrupted {
+				// A retained standalone trace is the expandable record for this
+				// interruption. Keep the activity as a fallback marker only when
+				// there is no trace to select (for example, the provider emitted
+				// no output at all).
+				if hasStandaloneInterruptedTrace(partials) {
+					break
+				}
+				sb.WriteString(fmt.Sprintf("\n\n%s\n%s", turnRule,
+					warningHeaderStyle.Render(agentEndedWithoutFinalResponse+"  ·  Interrupted")))
 				break
 			}
 			status := "pending"
@@ -2986,12 +2998,23 @@ type conversationPart struct {
 }
 
 func renderStandalonePartialHeader(partial models.PartialTrace) string {
-	header := "agent"
+	header := agentEndedWithoutFinalResponse
 	if !partial.Timestamp.IsZero() {
 		header += "  ·  " + partial.Timestamp.Format("2006-01-02 15:04")
 	}
 	header += "  ·  " + partialStatus(partial)
 	return header
+}
+
+const agentEndedWithoutFinalResponse = "(agent ended without final response)"
+
+func hasStandaloneInterruptedTrace(partials []models.PartialTrace) bool {
+	for _, partial := range partials {
+		if partial.TurnTimestamp.IsZero() && partialStatus(partial) == "interrupted" {
+			return true
+		}
+	}
+	return false
 }
 
 func renderConversationParts(parts []conversationPart, selected bool, width int) string {

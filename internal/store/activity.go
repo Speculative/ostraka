@@ -18,9 +18,10 @@ const activityDir = "ACTIVITY"
 // ActivityType values are intentionally strings: the activity journal is a
 // small protocol boundary shared by the store, TUI, and supervisor.
 const (
-	ActivitySubthreadCreated = "subthread.created"
-	ActivitySubthreadClosed  = "subthread.closed"
-	ActivityAgentInterrupted = "agent.interrupted"
+	ActivitySubthreadCreated               = "subthread.created"
+	ActivitySubthreadClosed                = "subthread.closed"
+	ActivityAgentInterrupted               = "agent.interrupted"
+	ActivityAgentEndedWithoutFinalResponse = "agent.ended_without_final_response"
 )
 
 func (s *Store) activityPath(rootID string) string {
