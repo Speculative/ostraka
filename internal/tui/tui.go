@@ -540,6 +540,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasComposerVisible := m.composerVisible()
 		m.restoreSelection(prevID)
 		if prevID != m.selectedID() {
+			// A status change can remove the selected item from this view
+			// (for example, when it is archived). restoreSelection keeps the
+			// cursor on the replacement row, so return navigation to the list
+			// instead of leaving Up/Down operating on an unrelated conversation.
+			m.focus = focusItemList
 			m.convSelection = -1
 		}
 		if m.mode == modeNav && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {

@@ -966,6 +966,35 @@ func TestSelectionHoldsItsRowWhenTheItemLeavesTheView(t *testing.T) {
 	}
 }
 
+func TestSelectionLeavingViewReturnsFocusToItemList(t *testing.T) {
+	// Archiving the selected item replaces it with another row. The reading
+	// pane must not retain focus on that unrelated item's conversation.
+	before := []models.Item{
+		mkItem("A", models.StatusPendingUser),
+		mkItem("B", models.StatusPendingUser),
+		mkItem("C", models.StatusPendingUser),
+		mkItem("D", models.StatusPendingUser),
+	}
+	m := newSelectionModel(t, before, 1)
+	m.focus = focusReadingPane
+	m.convSelection = 0
+
+	got := loadInto(t, m, []models.Item{before[0], before[2], before[3]}) // B archived
+
+	if got.focus != focusItemList {
+		t.Fatalf("focus after selected item leaves view = %v, want item list", got.focus)
+	}
+	if got.convSelection != -1 {
+		t.Fatalf("conversation selection after selected item leaves view = %d, want -1", got.convSelection)
+	}
+
+	next, _ := got.handleNavKey(tea.KeyMsg{Type: tea.KeyDown})
+	got = next.(model)
+	if got.selectedID() != "D" {
+		t.Errorf("Down after selected item leaves view moved to %q, want D", got.selectedID())
+	}
+}
+
 func TestSelectionSurvivesAnEmptiedView(t *testing.T) {
 	m := newSelectionModel(t, []models.Item{mkItem("A", models.StatusPendingUser)}, 0)
 
