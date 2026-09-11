@@ -9,6 +9,7 @@ import (
 	"github.com/Speculative/ostraka/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 )
 
@@ -107,6 +108,70 @@ func TestPaneFocusIsNotRenderedInHeader(t *testing.T) {
 	header = m.renderHeader()
 	if strings.Contains(header, "focus") {
 		t.Fatalf("reading header contains focus indicator = %q", header)
+	}
+}
+
+func TestCopyModeRendersOnlyAFullScreenReadingPane(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.width = 90
+	m.height = 12
+	m.items = []models.Item{
+		{
+			ID:      "one",
+			Channel: models.ChannelInbox,
+			Status:  models.StatusActive,
+			Title:   "selected conversation",
+			Body:    strings.Repeat("copyable line\n", 20),
+		},
+		{
+			ID:      "sidebar-only-id",
+			Channel: models.ChannelInbox,
+			Status:  models.StatusActive,
+			Title:   "sidebar-only-title",
+		},
+	}
+	m.allItems = append([]models.Item(nil), m.items...)
+	m.selected = 0
+	m.focus = focusReadingPane
+	m.convSelection = 4
+	m = m.recalcLayout()
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	m = next.(model)
+	if !m.copyMode {
+		t.Fatal("f did not enter copy mode")
+	}
+	if m.conv.Width != m.width || m.conv.Height != m.height {
+		t.Fatalf("copy viewport is %dx%d, want terminal %dx%d", m.conv.Width, m.conv.Height, m.width, m.height)
+	}
+	m.newBelow = true
+	if got, want := m.View(), m.conv.View(); got != want {
+		t.Fatal("copy mode rendered UI outside the reading pane")
+	}
+	plain := ansi.Strip(m.View())
+	for _, chrome := range []string{"sidebar-only-id", "sidebar-only-title", "copy view", "Project Context"} {
+		if strings.Contains(plain, chrome) {
+			t.Fatalf("copy view contains hidden UI %q: %q", chrome, plain)
+		}
+	}
+
+	before := m.conv.YOffset
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(model)
+	if m.conv.YOffset <= before {
+		t.Fatalf("Down in copy mode did not scroll: before=%d after=%d", before, m.conv.YOffset)
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
+	if m.copyMode {
+		t.Fatal("Esc did not leave copy mode")
+	}
+	if m.focus != focusReadingPane {
+		t.Fatalf("focus after copy mode = %v, want restored reading pane", m.focus)
+	}
+	if m.conv.Width >= m.width || m.conv.Height >= m.height {
+		t.Fatalf("normal frame layout was not restored: viewport=%dx%d terminal=%dx%d", m.conv.Width, m.conv.Height, m.width, m.height)
 	}
 }
 

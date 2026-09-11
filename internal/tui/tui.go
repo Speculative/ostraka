@@ -240,6 +240,12 @@ type model struct {
 	// pending, so the row index alone cannot restore the prior selection.
 	selectedByView map[listView]string
 	focus          paneFocus
+	// copyMode gives the reading pane the whole terminal, without any UI
+	// chrome. Terminal mouse selection is rectangular across screen rows, so
+	// merely focusing the pane still copies the list and divider on every
+	// selected line. copyReturnFocus restores keyboard navigation on exit.
+	copyMode        bool
+	copyReturnFocus paneFocus
 	// collapsed is deliberately TUI-local state: folding is a presentation
 	// choice, not project protocol data. Keys are root IDs.
 	collapsed map[string]bool
@@ -694,6 +700,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.copyMode {
+			return m.handleCopyKey(msg)
+		}
 		switch m.mode {
 		case modeCompose:
 			return m.handleInputKey(msg)
@@ -821,6 +830,8 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "pgup":
 			m.pageConversation(-1)
 			return m, nil
+		case "f":
+			return m.enterCopyMode(), nil
 		case "e":
 			if m.selected < 0 || m.selected >= len(m.projectEntries) || !m.projectEntries[m.selected].editable {
 				return m, nil
@@ -865,6 +876,8 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pageConversation(1)
 	case "pgup":
 		m.pageConversation(-1)
+	case "f":
+		m = m.enterCopyMode()
 	case "1":
 		return m.switchView(channelView(models.ChannelInbox))
 	case "2":
@@ -914,6 +927,45 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			provider, _, _, _, _ := m.sup.Session(itemID)
 			m.sessionIdx = sessionProviderIndex(provider)
 		}
+	}
+	return m, nil
+}
+
+func (m model) enterCopyMode() model {
+	// In copy mode the conversation is the only thing rendered. Hide the
+	// reading cursor too: its background is useful for keyboard navigation,
+	// but distracting while selecting text with the terminal.
+	m.copyMode = true
+	m.copyReturnFocus = m.focus
+	m.focus = focusItemList
+	return m.recalcLayout()
+}
+
+// handleCopyKey keeps full-screen reading deliberately small and predictable:
+// keys either scroll the document or leave the mode. Item and lifecycle
+// actions are unavailable while their surrounding UI is hidden.
+func (m model) handleCopyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "f", "esc", "q", "left", "shift+left", "h":
+		m.copyMode = false
+		m.focus = m.copyReturnFocus
+		m = m.recalcLayout()
+	case "up", "shift+up", "k":
+		m.conv.ScrollUp(1)
+		m.syncNewBelow()
+	case "down", "shift+down", "j":
+		m.conv.ScrollDown(1)
+		m.syncNewBelow()
+	case "pgup":
+		m.pageConversation(-1)
+	case "pgdown":
+		m.pageConversation(1)
+	case "home", "g":
+		m.conv.GotoTop()
+		m.syncNewBelow()
+	case "end", "G":
+		m.conv.GotoBottom()
+		m.syncNewBelow()
 	}
 	return m, nil
 }
@@ -1605,6 +1657,11 @@ func (m model) View() string {
 	if m.err != nil {
 		return fmt.Sprintf("error: %v\n\nPress q to quit.", m.err)
 	}
+	if m.copyMode {
+		// Bypass renderConv as well as the outer frame: its transient
+		// "new messages below" overlay is useful UI, but not copyable content.
+		return m.conv.View()
+	}
 
 	header := m.renderHeader()
 	footer := m.renderFooter()
@@ -1947,17 +2004,17 @@ func (m model) renderFooter() string {
 		text = "k keep for later  s start  x reject  esc cancel"
 	default:
 		if m.projectPane != 0 {
-			text = "←/→/h/l pane  j/k versions  tab switch document  e edit  esc/ctrl+c interrupt  1-3 view  q quit"
+			text = "←/→/h/l pane  j/k versions  f copy view  tab switch document  e edit  esc/ctrl+c interrupt  1-3 view  q quit"
 			break
 		}
-		text = "←/→/h/l focus  ↑/↓/j/k select  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S session  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
+		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S session  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-			text = "←/→/h/l focus  ↑/↓/j/k select  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
 		}
 		if m.showBacklog {
-			text = "←/→/h/l focus  ↑/↓/j/k select  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S session  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S session  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-				text = "←/→/h/l focus  ↑/↓/j/k select  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
+				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
 			}
 		}
 	}
@@ -1970,7 +2027,7 @@ func (m model) renderFooter() string {
 
 	// The hint text grows with the keymap; drop it rather than overflow the row.
 	if len(text)+len(right) > m.width {
-		text = "←/→/h/l focus"
+		text = "←/→/h/l focus  f copy view"
 		if len(text)+len(right) > m.width {
 			text = ""
 		}
@@ -3261,6 +3318,11 @@ func (m model) recalcLayout() model {
 	listPanelTotal := m.listWidth() + 1 // +1 for border-right
 	convAreaW := m.width - listPanelTotal
 	convW := convAreaW - 2 // 1-unit padding each side
+	if m.copyMode {
+		// No padding or scrollbar is rendered in copy mode, so all columns are
+		// available to the viewport's wrapped content.
+		convW = m.width
+	}
 	if convW < 1 {
 		convW = 1
 	}
@@ -3276,8 +3338,13 @@ func (m model) recalcLayout() model {
 	}
 
 	mainH := m.height - 2 // subtract header and footer
+	if m.copyMode {
+		mainH = m.height
+	}
 	var convH int
-	if m.composerVisible() {
+	if m.copyMode {
+		convH = mainH
+	} else if m.composerVisible() {
 		// per-element padding: 1(top) + convH + 1(sep) + inputH + 1(bottom) = mainH
 		convH = mainH - inputH - 3
 	} else {
