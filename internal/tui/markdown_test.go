@@ -85,3 +85,62 @@ func TestRenderMarkdownKeepsRenderedLinesWithinWidth(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderMarkdownKeepsShortHyphenatedTokensTogether(t *testing.T) {
+	inputs := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "inline code",
+			input: "The project-brief portion of this item is already implemented. The wording now in `internal/prompt/prompt.go` came from completed child `20260819-065319` and was committed in `2f48206`. It states the intended two-part threshold (long-lived and broadly relevant to most items), identifies project description/goals/norms as appropriate, excludes recent-change and medium-duration state, and directs narrower knowledge to linked producing items.",
+			want:  "20260819-065319",
+		},
+		{
+			name:  "plain prose",
+			input: "The project-brief portion of this item is already implemented. The wording now in internal/prompt/prompt.go came from completed child 20260819-065319 and was committed in 2f48206. It states the intended two-part threshold (long-lived and broadly relevant to most items), identifies project description/goals/norms as appropriate, excludes recent-change and medium-duration state, and directs narrower knowledge to linked producing items.",
+			want:  "20260819-065319",
+		},
+		{
+			name:  "hyphenated word",
+			input: "This paragraph contains long-lived guidance and enough ordinary prose to exercise the available wrapping width without breaking the word.",
+			want:  "long-lived",
+		},
+	}
+
+	for _, tc := range inputs {
+		t.Run(tc.name, func(t *testing.T) {
+			plain := ansi.Strip(renderMarkdown(tc.input, 80))
+			if !strings.Contains(plain, tc.want) {
+				t.Fatalf("rendered text split %q: %q", tc.want, plain)
+			}
+			lines := strings.Split(plain, "\n")
+			for i, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "065319" || trimmed == "long-" {
+					t.Fatalf("orphaned fragment on line %d: %q in %q", i, line, plain)
+				}
+				if strings.HasSuffix(trimmed, "-") && i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "065319") {
+					t.Fatalf("hyphenated token split across lines %d-%d: %q / %q", i, i+1, line, lines[i+1])
+				}
+			}
+		})
+	}
+}
+
+func TestRenderMarkdownUsesPaneWidthAfterRemovingDocumentMargin(t *testing.T) {
+	const width = 80
+	plain := ansi.Strip(renderMarkdown("A paragraph with enough ordinary words to fill the available conversation pane instead of reserving an unexplained document margin on both sides.", width))
+	fullWidth := false
+	for _, line := range strings.Split(plain, "\n") {
+		if actual := lipgloss.Width(line); actual > width {
+			t.Fatalf("rendered line width %d exceeds %d: %q", actual, width, line)
+		} else if actual == width {
+			fullWidth = true
+		}
+	}
+	if !fullWidth {
+		t.Fatalf("rendered prose did not use the pane width: %q", plain)
+	}
+}
