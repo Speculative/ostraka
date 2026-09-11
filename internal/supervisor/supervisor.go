@@ -828,6 +828,9 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		return
 	}
 	runStarted = true
+	// The marker makes the working header visible before the provider emits
+	// its first display-worthy event (often after an initial reasoning phase).
+	live.start()
 	if err := clearDispatchError(s.root, msg.itemID); err != nil {
 		s.logger.Printf("item %s: cannot clear previous dispatch error: %v", msg.itemID, err)
 	}

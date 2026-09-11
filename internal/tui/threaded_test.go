@@ -212,6 +212,46 @@ func TestLiveTraceRemovalRepairsConversationBottom(t *testing.T) {
 	}
 }
 
+func TestEmptyLiveTraceShowsWorkingHeader(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := models.Item{
+		ID:      "20260817-041050",
+		Channel: models.ChannelInbox,
+		Type:    models.TypeThread,
+		Status:  models.StatusAgentAcknowledged,
+		Created: time.Date(2026, 8, 17, 4, 10, 50, 0, time.UTC),
+		Title:   "Root",
+		Body:    "body",
+	}
+	if err := store.WriteItem(root, filepath.Join(s.Root, "INBOX", root.ID+".md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(s.Root, "supervisor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.Root, "supervisor", "live-"+root.ID+".txt"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(s, nil, nil)
+	m.width = 100
+	m.height = 20
+	m.showBacklog = true
+	m.backlogVisibilityInitialized = true
+	m = m.recalcLayout()
+	next, _ := m.update(itemsLoadedMsg{
+		allItems: []models.Item{root}, view: channelView(models.ChannelInbox), showBacklog: true,
+	})
+	m = next.(model)
+
+	if m.convLive == 0 || !strings.Contains(m.conv.View(), "agent  ·  working") {
+		t.Fatalf("empty live marker did not render the working header: live=%d view=%q", m.convLive, m.conv.View())
+	}
+}
+
 func TestLiveTraceSurvivesPreAcknowledgementReload(t *testing.T) {
 	s, err := store.NewStore(t.TempDir())
 	if err != nil {

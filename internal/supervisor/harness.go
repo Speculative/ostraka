@@ -159,7 +159,11 @@ type streamEnvelope struct {
 	Type      string `json:"type"`
 	Model     string `json:"model"`
 	SessionID string `json:"session_id"`
-	Message   struct {
+	Event     struct {
+		Type         string       `json:"type"`
+		ContentBlock contentBlock `json:"content_block"`
+	} `json:"event"`
+	Message struct {
 		Model   string         `json:"model"`
 		Content []contentBlock `json:"content"`
 		Usage   claudeUsage    `json:"usage"`
@@ -192,25 +196,7 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID, model, e
 	// per line as the turn runs, rather than a single blob at the end — that
 	// is what makes a live progress view possible. --brief additionally gives
 	// the agent a tool for pushing deliberate updates mid-turn.
-	args := []string{
-		"-p", prompt,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--brief",
-		"--dangerously-skip-permissions",
-	}
-	if sessionID != "" {
-		args = append(args, "--resume", sessionID)
-	} else {
-		// A resumed session keeps whatever model it already started with —
-		// the flag only makes sense on a fresh launch.
-		if model != "" {
-			args = append(args, "--model", model)
-		}
-		if effort != "" {
-			args = append(args, "--effort", effort)
-		}
-	}
+	args := claudeRunArgs(prompt, sessionID, model, effort)
 
 	cmd := exec.CommandContext(ctx, h.bin, args...)
 	detachProcessGroup(cmd)
@@ -281,6 +267,30 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID, model, e
 		return result, fmt.Errorf("claude: turn failed: %s", turnErrorText(result))
 	}
 	return result, nil
+}
+
+func claudeRunArgs(prompt, sessionID, model, effort string) []string {
+	args := []string{
+		"-p", prompt,
+		"--output-format", "stream-json",
+		"--verbose",
+		"--include-partial-messages",
+		"--brief",
+		"--dangerously-skip-permissions",
+	}
+	if sessionID != "" {
+		args = append(args, "--resume", sessionID)
+	} else {
+		// A resumed session keeps whatever model it already started with —
+		// the flag only makes sense on a fresh launch.
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		if effort != "" {
+			args = append(args, "--effort", effort)
+		}
+	}
+	return args
 }
 
 func applyClaudeResultTelemetry(result *TurnResult, raw claudeJSONResult) {
@@ -744,39 +754,53 @@ func parseAppServerEvent(message appServerMessage, result *TurnResult, onEvent f
 				WindowTokens: params.TokenUsage.ModelContextWindow,
 			}
 		}
-	case "item/completed":
+	case "item/started":
 		var params struct {
 			Item struct {
-				Type    string          `json:"type"`
-				Text    string          `json:"text"`
-				Command string          `json:"command"`
-				Name    string          `json:"name"`
-				Input   json.RawMessage `json:"input"`
+				Type      string          `json:"type"`
+				Command   string          `json:"command"`
+				Tool      string          `json:"tool"`
+				Arguments json.RawMessage `json:"arguments"`
 			} `json:"item"`
 		}
-		if json.Unmarshal(message.Params, &params) != nil {
+		if json.Unmarshal(message.Params, &params) != nil || onEvent == nil {
 			return
 		}
 		switch params.Item.Type {
-		case "agentMessage":
-			if text := strings.TrimSpace(params.Item.Text); text != "" {
-				result.ResultText = text
-				if onEvent != nil {
-					onEvent(text)
+		case "reasoning":
+			onEvent("⚙  reasoning")
+		case "commandExecution":
+			if params.Item.Command != "" {
+				onEvent("⚒  shell  " + oneLine(params.Item.Command, 120))
+			}
+		case "mcpToolCall", "dynamicToolCall":
+			if params.Item.Tool != "" {
+				if summary := summarizeToolInput(params.Item.Arguments); summary != "" {
+					onEvent("⚒  " + params.Item.Tool + "  " + summary)
+				} else {
+					onEvent("⚒  " + params.Item.Tool)
 				}
 			}
-		case "commandExecution":
-			if params.Item.Command != "" && onEvent != nil {
-				onEvent("⚒ shell  " + oneLine(params.Item.Command, 120))
-			}
-		default:
-			if params.Item.Name == "" || onEvent == nil {
-				return
-			}
-			if summary := summarizeToolInput(params.Item.Input); summary != "" {
-				onEvent("⚒ " + params.Item.Name + "  " + summary)
-			} else {
-				onEvent("⚒ " + params.Item.Name)
+		}
+	case "item/completed":
+		// Tool calls are reported when item/started arrives, while they are
+		// actually useful as live progress. Re-emitting them here would leave
+		// two identical summaries for every successful call. Agent messages are
+		// complete only at this point and remain both the live narrative and the
+		// turn's final result.
+		var params struct {
+			Item struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(message.Params, &params) != nil || params.Item.Type != "agentMessage" {
+			return
+		}
+		if text := strings.TrimSpace(params.Item.Text); text != "" {
+			result.ResultText = text
+			if onEvent != nil {
+				onEvent(text)
 			}
 		}
 	case "turn/completed":
@@ -854,6 +878,13 @@ func parseClaudeStreamLine(line string, result *TurnResult, onEvent func(string)
 		}
 		return raw, true
 	}
+	if onEvent != nil && env.Type == "stream_event" &&
+		env.Event.Type == "content_block_start" && env.Event.ContentBlock.Type == "thinking" {
+		// Claude normally omits the thinking text, but the block boundary still
+		// gives us a reliable, single signal for each reasoning phase. Ignore
+		// thinking_delta events so an append-only trace does not repeat it.
+		onEvent("⚙  reasoning")
+	}
 
 	if onEvent != nil && env.Type == "assistant" {
 		for _, block := range env.Message.Content {
@@ -874,9 +905,9 @@ func formatBlock(b contentBlock) string {
 		return strings.TrimSpace(b.Text)
 	case "tool_use":
 		if summary := summarizeToolInput(b.Input); summary != "" {
-			return "⚒ " + b.Name + "  " + summary
+			return "⚒  " + b.Name + "  " + summary
 		}
-		return "⚒ " + b.Name
+		return "⚒  " + b.Name
 	}
 	return ""
 }

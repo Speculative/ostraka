@@ -29,6 +29,17 @@ func TestLiveLogAccumulatesWholeLines(t *testing.T) {
 	}
 }
 
+func TestLiveLogStartCreatesEmptyActiveMarker(t *testing.T) {
+	root := newTestRoot(t)
+	l := newLiveLog(root, "item-1")
+
+	l.start()
+	content, active := ReadLiveState(root, "item-1")
+	if !active || content != "" {
+		t.Fatalf("started live state = (%q, %v), want empty active trace", content, active)
+	}
+}
+
 func TestLiveLogSkipsBlankLines(t *testing.T) {
 	root := newTestRoot(t)
 	l := newLiveLog(root, "item-1")
@@ -87,10 +98,16 @@ func TestDispatchWritesAndClearsLiveLog(t *testing.T) {
 
 	s.dispatch(enqueueMsg{itemID: item.ID})
 
+	if !spy.beforeActive {
+		t.Error("live dispatch marker was not active when the harness started")
+	}
 	if !strings.Contains(spy.during, "mid-run line") {
 		t.Errorf("live log during run was %q", spy.during)
 	}
 	if got := ReadLive(s.root, item.ID); got != "" {
 		t.Errorf("live log survived the dispatch: %q", got)
+	}
+	if _, active := ReadLiveState(s.root, item.ID); active {
+		t.Error("empty live marker survived the dispatch")
 	}
 }

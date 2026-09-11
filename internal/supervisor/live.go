@@ -23,11 +23,20 @@ func livePath(root, itemID string) string {
 // not currently being worked on. Errors are reported as "" — a missing or
 // unreadable progress file is not worth surfacing over the conversation.
 func ReadLive(root, itemID string) string {
+	content, _ := ReadLiveState(root, itemID)
+	return content
+}
+
+// ReadLiveState distinguishes an active dispatch that has not emitted its
+// first progress line from an item with no live dispatch. The TUI uses the
+// presence bit to show its working header immediately, even with an empty
+// trace body.
+func ReadLiveState(root, itemID string) (string, bool) {
 	b, err := os.ReadFile(livePath(root, itemID))
 	if err != nil {
-		return ""
+		return "", false
 	}
-	return string(b)
+	return string(b), true
 }
 
 // sweepLive removes every live progress log under root. Only safe to call when
@@ -82,6 +91,15 @@ type liveLog struct {
 
 func newLiveLog(root, itemID string) *liveLog {
 	return &liveLog{path: livePath(root, itemID)}
+}
+
+// start creates the in-flight marker before the provider has any progress
+// content. An empty file is intentional: its presence drives the working
+// header, while append adds the first body line later.
+func (l *liveLog) start() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_ = writeAtomic(l.path, nil)
 }
 
 func (l *liveLog) append(line string) {

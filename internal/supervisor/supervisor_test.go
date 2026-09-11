@@ -711,14 +711,15 @@ func TestDispatchIncludesFinalUserTurnInNudge(t *testing.T) {
 // to exist, and the gap before the first event is where a stale one shows.
 type liveSpyHarness struct {
 	noModelDiscovery
-	root   string
-	itemID string
-	before string
-	during string
+	root         string
+	itemID       string
+	before       string
+	beforeActive bool
+	during       string
 }
 
 func (h *liveSpyHarness) RunTurn(_ context.Context, _ string, _ string, _ string, _ string, onEvent func(string)) (TurnResult, error) {
-	h.before = ReadLive(h.root, h.itemID)
+	h.before, h.beforeActive = ReadLiveState(h.root, h.itemID)
 	if onEvent != nil {
 		onEvent("mid-run line")
 	}

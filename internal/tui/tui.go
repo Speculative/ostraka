@@ -2857,18 +2857,25 @@ func (m *model) updateConv() {
 	// Live progress from an in-flight dispatch, appended below the last real
 	// turn. The completed buffer is retained separately; this block is only the
 	// still-growing run.
-	live := liveTrace(m.store, item)
-	if live != "" {
+	live, liveActive := liveTrace(m.store, item)
+	if liveActive {
 		// Body deliberately unstyled — the default foreground is the one
 		// colour guaranteed readable, since it is what every other line of
 		// the conversation already uses. Dimming it made the live feed
 		// invisible on darker terminals, and the green header already marks
 		// the block as transient without tinting the text under it.
 		sb.WriteString("\n\n" + turnRule + "\n" +
-			liveHeaderStyle.Render("agent  ·  working") + "\n\n" +
-			renderMarkdown(live, w))
+			liveHeaderStyle.Render("agent  ·  working"))
+		if live != "" {
+			sb.WriteString("\n\n" + renderMarkdown(live, w))
+		}
 	}
+	// Include the presence marker so an empty live block appearing or
+	// disappearing participates in the viewport's bottom-follow behavior.
 	m.convLive = len(live)
+	if liveActive {
+		m.convLive++
+	}
 
 	failure := ""
 	if m.sup != nil {
@@ -2890,11 +2897,12 @@ func (m *model) updateConv() {
 // pending-user) status. The supervisor clears the file before a new dispatch
 // and after a finished one, so the file itself is the reliable in-flight
 // marker; status and the previous turn can both be stale during a resume.
-func liveTrace(s *store.Store, item models.Item) string {
+func liveTrace(s *store.Store, item models.Item) (string, bool) {
 	if s == nil {
-		return ""
+		return "", false
 	}
-	return strings.TrimSpace(supervisor.ReadLive(s.Root, item.ID))
+	live, active := supervisor.ReadLiveState(s.Root, item.ID)
+	return strings.TrimSpace(live), active
 }
 
 type conversationEventKind uint8

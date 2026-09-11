@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -126,6 +127,28 @@ func TestParseStreamLineSkipsEmptyThinking(t *testing.T) {
 	}
 }
 
+func TestClaudeRunArgsEnablePartialMessages(t *testing.T) {
+	args := claudeRunArgs("hello", "", "", "")
+	if !strings.Contains(strings.Join(args, " "), "--include-partial-messages") {
+		t.Fatalf("Claude args do not enable reasoning-phase boundaries: %q", args)
+	}
+}
+
+func TestParseClaudeStreamLineEmitsOneIndicatorPerThinkingPhase(t *testing.T) {
+	start := `{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}}`
+	delta := `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}}`
+	var got []string
+	onEvent := func(s string) { got = append(got, s) }
+
+	parseClaudeStreamLine(start, nil, onEvent)
+	parseClaudeStreamLine(delta, nil, onEvent)
+	parseClaudeStreamLine(start, nil, onEvent)
+
+	if !reflect.DeepEqual(got, []string{"⚙  reasoning", "⚙  reasoning"}) {
+		t.Fatalf("reasoning indicators = %q, want one per thinking block start", got)
+	}
+}
+
 func TestSummarizeToolInputPrefersReadableField(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -171,7 +194,7 @@ func TestTruncateCountsRunesNotBytes(t *testing.T) {
 	}
 }
 
-func TestParseAppServerEventTracksUsageAndCompletedItems(t *testing.T) {
+func TestParseAppServerEventTracksUsageStartedToolsAndCompletedMessages(t *testing.T) {
 	var result TurnResult
 	var got []string
 	onEvent := func(s string) { got = append(got, s) }
@@ -181,7 +204,7 @@ func TestParseAppServerEventTracksUsageAndCompletedItems(t *testing.T) {
 		Params: json.RawMessage(`{"tokenUsage":{"last":{"totalTokens":15019},"total":{"totalTokens":150190},"modelContextWindow":258400}}`),
 	}, &result, onEvent)
 	parseAppServerEvent(appServerMessage{
-		Method: "item/completed",
+		Method: "item/started",
 		Params: json.RawMessage(`{"item":{"type":"commandExecution","command":"go test ./..."}}`),
 	}, &result, onEvent)
 	parseAppServerEvent(appServerMessage{
@@ -201,6 +224,93 @@ func TestParseAppServerEventTracksUsageAndCompletedItems(t *testing.T) {
 	}
 	if len(got) != 2 || !strings.Contains(got[0], "go test ./...") || got[1] != "All tests pass." {
 		t.Errorf("live trace = %q", got)
+	}
+}
+
+func TestParseAppServerEventShowsStartedCommandBeforeCompletionWithoutDuplicate(t *testing.T) {
+	var result TurnResult
+	var got []string
+	onEvent := func(s string) { got = append(got, s) }
+	started := appServerMessage{
+		Method: "item/started",
+		Params: json.RawMessage(`{"item":{"id":"cmd-1","type":"commandExecution","command":"sleep 30"}}`),
+	}
+	completed := appServerMessage{
+		Method: "item/completed",
+		Params: json.RawMessage(`{"item":{"id":"cmd-1","type":"commandExecution","command":"sleep 30","status":"completed"}}`),
+	}
+
+	parseAppServerEvent(started, &result, onEvent)
+	if len(got) != 1 || !strings.Contains(got[0], "sleep 30") {
+		t.Fatalf("live trace immediately after start = %q, want the running command", got)
+	}
+	parseAppServerEvent(completed, &result, onEvent)
+	if len(got) != 1 {
+		t.Fatalf("live trace after completion = %q, want no duplicate command", got)
+	}
+}
+
+func TestParseAppServerEventShowsStartedMCPAndDynamicTools(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		itemType string
+		tool     string
+		args     string
+		want     string
+	}{
+		{name: "MCP tool", itemType: "mcpToolCall", tool: "search", args: `{"query":"live progress"}`, want: "search  live progress"},
+		{name: "dynamic tool", itemType: "dynamicToolCall", tool: "deploy", args: `{"path":"staging"}`, want: "deploy  staging"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			params := `{"item":{"type":` + strconv.Quote(tc.itemType) + `,"tool":` + strconv.Quote(tc.tool) + `,"arguments":` + tc.args + `}}`
+			parseAppServerEvent(appServerMessage{Method: "item/started", Params: json.RawMessage(params)}, &TurnResult{}, func(s string) {
+				got = append(got, s)
+			})
+			if len(got) != 1 || !strings.Contains(got[0], tc.want) {
+				t.Fatalf("live trace = %q, want one summary containing %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseAppServerEventShowsOneIndicatorPerReasoningPhase(t *testing.T) {
+	var got []string
+	onEvent := func(s string) { got = append(got, s) }
+	start := appServerMessage{
+		Method: "item/started",
+		Params: json.RawMessage(`{"item":{"id":"reasoning-1","type":"reasoning","summary":[],"content":[]}}`),
+	}
+	completed := appServerMessage{
+		Method: "item/completed",
+		Params: json.RawMessage(`{"item":{"id":"reasoning-1","type":"reasoning","summary":[],"content":[]}}`),
+	}
+
+	parseAppServerEvent(start, &TurnResult{}, onEvent)
+	parseAppServerEvent(completed, &TurnResult{}, onEvent)
+	if !reflect.DeepEqual(got, []string{"⚙  reasoning"}) {
+		t.Fatalf("reasoning indicators = %q, want only the phase start", got)
+	}
+}
+
+func TestParseAppServerEventInterruptedTurnRetainsStartedCommand(t *testing.T) {
+	var result TurnResult
+	var got []string
+	onEvent := func(s string) { got = append(got, s) }
+	parseAppServerEvent(appServerMessage{
+		Method: "item/started",
+		Params: json.RawMessage(`{"item":{"id":"cmd-1","type":"commandExecution","command":"go test ./..."}}`),
+	}, &result, onEvent)
+	parseAppServerEvent(appServerMessage{
+		Method: "turn/completed",
+		Params: json.RawMessage(`{"turn":{"status":"interrupted"}}`),
+	}, &result, onEvent)
+
+	if !result.IsError {
+		t.Fatal("interrupted turn was not marked as unsuccessful")
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "go test ./...") {
+		t.Fatalf("live trace after interruption = %q, want the already-started command", got)
 	}
 }
 
