@@ -53,6 +53,38 @@ func TestLiveLogSkipsBlankLines(t *testing.T) {
 	}
 }
 
+func TestLiveLogCoalescesConsecutiveReasoning(t *testing.T) {
+	root := newTestRoot(t)
+	l := newLiveLog(root, "item-1")
+
+	l.append(reasoningProgress)
+	l.append(reasoningProgress)
+	l.append("tool output")
+	l.append(reasoningProgress)
+	l.append(reasoningProgress)
+
+	want := reasoningProgress + "\ntool output\n" + reasoningProgress + "\n"
+	if got := ReadLive(root, "item-1"); got != want {
+		t.Errorf("got %q, want consecutive reasoning events coalesced as %q", got, want)
+	}
+}
+
+func TestReadLiveSnapshotReportsStableDispatchStart(t *testing.T) {
+	root := newTestRoot(t)
+	l := newLiveLog(root, "item-1")
+	l.start()
+	_, _, startedAt := ReadLiveSnapshot(root, "item-1")
+	l.append("later output")
+
+	content, active, afterAppend := ReadLiveSnapshot(root, "item-1")
+	if !active || content != "later output\n" {
+		t.Fatalf("snapshot = (%q, %v), want active later output", content, active)
+	}
+	if startedAt.IsZero() || !afterAppend.Equal(startedAt) {
+		t.Fatalf("dispatch start changed from %v to %v", startedAt, afterAppend)
+	}
+}
+
 func TestLiveLogClearRemovesTheFile(t *testing.T) {
 	// A leftover log would show a finished run as though it were still going.
 	root := newTestRoot(t)

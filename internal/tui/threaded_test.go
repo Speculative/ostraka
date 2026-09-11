@@ -306,7 +306,14 @@ func TestLiveTraceSurvivesPreAcknowledgementReload(t *testing.T) {
 
 	completed := stale
 	completed.Status = models.StatusPendingUser
-	completed.Turns = []models.Turn{{Actor: models.ActorAgent, Timestamp: root.Created.Add(time.Minute), Content: "reply"}}
+	completed.Turns = append(completed.Turns, models.Turn{Actor: models.ActorAgent, Timestamp: time.Now().UTC(), Content: "reply"})
+	msg.allItems = []models.Item{completed}
+	next, _ = m.update(msg)
+	m = next.(model)
+	if m.convLive != 0 {
+		t.Fatal("live trace remained after a completed agent turn while its marker still existed")
+	}
+
 	if err := os.Remove(livePath); err != nil {
 		t.Fatal(err)
 	}

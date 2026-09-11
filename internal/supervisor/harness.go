@@ -768,7 +768,7 @@ func parseAppServerEvent(message appServerMessage, result *TurnResult, onEvent f
 		}
 		switch params.Item.Type {
 		case "reasoning":
-			onEvent("⚙  reasoning")
+			onEvent(reasoningProgress)
 		case "commandExecution":
 			if params.Item.Command != "" {
 				onEvent("⚒  shell  " + oneLine(params.Item.Command, 120))
@@ -883,7 +883,7 @@ func parseClaudeStreamLine(line string, result *TurnResult, onEvent func(string)
 		// Claude normally omits the thinking text, but the block boundary still
 		// gives us a reliable, single signal for each reasoning phase. Ignore
 		// thinking_delta events so an append-only trace does not repeat it.
-		onEvent("⚙  reasoning")
+		onEvent(reasoningProgress)
 	}
 
 	if onEvent != nil && env.Type == "assistant" {

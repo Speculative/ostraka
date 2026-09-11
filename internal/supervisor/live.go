@@ -5,6 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+)
+
+const (
+	liveStartPrefix   = "\x00ostraka-live-start "
+	reasoningProgress = "⚙  reasoning"
 )
 
 // Live progress is written next to the supervisor's other state rather than
@@ -32,11 +38,39 @@ func ReadLive(root, itemID string) string {
 // presence bit to show its working header immediately, even with an empty
 // trace body.
 func ReadLiveState(root, itemID string) (string, bool) {
+	content, active, _ := ReadLiveSnapshot(root, itemID)
+	return content, active
+}
+
+// ReadLiveSnapshot also returns when the current dispatch started. Consumers
+// use that boundary to distinguish an old persisted turn from the agent turn
+// that completes this dispatch while the provider process is still unwinding.
+func ReadLiveSnapshot(root, itemID string) (string, bool, time.Time) {
 	b, err := os.ReadFile(livePath(root, itemID))
 	if err != nil {
-		return "", false
+		return "", false, time.Time{}
 	}
-	return string(b), true
+	content, startedAt := decodeLiveSnapshot(b)
+	if startedAt.IsZero() {
+		// Compatibility with live files created by older versions.
+		if info, statErr := os.Stat(livePath(root, itemID)); statErr == nil {
+			startedAt = info.ModTime()
+		}
+	}
+	return content, true, startedAt
+}
+
+func decodeLiveSnapshot(b []byte) (string, time.Time) {
+	content := string(b)
+	if !strings.HasPrefix(content, liveStartPrefix) {
+		return content, time.Time{}
+	}
+	lineEnd := strings.IndexByte(content, '\n')
+	if lineEnd < 0 {
+		return "", time.Time{}
+	}
+	startedAt, _ := time.Parse(time.RFC3339Nano, strings.TrimPrefix(content[:lineEnd], liveStartPrefix))
+	return content[lineEnd+1:], startedAt
 }
 
 // sweepLive removes every live progress log under root. Only safe to call when
@@ -71,6 +105,9 @@ func sweepLiveLogs(root string) []sweptLiveLog {
 		name := filepath.Base(path)
 		if readErr != nil {
 			content = nil
+		} else {
+			decoded, _ := decodeLiveSnapshot(content)
+			content = []byte(decoded)
 		}
 		swept = append(swept, sweptLiveLog{
 			id:      strings.TrimSuffix(strings.TrimPrefix(name, "live-"), ".txt"),
@@ -84,9 +121,11 @@ func sweepLiveLogs(root string) []sweptLiveLog {
 // rewrite of an append-only buffer: readers get whole lines rather than a
 // partially-flushed file, which matters because the TUI reloads on any write.
 type liveLog struct {
-	path string
-	mu   sync.Mutex
-	buf  strings.Builder
+	path              string
+	mu                sync.Mutex
+	buf               strings.Builder
+	startedAt         time.Time
+	previousReasoning bool
 }
 
 func newLiveLog(root, itemID string) *liveLog {
@@ -94,12 +133,13 @@ func newLiveLog(root, itemID string) *liveLog {
 }
 
 // start creates the in-flight marker before the provider has any progress
-// content. An empty file is intentional: its presence drives the working
-// header, while append adds the first body line later.
+// content. The snapshot is semantically empty but records its start time so a
+// reader can tell whether a later persisted agent turn belongs to this run.
 func (l *liveLog) start() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_ = writeAtomic(l.path, nil)
+	l.startedAt = time.Now().UTC()
+	_ = writeAtomic(l.path, l.snapshot())
 }
 
 func (l *liveLog) append(line string) {
@@ -109,12 +149,23 @@ func (l *liveLog) append(line string) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if line == reasoningProgress && l.previousReasoning {
+		return
+	}
+	l.previousReasoning = line == reasoningProgress
+	if l.startedAt.IsZero() {
+		l.startedAt = time.Now().UTC()
+	}
 	l.buf.WriteString(line)
 	l.buf.WriteString("\n")
 	// Replace the log atomically. os.WriteFile truncates the existing path
 	// before writing, so the TUI watcher can otherwise observe a brief empty
 	// file between every two live lines and make the trace flicker.
-	_ = writeAtomic(l.path, []byte(l.buf.String()))
+	_ = writeAtomic(l.path, l.snapshot())
+}
+
+func (l *liveLog) snapshot() []byte {
+	return []byte(liveStartPrefix + l.startedAt.Format(time.RFC3339Nano) + "\n" + l.buf.String())
 }
 
 // clear removes the log. Called when a dispatch ends, whichever way it ended:

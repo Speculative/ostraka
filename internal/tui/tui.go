@@ -2951,14 +2951,22 @@ func (m *model) updateConv() {
 // liveTrace is keyed by the ephemeral live file rather than by the item status.
 // A load started just before the supervisor marks an item acknowledged can
 // arrive after the live file exists and still carry the old pending-agent (or
-// pending-user) status. The supervisor clears the file before a new dispatch
-// and after a finished one, so the file itself is the reliable in-flight
-// marker; status and the previous turn can both be stale during a resume.
+// pending-user) status. A newly persisted agent turn is different: the turn
+// command runs before the provider process finishes, so it is the authoritative
+// end of the transient trace even while the live file still exists.
 func liveTrace(s *store.Store, item models.Item) (string, bool) {
 	if s == nil {
 		return "", false
 	}
-	live, active := supervisor.ReadLiveState(s.Root, item.ID)
+	live, active, startedAt := supervisor.ReadLiveSnapshot(s.Root, item.ID)
+	if active && !startedAt.IsZero() {
+		for i := len(item.Turns) - 1; i >= 0; i-- {
+			turn := item.Turns[i]
+			if turn.Actor == models.ActorAgent && !turn.Timestamp.Before(startedAt) {
+				return "", false
+			}
+		}
+	}
 	return strings.TrimSpace(live), active
 }
 
