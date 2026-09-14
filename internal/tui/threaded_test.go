@@ -334,6 +334,7 @@ func TestCancelChildDraftSelectsParent(t *testing.T) {
 	m.allItems = m.items
 	m.selected = len(m.items)
 	m.draft = true
+	m.draftSelected = true
 	m.draftParent = root.ID
 	m.mode = modeTitle
 

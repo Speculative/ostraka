@@ -275,10 +275,14 @@ type model struct {
 	returnDraftRow     int
 	returnDraftCol     int
 
-	// draft marks an unsaved new item occupying a synthetic last row of the
-	// list while its title is typed. selected points one past the real items
-	// for its duration, which the existing range guards already handle.
-	draft bool
+	// draft marks an unwritten new item occupying a synthetic row in the list.
+	// It can remain visible in navigation mode after the editor is closed.
+	// draftSelected distinguishes that row from the real item indexed by
+	// selected, while draftBodyStarted remembers which editor step to resume.
+	draft            bool
+	draftSelected    bool
+	draftBodyStarted bool
+	draftChannel     models.Channel
 	// statusIdx is the cursor into userStatuses while the selector is open.
 	statusIdx int
 	// sessionIdx picks a fresh harness session in the deliberately small v0
@@ -443,7 +447,7 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) mod
 	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(dimFg)
 	ti.KeyMap.DeleteWordBackward.SetKeys("alt+backspace", "ctrl+w")
 	ti.KeyMap.Paste.SetEnabled(false)
-	return model{
+	m := model{
 		store:   s,
 		watchCh: watchCh,
 		sup:     sup,
@@ -460,10 +464,14 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) mod
 		convSelection:  -1,
 		traceExpanded:  make(map[string]bool),
 	}
+	if s != nil {
+		m.restoreNewItemDraft()
+	}
+	return m
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		// Bubble Tea enables this by default, but requesting it explicitly is
 		// important to the TUI contract: terminals then send a whole paste as
 		// one KeyMsg marked Paste instead of dribbling its bytes through the
@@ -471,7 +479,11 @@ func (m model) Init() tea.Cmd {
 		tea.EnableBracketedPaste,
 		loadItemsCmd(m.store, m.view, m.showBacklog),
 		waitForWatch(m.watchCh),
-	)
+	}
+	if m.editingNewItemDraft() {
+		cmds = append(cmds, draftSafetyCheckpoint())
+	}
+	return tea.Batch(cmds...)
 }
 
 // ── update ───────────────────────────────────────────────────────────────────
@@ -519,8 +531,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.view != m.view || (m.backlogVisibilityInitialized && msg.showBacklog != m.showBacklog) {
 			return m, nil
 		}
+		wasDraftSelected := m.draftVisible() && m.draftSelected
 		prevID := m.selectedID()
-		if prevID == "" {
+		if prevID == "" && !wasDraftSelected {
 			prevID = m.selectedByView[m.view]
 		}
 		prevRendered := m.convItemID
@@ -545,9 +558,16 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.items = msg.items
 			m.hiddenBacklog = msg.hiddenBacklog
 		}
+		if m.draftVisible() && len(m.items) == 0 {
+			m.draftSelected = true
+		}
 		wasComposerVisible := m.composerVisible()
-		m.restoreSelection(prevID)
-		if prevID != m.selectedID() {
+		if wasDraftSelected {
+			m.draftSelected = true
+		} else {
+			m.restoreSelection(prevID)
+		}
+		if !wasDraftSelected && prevID != m.selectedID() {
 			// A status change can remove the selected item from this view
 			// (for example, when it is archived). restoreSelection keeps the
 			// cursor on the replacement row, so return navigation to the list
@@ -555,7 +575,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focus = focusItemList
 			m.convSelection = -1
 		}
-		if m.mode == modeNav && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {
+		if m.mode == modeNav && !m.draftSelected && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {
 			m.mode = modeProposal
 		}
 		m.refreshPendingDraft()
@@ -579,7 +599,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// pane, so either can make the bottom move.
 		// A first load, or a reload that landed on a different item, has no
 		// "before" to compare against.
-		sameItem := !m.draft && prevID != "" && m.selectedID() == prevID
+		sameItem := !m.draftSelected && prevID != "" && m.selectedID() == prevID
 		// SetContent clamps an offset only when it is past the last content
 		// line, not when it is past the new viewport bottom. A disappearing
 		// live block can therefore leave blank rows below the reply unless we
@@ -672,13 +692,21 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case draftCheckpointMsg:
-		if m.mode == modeCompose && !m.draft && msg.sequence == m.draftSequence {
-			m.checkpointTurnDraft()
+		if msg.sequence == m.draftSequence {
+			if m.editingNewItemDraft() {
+				m.checkpointNewItemDraft()
+			} else if m.mode == modeCompose && !m.editingProject {
+				m.checkpointTurnDraft()
+			}
 		}
 		return m, nil
 
 	case draftSafetyMsg:
-		if m.mode == modeCompose && !m.draft {
+		if m.editingNewItemDraft() {
+			m.checkpointNewItemDraft()
+			return m, draftSafetyCheckpoint()
+		}
+		if m.mode == modeCompose && !m.editingProject {
 			m.checkpointTurnDraft()
 			return m, draftSafetyCheckpoint()
 		}
@@ -696,7 +724,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case modeTitle:
 				var cmd tea.Cmd
 				m.title, cmd = m.title.Update(msg)
-				return m, cmd
+				return m.scheduleDraftCheckpoint(cmd)
 			}
 			return m, nil
 		}
@@ -784,7 +812,7 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.projectPane == 0 && isSpaceKey(msg) {
-		if m.selected < len(m.items) {
+		if !m.draftSelected && m.selected < len(m.items) {
 			if m.focus == focusReadingPane {
 				m.toggleSelectedTrace()
 				return m, nil
@@ -863,15 +891,9 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	case "j", "down", "shift+down":
-		if m.selected < len(m.items)-1 {
-			m.selected++
-			m.showSelected()
-		}
+		m.moveItemSelection(1)
 	case "k", "up", "shift+up":
-		if m.selected > 0 {
-			m.selected--
-			m.showSelected()
-		}
+		m.moveItemSelection(-1)
 	case "pgdown":
 		m.pageConversation(1)
 	case "pgup":
@@ -893,11 +915,17 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "r":
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
-	case "t":
-		if len(m.items) > 0 && m.items[m.selected].Status != models.StatusProposed {
+	case "t", "enter":
+		if m.draftVisible() && m.draftSelected {
+			return m.activateNewItemDraft()
+		}
+		if m.selected < len(m.items) && m.items[m.selected].Status != models.StatusProposed {
 			return m.openComposer()
 		}
 	case "c":
+		if m.draftVisible() && m.draftSelected {
+			return m.activateNewItemDraft()
+		}
 		if m.view.archive || m.selected >= len(m.items) || m.items[m.selected].Status == models.StatusProposed {
 			return m, nil
 		}
@@ -913,7 +941,7 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// the conversation pane clears to the draft hint.
 		return m.beginNewDraft("")
 	case "s":
-		if m.selected < len(m.items) {
+		if !m.draftSelected && m.selected < len(m.items) {
 			if m.items[m.selected].Status == models.StatusProposed {
 				m.mode = modeProposal
 				return m, nil
@@ -971,17 +999,103 @@ func (m model) handleCopyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) beginNewDraft(parent string) (tea.Model, tea.Cmd) {
+	if m.restoreNewItemDraft() {
+		return m.activateNewItemDraft()
+	}
 	m.draft = true
+	m.draftSelected = true
+	m.draftBodyStarted = false
+	m.draftChannel = m.view.channel
 	m.draftParent = parent
 	m.relatedDraftFrom = ""
 	m.draftItemID = ""
-	m.selected = len(m.items)
 	m.mode = modeTitle
 	m.title.Reset()
 	m.title.Width = m.titleWidth()
 	m.input.Reset()
 	m.updateConv()
-	return m, m.title.Focus()
+	return m, tea.Batch(m.title.Focus(), draftSafetyCheckpoint())
+}
+
+// restoreNewItemDraft resumes the sole unwritten item flow. Keeping its
+// creation context in the draft prevents a child or related item from being
+// silently restored as an unrelated root after a restart.
+func (m *model) restoreNewItemDraft() bool {
+	if m.store == nil {
+		return false
+	}
+	wasSelected := m.draftSelected
+	draft, err := m.store.LoadNewItemDraft()
+	if err != nil {
+		m.err = err
+		return false
+	}
+	if draft.Title == "" && draft.Body == "" && !draft.BodyStarted {
+		return false
+	}
+	if store.ValidateChannel(draft.Channel) != nil {
+		m.err = fmt.Errorf("restore new item draft: unsupported channel %q", draft.Channel)
+		return false
+	}
+	m.draft = true
+	m.draftChannel = draft.Channel
+	m.draftParent = draft.Parent
+	m.relatedDraftFrom = draft.RelatedFrom
+	m.returnDraftItemID = draft.RelatedFrom
+	m.draftItemID = ""
+	m.draftSelected = wasSelected
+	m.title.Reset()
+	m.title.SetValue(draft.Title)
+	m.title.CursorEnd()
+	m.input.Reset()
+	m.input.SetValue(draft.Body)
+	m.input.CursorEnd()
+	m.draftBodyStarted = draft.BodyStarted
+	if draft.RelatedFrom != "" {
+		m.returnDraftContent, err = m.store.LoadDraft(draft.RelatedFrom)
+		if err != nil {
+			m.err = err
+		}
+		m.returnDraftRow = strings.Count(m.returnDraftContent, "\n")
+		if lastNewline := strings.LastIndex(m.returnDraftContent, "\n"); lastNewline >= 0 {
+			m.returnDraftCol = len([]rune(m.returnDraftContent[lastNewline+1:]))
+		} else {
+			m.returnDraftCol = len([]rune(m.returnDraftContent))
+		}
+	}
+	m.mode = modeNav
+	m.title.Blur()
+	m.input.Blur()
+	return true
+}
+
+func (m model) activateNewItemDraft() (tea.Model, tea.Cmd) {
+	m.view = channelView(m.draftChannel)
+	m.draftSelected = true
+	if m.draftBodyStarted {
+		m.mode = modeCompose
+		m.title.Blur()
+		m = m.recalcLayout()
+		m.updateConv()
+		return m, tea.Batch(m.input.Focus(), draftSafetyCheckpoint())
+	}
+	m.mode = modeTitle
+	m.input.Blur()
+	m = m.recalcLayout()
+	m.updateConv()
+	return m, tea.Batch(m.title.Focus(), draftSafetyCheckpoint())
+}
+
+func (m model) editingNewItemDraft() bool {
+	return m.draftVisible() && m.draftSelected && (m.mode == modeTitle || m.mode == modeCompose)
+}
+
+func (m model) newItemDraftBlank() bool {
+	return strings.TrimSpace(m.title.Value()) == "" && strings.TrimSpace(m.input.Value()) == ""
+}
+
+func (m model) draftVisible() bool {
+	return m.draft && !m.view.archive && (m.draftChannel == "" || m.view.channel == m.draftChannel)
 }
 
 func sessionProviderIndex(provider supervisor.Provider) int {
@@ -1024,20 +1138,25 @@ func textareaCursor(ta textarea.Model) (row, col int) {
 
 func (m model) beginRelatedDraft() (tea.Model, tea.Cmd) {
 	m.checkpointTurnDraft()
+	if m.restoreNewItemDraft() {
+		return m.activateNewItemDraft()
+	}
 	m.relatedDraftFrom = m.selectedID()
 	m.returnDraftItemID = m.relatedDraftFrom
 	m.returnDraftContent = m.input.Value()
 	m.returnDraftRow, m.returnDraftCol = textareaCursor(m.input)
 	m.draft = true
+	m.draftSelected = true
+	m.draftBodyStarted = false
+	m.draftChannel = m.view.channel
 	m.draftParent = ""
 	m.draftItemID = ""
-	m.selected = len(m.items)
 	m.mode = modeTitle
 	m.title.Reset()
 	m.title.Width = m.titleWidth()
 	m.input.Reset()
 	m.updateConv()
-	return m, m.title.Focus()
+	return m, tea.Batch(m.title.Focus(), draftSafetyCheckpoint())
 }
 
 func draftSafetyCheckpoint() tea.Cmd {
@@ -1060,6 +1179,16 @@ func statusIndex(s models.Status) int {
 func (m model) handleTitleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		if m.newItemDraftBlank() {
+			m.clearNewItemDraft()
+			m = m.cancelDraft()
+		} else {
+			m.checkpointNewItemDraft()
+			m = m.closeNewItemDraft()
+		}
+		return m, nil
+	case "ctrl+c":
+		m.clearNewItemDraft()
 		m = m.cancelDraft()
 		return m, nil
 	case "enter":
@@ -1067,11 +1196,15 @@ func (m model) handleTitleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil // refuse to advance rather than create a bad item
 		}
 		m.title.Blur()
-		return m.openComposer()
+		m.draftBodyStarted = true
+		next, cmd := m.openComposer()
+		got := next.(model)
+		got.checkpointNewItemDraft()
+		return got, cmd
 	}
 	var cmd tea.Cmd
 	m.title, cmd = m.title.Update(msg)
-	return m, cmd
+	return m.scheduleDraftCheckpoint(cmd)
 }
 
 // commitDraft writes the pending item from the title and the body just typed.
@@ -1085,12 +1218,13 @@ func (m model) commitDraft(body string) model {
 	if m.draftParent != "" {
 		item, err = m.store.CreateSubthread(m.draftParent, m.title.Value(), body, models.TypeThread, models.StatusBacklog)
 	} else {
-		item, err = m.store.CreateItem(m.view.channel, m.title.Value(), body, models.TypeThread, models.StatusBacklog, "")
+		item, err = m.store.CreateItem(m.draftChannel, m.title.Value(), body, models.TypeThread, models.StatusBacklog, "")
 	}
 	if err != nil {
 		m.err = err
-		return m.cancelDraft()
+		return m.closeNewItemDraft()
 	}
+	m.clearNewItemDraft()
 	if m.relatedDraftFrom != "" {
 		if _, err := m.store.AddRelated(item.ID, m.relatedDraftFrom); err != nil {
 			m.err = err
@@ -1099,6 +1233,9 @@ func (m model) commitDraft(body string) model {
 		return m.restoreRelatedComposer(item.ID)
 	}
 	m.draft = false
+	m.draftSelected = false
+	m.draftBodyStarted = false
+	m.draftChannel = ""
 	m.draftParent = ""
 	// Reload synchronously so the new item is selectable in this same frame
 	// rather than after a round trip through loadItemsCmd.
@@ -1114,6 +1251,9 @@ func (m model) cancelDraft() model {
 	}
 	parent := m.draftParent
 	m.draft = false
+	m.draftSelected = false
+	m.draftBodyStarted = false
+	m.draftChannel = ""
 	m.draftParent = ""
 	m.mode = modeNav
 	m.title.Blur()
@@ -1126,8 +1266,23 @@ func (m model) cancelDraft() model {
 	return m
 }
 
+func (m model) closeNewItemDraft() model {
+	m.mode = modeNav
+	m.draftSelected = true
+	m.title.Blur()
+	m.input.Blur()
+	m.focus = focusItemList
+	m.pendingDraftItemID = ""
+	m = m.recalcLayout()
+	m.updateConv()
+	return m
+}
+
 func (m model) restoreRelatedComposer(createdID string) model {
 	m.draft = false
+	m.draftSelected = false
+	m.draftBodyStarted = false
+	m.draftChannel = ""
 	m.draftParent = ""
 	m.relatedDraftFrom = ""
 	m.mode = modeCompose
@@ -1396,7 +1551,7 @@ func (m *model) reload() {
 func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+n":
-		if !m.draft && !m.editingProject && m.selected < len(m.items) && m.items[m.selected].Status != models.StatusProposed {
+		if !m.editingNewItemDraft() && !m.editingProject && m.selected < len(m.items) && m.items[m.selected].Status != models.StatusProposed {
 			return m.beginRelatedDraft()
 		}
 		return m, nil
@@ -1420,12 +1575,13 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showProjectContext()
 			return m, nil
 		}
-		if m.draft {
+		if m.editingNewItemDraft() {
 			// The body is mandatory, so an empty one leaves the draft open
 			// rather than writing a half-item.
 			if content == "" {
 				return m, nil
 			}
+			m.checkpointNewItemDraft()
 			branching := m.relatedDraftFrom != ""
 			m = m.commitDraft(content)
 			if branching {
@@ -1461,9 +1617,6 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.conv.GotoBottom()
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "esc":
-		if m.relatedDraftFrom != "" {
-			return m.restoreRelatedComposer(""), nil
-		}
 		if m.editingProject {
 			m.editingProject = false
 			m.mode = modeNav
@@ -1472,21 +1625,33 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showProjectContext()
 			return m, nil
 		}
-		m.checkpointTurnDraft()
+		if m.editingNewItemDraft() {
+			m.checkpointNewItemDraft()
+		} else {
+			m.checkpointTurnDraft()
+		}
 		m.input.Blur()
-		if m.draft {
-			// Abandoning the body abandons the whole unwritten item.
-			m = m.cancelDraft()
+		if m.editingNewItemDraft() {
+			// Escape closes the flow but preserves it for the next add action or
+			// TUI start. Ctrl+C is the explicit discard action.
+			if m.newItemDraftBlank() {
+				m.clearNewItemDraft()
+				m = m.cancelDraft()
+			} else {
+				m = m.closeNewItemDraft()
+			}
 		}
 		m.mode = modeNav
 		m.draftItemID = ""
 		m = m.recalcLayout()
 		return m, nil
 	case "ctrl+c":
-		if m.relatedDraftFrom != "" {
+		if m.editingNewItemDraft() && m.relatedDraftFrom != "" {
+			m.clearNewItemDraft()
 			return m.restoreRelatedComposer(""), nil
 		}
-		if m.draft {
+		if m.editingNewItemDraft() {
+			m.clearNewItemDraft()
 			m.input.Reset()
 			m.input.Blur()
 			m = m.cancelDraft()
@@ -1537,7 +1702,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	if !m.draft {
+	if m.editingNewItemDraft() || !m.editingProject {
 		m.draftSequence++
 		sequence := m.draftSequence
 		cmd = tea.Batch(cmd, tea.Tick(draftDebounce, func(time.Time) tea.Msg {
@@ -1565,6 +1730,14 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m model) scheduleDraftCheckpoint(cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	m.draftSequence++
+	sequence := m.draftSequence
+	return m, tea.Batch(cmd, tea.Tick(draftDebounce, func(time.Time) tea.Msg {
+		return draftCheckpointMsg{sequence: sequence}
+	}))
+}
+
 func (m *model) checkpointTurnDraft() {
 	if m.draftItemID == "" {
 		return
@@ -1581,6 +1754,32 @@ func (m *model) checkpointTurnDraft() {
 	}
 }
 
+func (m *model) checkpointNewItemDraft() {
+	if !m.editingNewItemDraft() || m.store == nil {
+		return
+	}
+	draft := store.NewItemDraft{
+		Channel:     m.draftChannel,
+		Parent:      m.draftParent,
+		RelatedFrom: m.relatedDraftFrom,
+		Title:       m.title.Value(),
+		Body:        m.input.Value(),
+		BodyStarted: m.mode == modeCompose,
+	}
+	if err := m.store.SaveNewItemDraft(draft); err != nil {
+		m.err = err
+	}
+}
+
+func (m *model) clearNewItemDraft() {
+	if m.store == nil {
+		return
+	}
+	if err := m.store.ClearNewItemDraft(); err != nil {
+		m.err = err
+	}
+}
+
 func (m model) switchView(v listView) (model, tea.Cmd) {
 	if id := m.selectedID(); id != "" {
 		if m.selectedByView == nil {
@@ -1591,6 +1790,7 @@ func (m model) switchView(v listView) (model, tea.Cmd) {
 	m.projectPane = 0
 	m.projectEntries = nil
 	m.view = v
+	m.draftSelected = false
 	m.focus = focusItemList
 	m.convSelection = -1
 	m.selected = 0
@@ -1981,15 +2181,15 @@ func (m model) renderFooter() string {
 		if m.editingProject {
 			text = "ctrl+s save project document  esc cancel"
 		}
-		if m.draft {
-			text = "ctrl+s create item  esc discard draft"
+		if m.editingNewItemDraft() {
+			text = "ctrl+s create item  esc keep draft  ctrl+c discard"
 		} else if m.selected < len(m.items) && !dispatchable(m.items[m.selected].Status) {
 			// Silent submit is the surprising case, so name it rather than
 			// leaving the reader to discover the agent never woke up.
 			text = "ctrl+s save (no dispatch — backlog)  ctrl+n related item  esc cancel  pgup/pgdn scroll"
 		}
 	case modeTitle:
-		text = "enter next (body)  esc cancel"
+		text = "enter next (body)  esc keep draft  ctrl+c discard"
 	case modeStatus:
 		text = "j/k select  enter apply  esc cancel"
 	case modeSession:
@@ -2083,7 +2283,7 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 		return m.renderProjectList(availH)
 	}
 	marker := hiddenBacklogLabel(m.hiddenBacklog)
-	if len(m.items) == 0 && !m.draft {
+	if len(m.items) == 0 && !m.draftVisible() {
 		// A view holding nothing but suppressed rows is not empty, and saying
 		// so would be a lie the toggle can't be discovered from.
 		if marker != "" {
@@ -2099,15 +2299,19 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 	draftRow := m.draftRowIndex()
 	lines := make([]string, 0, len(m.items)+1)
 	for i, item := range m.items {
-		if m.draft && draftRow == i {
-			rowSty := lipgloss.NewStyle().Background(selectedBg).Bold(true)
-			metaSty := lipgloss.NewStyle().Width(colW).Background(selectedBg).Foreground(lipgloss.Color("245"))
+		if m.draftVisible() && draftRow == i {
+			rowSty := lipgloss.NewStyle()
+			metaSty := lipgloss.NewStyle().Width(colW).Foreground(lipgloss.Color("245"))
+			if m.draftSelected {
+				rowSty = rowSty.Background(selectedBg).Bold(true)
+				metaSty = metaSty.Background(selectedBg)
+			}
 			m.title.Width = m.titleWidth()
 			lines = append(lines,
 				renderDraftTitlePrefix(rowSty, colW, m.draftTitlePrefix(), m.title.View())+"\n"+
 					metaSty.Render(m.draftIndent()+"  new item [backlog]"))
 		}
-		isSelected := i == m.selected
+		isSelected := !m.draftSelected && i == m.selected
 		dotFg, hasDot := statusDot(item.Status)
 
 		preview := item.Title
@@ -2163,9 +2367,13 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 
 	// The draft is a synthetic row: it has no file behind it yet, so it is
 	// rendered from the title input rather than from an item.
-	if m.draft && draftRow == len(m.items) {
-		rowSty := lipgloss.NewStyle().Background(selectedBg).Bold(true)
-		metaSty := lipgloss.NewStyle().Width(colW).Background(selectedBg).Foreground(lipgloss.Color("245"))
+	if m.draftVisible() && draftRow == len(m.items) {
+		rowSty := lipgloss.NewStyle()
+		metaSty := lipgloss.NewStyle().Width(colW).Foreground(lipgloss.Color("245"))
+		if m.draftSelected {
+			rowSty = rowSty.Background(selectedBg).Bold(true)
+			metaSty = metaSty.Background(selectedBg)
+		}
 		m.title.Width = m.titleWidth()
 		lines = append(lines,
 			renderDraftTitlePrefix(rowSty, colW, m.draftTitlePrefix(), m.title.View())+"\n"+
@@ -2178,10 +2386,7 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 	if marker != "" {
 		rowBudget--
 	}
-	selectedRow := m.selected
-	if m.draft {
-		selectedRow = draftRow
-	}
+	selectedRow := m.selectedListRow()
 	window, offset, total := windowListRows(lines, m.listOffset, selectedRow, rowBudget)
 	if marker != "" {
 		total++ // the marker row itself, appended below outside the window
@@ -2315,12 +2520,12 @@ func (m model) listRowHeights() []int {
 	heights := make([]int, 0, len(m.items)+1)
 	draftRow := m.draftRowIndex()
 	for i, it := range m.items {
-		if m.draft && draftRow == i {
+		if m.draftVisible() && draftRow == i {
 			heights = append(heights, 2)
 		}
 		heights = append(heights, m.listRowHeight(it))
 	}
-	if m.draft && draftRow == len(m.items) {
+	if m.draftVisible() && draftRow == len(m.items) {
 		heights = append(heights, 2)
 	}
 	return heights
@@ -2393,10 +2598,7 @@ func (m model) ensureListOffsetVisible() int {
 	if n == 0 {
 		return 0
 	}
-	selected := m.selected
-	if m.draft {
-		selected = m.draftRowIndex()
-	}
+	selected := m.selectedListRow()
 	if selected < 0 {
 		selected = 0
 	}
@@ -2429,7 +2631,7 @@ func (m model) ensureListOffsetVisible() int {
 // rows. A child draft follows the complete parent family, so it stays with
 // its siblings even when the parent has more than one child.
 func (m model) draftRowIndex() int {
-	if !m.draft || m.draftParent == "" {
+	if !m.draftVisible() || m.draftParent == "" {
 		return len(m.items)
 	}
 	last := -1
@@ -2607,7 +2809,11 @@ func wrapLine(line string, width int) []string {
 // to reach the part that changed, which is almost never what the reader wants.
 func (m *model) showSelected() {
 	m.convSelection = -1
-	if m.mode == modeNav && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {
+	if m.draftVisible() && m.draftSelected {
+		m.restoreNewItemDraft()
+		m.draftSelected = true
+	}
+	if m.mode == modeNav && !m.draftSelected && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {
 		m.mode = modeProposal
 	}
 	wasComposerVisible := m.composerVisible()
@@ -2626,6 +2832,10 @@ func (m *model) showSelected() {
 // navigation remains active until the user presses t to edit it.
 func (m *model) refreshPendingDraft() {
 	if m.mode == modeCompose || m.store == nil {
+		return
+	}
+	if m.draftVisible() && m.draftSelected {
+		m.pendingDraftItemID = ""
 		return
 	}
 	id := m.selectedID()
@@ -2649,6 +2859,7 @@ func (m *model) refreshPendingDraft() {
 
 func (m model) composerVisible() bool {
 	return m.mode == modeCompose ||
+		(m.draftVisible() && m.draftSelected && m.draftBodyStarted) ||
 		(m.pendingDraftItemID != "" && m.pendingDraftItemID == m.selectedID())
 }
 
@@ -2749,18 +2960,22 @@ func (m *model) updateConv() {
 		m.updateProjectConv()
 		return
 	}
+	if m.draftVisible() && m.draftSelected {
+		m.conv.SetContent("")
+		m.convTurns = 0
+		m.convActivities = 0
+		m.convLive = 0
+		m.convPartials = 0
+		m.convSelection = -1
+		m.convSelectable = nil
+		m.convSelectTop = 0
+		m.convSelectBottom = 0
+		m.convFailure = 0
+		m.convItemID = ""
+		return
+	}
 	if len(m.items) == 0 || m.selected >= len(m.items) {
-		if m.draft {
-			m.conv.SetContent(wrapText(
-				"New item.\n\n"+
-					"1. Title — one line, typed in the list. Enter moves on.\n"+
-					"2. Body — the opening description, any length. ctrl+s creates the item.\n\n"+
-					"Both are required. It starts in backlog, so it won't wake the agent; "+
-					"press s afterwards to move it to active if you want it dispatched.",
-				m.conv.Width))
-		} else {
-			m.conv.SetContent("")
-		}
+		m.conv.SetContent("")
 		m.convTurns = 0
 		m.convActivities = 0
 		m.convLive = 0
@@ -3373,13 +3588,54 @@ func (m model) recalcLayout() model {
 // ── selection helpers ─────────────────────────────────────────────────────────
 
 func (m model) selectedID() string {
-	if m.draft {
+	if m.draftVisible() && m.draftSelected {
 		return ""
 	}
 	if m.selected < len(m.items) {
 		return m.items[m.selected].ID
 	}
 	return ""
+}
+
+func (m model) selectedListRow() int {
+	if m.draftVisible() && (m.draftSelected || len(m.items) == 0) {
+		return m.draftRowIndex()
+	}
+	row := m.selected
+	if m.draftVisible() && row >= m.draftRowIndex() {
+		row++
+	}
+	return row
+}
+
+func (m *model) selectListRow(row int) {
+	if m.draftVisible() && row == m.draftRowIndex() {
+		m.draftSelected = true
+		return
+	}
+	m.draftSelected = false
+	if m.draftVisible() && row > m.draftRowIndex() {
+		row--
+	}
+	if row >= 0 && row < len(m.items) {
+		m.selected = row
+	}
+}
+
+func (m *model) moveItemSelection(delta int) {
+	count := len(m.items)
+	if m.draftVisible() {
+		count++
+	}
+	if count == 0 {
+		return
+	}
+	row := max(0, min(count-1, m.selectedListRow()+delta))
+	if row == m.selectedListRow() {
+		return
+	}
+	m.selectListRow(row)
+	m.showSelected()
 }
 
 func (m model) hasChildren(root string) bool {
@@ -3412,12 +3668,11 @@ func (m *model) restoreSelection(id string) {
 	for i, item := range m.items {
 		if item.ID == id {
 			m.selected = i
+			m.draftSelected = false
 			return
 		}
 	}
-	// A draft deliberately parks selected one past the end; clamping here
-	// would drop the cursor onto a real item and hide the draft.
-	if !m.draft && m.selected >= len(m.items) {
+	if !m.draftSelected && m.selected >= len(m.items) {
 		m.selected = max(0, len(m.items)-1)
 	}
 }

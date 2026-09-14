@@ -1036,17 +1036,16 @@ func TestSelectionSurvivesAnEmptiedView(t *testing.T) {
 	}
 }
 
-func TestDraftKeepsItsRowPastTheEnd(t *testing.T) {
-	// A draft parks selected one past the last item on purpose; clamping it
-	// would drop the cursor onto a real item and hide the draft row.
+func TestSelectedDraftKeepsSelectionAcrossReload(t *testing.T) {
 	items := []models.Item{mkItem("A", models.StatusPendingUser)}
-	m := newSelectionModel(t, items, 1)
+	m := newSelectionModel(t, items, 0)
 	m.draft = true
+	m.draftSelected = true
 
 	got := loadInto(t, m, items)
 
-	if got.selected != 1 {
-		t.Errorf("draft selection moved to %d, want 1 (one past the end)", got.selected)
+	if !got.draftSelected {
+		t.Error("reload moved selection away from the draft")
 	}
 }
 
@@ -1060,15 +1059,16 @@ func TestChildDraftStaysWithItsParentFamily(t *testing.T) {
 	other.Title = "other root"
 
 	m := model{
-		items:       []models.Item{root, child, other},
-		allItems:    []models.Item{root, child, other},
-		selected:    3,
-		draft:       true,
-		draftParent: root.ID,
-		width:       100,
-		height:      40,
-		view:        channelView(models.ChannelInbox),
-		collapsed:   make(map[string]bool),
+		items:         []models.Item{root, child, other},
+		allItems:      []models.Item{root, child, other},
+		selected:      3,
+		draft:         true,
+		draftSelected: true,
+		draftParent:   root.ID,
+		width:         100,
+		height:        40,
+		view:          channelView(models.ChannelInbox),
+		collapsed:     make(map[string]bool),
 	}
 	m.title.SetValue("new child")
 
@@ -1101,6 +1101,7 @@ func TestCancelChildDraftRestoresParentSelection(t *testing.T) {
 	m := newSelectionModel(t, []models.Item{root, child, other}, 3)
 	m.mode = modeTitle
 	m.draft = true
+	m.draftSelected = true
 	m.draftParent = root.ID
 
 	got := m.cancelDraft()

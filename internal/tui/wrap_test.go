@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestWrapTextPreservesShortLines(t *testing.T) {
@@ -348,5 +349,186 @@ func TestDismissingTallTurnDraftKeepsFrameHeight(t *testing.T) {
 	}
 	if got := lipgloss.Height(m.View()); got != m.height {
 		t.Fatalf("dismissed frame height = %d, want terminal height %d", got, m.height)
+	}
+}
+
+func TestNewItemTitleDraftCheckpointsAndRestoresChildContext(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := s.CreateItem(models.ChannelInbox, "parent", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(s, nil, nil)
+	m.items = []models.Item{parent}
+	next, _ := m.beginNewDraft(parent.ID)
+	m = next.(model)
+	next, _ = m.handleTitleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("unfinished child")})
+	m = next.(model)
+	if m.draftSequence == 0 {
+		t.Fatal("title edit did not schedule a draft checkpoint")
+	}
+	next, _ = m.update(draftCheckpointMsg{sequence: m.draftSequence})
+	m = next.(model)
+
+	saved, err := s.LoadNewItemDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Title != "unfinished child" || saved.Parent != parent.ID || saved.BodyStarted {
+		t.Fatalf("saved title draft = %#v", saved)
+	}
+
+	restarted := newModel(s, nil, nil)
+	if !restarted.draft || restarted.mode != modeNav || restarted.draftSelected {
+		t.Fatalf("restored state = draft %v, selected %v, mode %v; want unselected navigation draft", restarted.draft, restarted.draftSelected, restarted.mode)
+	}
+	if restarted.title.Value() != "unfinished child" || restarted.draftParent != parent.ID {
+		t.Fatalf("restored title/context = %q/%q", restarted.title.Value(), restarted.draftParent)
+	}
+}
+
+func TestNewItemBodyDraftEscapePersistsAndCtrlCClears(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(s, nil, nil)
+	next, _ := m.beginNewDraft("")
+	m = next.(model)
+	m.title.SetValue("unfinished root")
+	next, _ = m.handleTitleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	m.input.SetValue("unfinished\nbody")
+	next, _ = m.handleInputKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
+	if m.mode != modeNav || !m.draft || !m.draftSelected {
+		t.Fatalf("state after escape = mode %v, draft %v, selected %v; want selected draft in navigation", m.mode, m.draft, m.draftSelected)
+	}
+	if list, _ := m.renderList(20); !strings.Contains(ansi.Strip(list), "unfinished root") {
+		t.Fatalf("saved draft disappeared from list: %q", ansi.Strip(list))
+	}
+
+	restarted := newModel(s, nil, nil)
+	if !restarted.draft || restarted.mode != modeNav || restarted.draftSelected {
+		t.Fatalf("restored state = draft %v, selected %v, mode %v; want unselected navigation draft", restarted.draft, restarted.draftSelected, restarted.mode)
+	}
+	if restarted.title.Value() != "unfinished root" || restarted.input.Value() != "unfinished\nbody" {
+		t.Fatalf("restored title/body = %q/%q", restarted.title.Value(), restarted.input.Value())
+	}
+	next, _ = restarted.activateNewItemDraft()
+	restarted = next.(model)
+	next, _ = restarted.handleInputKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	restarted = next.(model)
+	if restarted.mode != modeNav || restarted.draft {
+		t.Fatalf("state after ctrl+c = mode %v, draft %v; want navigation", restarted.mode, restarted.draft)
+	}
+	if saved, err := s.LoadNewItemDraft(); err != nil || saved != (store.NewItemDraft{}) {
+		t.Fatalf("draft after ctrl+c = %#v, %v; want zero, nil", saved, err)
+	}
+}
+
+func TestEscapeDiscardsCompletelyBlankNewItem(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(s, nil, nil)
+	next, _ := m.beginNewDraft("")
+	m = next.(model)
+	m.title.SetValue("   ")
+
+	next, _ = m.handleTitleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
+	if m.draft || m.mode != modeNav {
+		t.Fatalf("blank draft after escape = present %v, mode %v; want discarded in navigation", m.draft, m.mode)
+	}
+	if saved, err := s.LoadNewItemDraft(); err != nil || saved != (store.NewItemDraft{}) {
+		t.Fatalf("persisted blank draft = %#v, %v; want zero, nil", saved, err)
+	}
+}
+
+func TestRestoredNewItemDraftDoesNotStealFocusAndIsBlankWhenSelected(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "existing item", "existing body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveNewItemDraft(store.NewItemDraft{
+		Channel:     models.ChannelInbox,
+		Title:       "saved new item",
+		Body:        "saved new body",
+		BodyStarted: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(s, nil, nil)
+	m.items = []models.Item{item}
+	m.allItems = m.items
+	m.width = 100
+	m.height = 30
+	m = m.recalcLayout()
+	m.updateConv()
+	if m.mode != modeNav || m.focus != focusItemList || m.draftSelected {
+		t.Fatalf("startup state = mode %v, focus %v, draft selected %v", m.mode, m.focus, m.draftSelected)
+	}
+	if m.input.Focused() || m.title.Focused() {
+		t.Fatalf("restored draft stole editor focus: body %v, title %v", m.input.Focused(), m.title.Focused())
+	}
+	if !strings.Contains(ansi.Strip(m.conv.View()), "existing body") {
+		t.Fatalf("startup reading pane does not show selected item: %q", ansi.Strip(m.conv.View()))
+	}
+	if list, _ := m.renderList(20); !strings.Contains(ansi.Strip(list), "saved new item") {
+		t.Fatalf("startup list omits saved draft: %q", ansi.Strip(list))
+	}
+
+	m.moveItemSelection(1)
+	if !m.draftSelected || m.mode != modeNav || m.focus != focusItemList {
+		t.Fatalf("draft selection state = selected %v, mode %v, focus %v", m.draftSelected, m.mode, m.focus)
+	}
+	if m.input.Focused() || m.title.Focused() {
+		t.Fatalf("selecting draft focused an editor: body %v, title %v", m.input.Focused(), m.title.Focused())
+	}
+	if got := strings.TrimSpace(ansi.Strip(m.conv.View())); got != "" {
+		t.Fatalf("draft reading pane = %q, want blank", got)
+	}
+	if !m.composerVisible() || m.input.Value() != "saved new body" {
+		t.Fatalf("draft composer = visible %v, body %q", m.composerVisible(), m.input.Value())
+	}
+}
+
+func TestCreatingNewItemClearsDraft(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(s, nil, nil)
+	next, _ := m.beginNewDraft("")
+	m = next.(model)
+	m.title.SetValue("finished item")
+	next, _ = m.handleTitleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	m.input.SetValue("finished body")
+	next, _ = m.handleInputKey(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = next.(model)
+
+	if m.mode != modeNav || m.draft {
+		t.Fatalf("state after submit = mode %v, draft %v; want navigation", m.mode, m.draft)
+	}
+	if saved, err := s.LoadNewItemDraft(); err != nil || saved != (store.NewItemDraft{}) {
+		t.Fatalf("draft after submit = %#v, %v; want zero, nil", saved, err)
+	}
+	items, err := s.ListItems(store.ListOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Title != "finished item" || items[0].Body != "finished body" {
+		t.Fatalf("created items = %#v", items)
 	}
 }
