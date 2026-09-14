@@ -1505,17 +1505,21 @@ func (m model) handleProposalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// statusDot gives the colour of an item's list marker, and whether it has one
-// at all. Only the two statuses that mean "something is happening" are marked:
-// a dot on every row would carry no information.
-func statusDot(s models.Status) (lipgloss.Color, bool) {
+// statusIndicator gives the glyph and colour of an item's list marker. Active
+// hand-offs use filled dots; queued and parked items use outlined dots so they
+// keep their place in the icon column without looking active.
+func statusIndicator(s models.Status) (string, lipgloss.Color, bool) {
 	switch s {
 	case models.StatusPendingUser:
-		return pendingFg, true // your turn
+		return "●", pendingFg, true // your turn
 	case models.StatusAgentAcknowledged:
-		return workingFg, true // agent is on it
+		return "●", workingFg, true // agent is on it
+	case models.StatusPendingAgent:
+		return "○", workingFg, true // queued for the agent
+	case models.StatusBacklog:
+		return "○", dimFg, true // parked
 	}
-	return "", false
+	return "", "", false
 }
 
 // wakesAgent reports whether moving an item *into* this status is a request
@@ -2312,7 +2316,7 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 					metaSty.Render(m.draftIndent()+"  new item [backlog]"))
 		}
 		isSelected := !m.draftSelected && i == m.selected
-		dotFg, hasDot := statusDot(item.Status)
+		indicator, indicatorFg, hasIndicator := statusIndicator(item.Status)
 
 		preview := item.Title
 		indent := ""
@@ -2346,16 +2350,16 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 		var parts []string
 		for j, pl := range previewLines {
 			prefix := indent + "  "
-			if j == 0 && hasDot {
-				prefix = indent + "● "
+			if j == 0 && hasIndicator {
+				prefix = indent + indicator + " "
 				if isSelected {
-					// Apply the dot colour directly in the style rather than via
+					// Apply the icon colour directly in the style rather than via
 					// an embedded ANSI string that would clobber the background.
 					parts = append(parts, lipgloss.NewStyle().Width(colW).Background(selectedBg).Bold(true).
-						Foreground(dotFg).Render(prefix+pl))
+						Foreground(indicatorFg).Render(prefix+pl))
 				} else {
 					parts = append(parts, rowLineSty.Render(
-						lipgloss.NewStyle().Foreground(dotFg).Render(prefix)+pl))
+						lipgloss.NewStyle().Foreground(indicatorFg).Render(prefix)+pl))
 				}
 				continue
 			}
@@ -2688,7 +2692,7 @@ func renderStyledANSI(style lipgloss.Style, text string) string {
 // other row in the list.
 const previewMaxLines = 2
 
-// badgeW is the width of the status-dot prefix ("● " or "  ") that precedes
+// badgeW is the width of the status-icon prefix (for example, "● " or "○ ") that precedes
 // each row's text, shared between renderList and the offset-tracking helpers
 // below so both agree on how much width wraps the preview.
 const badgeW = 2

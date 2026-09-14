@@ -1050,12 +1050,12 @@ func TestSelectedDraftKeepsSelectionAcrossReload(t *testing.T) {
 }
 
 func TestChildDraftStaysWithItsParentFamily(t *testing.T) {
-	root := mkItem("root", models.StatusActive)
+	root := mkItem("root", models.StatusPendingAgent)
 	root.Title = "root title"
 	child := mkItem("child", models.StatusBacklog)
 	child.Parent = root.ID
 	child.Title = "existing child"
-	other := mkItem("other", models.StatusActive)
+	other := mkItem("other", models.StatusBacklog)
 	other.Title = "other root"
 
 	m := model{
@@ -1089,6 +1089,15 @@ func TestChildDraftStaysWithItsParentFamily(t *testing.T) {
 	}
 	if !strings.Contains(plain, "├─ › new child") {
 		t.Fatalf("child draft is not indented as a subthread: %q", plain)
+	}
+	if !strings.Contains(plain, "○ ▾ root title") {
+		t.Fatalf("pending-agent root is missing its outlined indicator: %q", plain)
+	}
+	if !strings.Contains(plain, "├─ ○ existing child") {
+		t.Fatalf("backlog child is missing its neutral indicator: %q", plain)
+	}
+	if !strings.Contains(plain, "○ other root") {
+		t.Fatalf("backlog root is missing its neutral indicator: %q", plain)
 	}
 }
 

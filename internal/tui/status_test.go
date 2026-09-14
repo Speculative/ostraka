@@ -140,31 +140,41 @@ func TestAwaitingAgentReadsTheLastTurn(t *testing.T) {
 	}
 }
 
-func TestStatusDotMarksOnlyLiveStates(t *testing.T) {
+func TestStatusIndicatorMarksLiveAndBacklogStates(t *testing.T) {
 	for _, tc := range []struct {
 		status models.Status
 		want   bool
 	}{
 		{models.StatusPendingUser, true},       // your turn
 		{models.StatusAgentAcknowledged, true}, // agent is on it
-		// Everything else is at rest: a dot on every row carries no signal.
-		{models.StatusBacklog, false},
+		{models.StatusPendingAgent, true},      // queued for the agent
+		{models.StatusBacklog, true},           // parked
 		{models.StatusActive, false},
-		{models.StatusPendingAgent, false},
 		{models.StatusArchived, false},
 	} {
-		if _, got := statusDot(tc.status); got != tc.want {
-			t.Errorf("statusDot(%q) marked = %v, want %v", tc.status, got, tc.want)
+		if _, _, got := statusIndicator(tc.status); got != tc.want {
+			t.Errorf("statusIndicator(%q) marked = %v, want %v", tc.status, got, tc.want)
 		}
 	}
 }
 
-func TestStatusDotColoursDifferByOwner(t *testing.T) {
+func TestStatusIndicatorStylesDistinguishMeaning(t *testing.T) {
 	// The two marked states mean opposite things; sharing a colour would make
 	// "waiting on you" and "agent working" indistinguishable at a glance.
-	yours, _ := statusDot(models.StatusPendingUser)
-	theirs, _ := statusDot(models.StatusAgentAcknowledged)
+	liveGlyph, yours, _ := statusIndicator(models.StatusPendingUser)
+	_, theirs, _ := statusIndicator(models.StatusAgentAcknowledged)
 	if yours == theirs {
 		t.Errorf("both dots render as %q", yours)
+	}
+	backlogGlyph, backlogColour, _ := statusIndicator(models.StatusBacklog)
+	if liveGlyph != "●" || backlogGlyph != "○" {
+		t.Errorf("live glyph = %q, backlog glyph = %q", liveGlyph, backlogGlyph)
+	}
+	queuedGlyph, queuedColour, _ := statusIndicator(models.StatusPendingAgent)
+	if queuedGlyph != "○" || queuedColour != workingFg {
+		t.Errorf("queued indicator = (%q, %q), want outlined green", queuedGlyph, queuedColour)
+	}
+	if backlogColour != dimFg {
+		t.Errorf("backlog colour = %q, want neutral %q", backlogColour, dimFg)
 	}
 }
