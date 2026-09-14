@@ -817,8 +817,16 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.toggleSelectedTrace()
 				return m, nil
 			}
-			root := rootID(m.items[m.selected])
-			m.collapsed[root] = !m.collapsed[root]
+			selected := m.items[m.selected]
+			root := rootID(selected)
+			rootItem := selected
+			for _, item := range m.items {
+				if item.ID == root {
+					rootItem = item
+					break
+				}
+			}
+			m.collapsed[root] = !m.view.familyCollapsed(rootItem, m.collapsed)
 			m.reload()
 			m.restoreSelection(root)
 			m.updateConv()
@@ -2325,7 +2333,7 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 		} else if m.hasChildren(item.ID) {
 			open, done := familyCounts(item, m.allItems)
 			chevron := "▾"
-			if m.collapsed[item.ID] {
+			if m.view.familyCollapsed(item, m.collapsed) {
 				chevron = "▸"
 			}
 			preview = fmt.Sprintf("%s %s (%d open, %d done)", chevron, preview, open, done)
@@ -2553,7 +2561,11 @@ func (m model) listRowHeight(item models.Item) int {
 		indent = "  ├─ "
 	} else if m.hasChildren(item.ID) {
 		open, done := familyCounts(item, m.allItems)
-		preview = fmt.Sprintf("▾ %s (%d open, %d done)", preview, open, done)
+		chevron := "▾"
+		if m.view.familyCollapsed(item, m.collapsed) {
+			chevron = "▸"
+		}
+		preview = fmt.Sprintf("%s %s (%d open, %d done)", chevron, preview, open, done)
 	}
 	textW = max(1, textW-lipgloss.Width(indent))
 	return len(truncateLines(wordWrap(preview, textW), previewMaxLines, textW)) + 1

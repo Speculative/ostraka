@@ -134,8 +134,10 @@ func (v listView) prepareGrouped(all []models.Item, showBacklog bool, collapsed 
 		}
 	}
 	visible := make(map[string]models.Item)
+	byID := make(map[string]models.Item, len(all))
 	hidden := 0
 	for _, item := range all {
+		byID[item.ID] = item
 		if v.includes(item, showBacklog) {
 			visible[item.ID] = item
 		} else if !showBacklog && v.includes(item, true) {
@@ -148,30 +150,39 @@ func (v listView) prepareGrouped(all []models.Item, showBacklog bool, collapsed 
 		groups[rootID(item)] = append(groups[rootID(item)], item)
 	}
 	type itemFamily struct {
-		key     string
-		root    models.Item
-		members []models.Item
-		hasRoot bool
+		key         string
+		root        models.Item
+		members     []models.Item
+		rootVisible bool
+		ghost       bool
 	}
 	families := make([]itemFamily, 0, len(groups))
 	for id, family := range groups {
-		root, hasRoot := visible[id]
-		if !hasRoot {
-			// A terminal child can be visible in the archive while its live
-			// parent remains in the inbox. There is no parent row to render in
-			// this view, so keep every child as a detached row. Using the first
-			// child as a fake root loses its siblings and makes folding use the
-			// wrong ID.
-			root = family[0]
+		root, rootVisible := visible[id]
+		ghost := false
+		if !rootVisible {
+			if parent, ok := byID[id]; v.archive && ok {
+				// Keep archived children under a display-only copy of their live
+				// parent. The parent still belongs to its channel; this ghost only
+				// supplies the archive family heading and stable folding key.
+				root = parent
+				ghost = true
+			} else {
+				// A dangling parent reference has no useful heading to render.
+				// Keep every child reachable as a detached archive row.
+				root = family[0]
+			}
 		}
-		families = append(families, itemFamily{key: id, root: root, members: family, hasRoot: hasRoot})
+		families = append(families, itemFamily{
+			key: id, root: root, members: family, rootVisible: rootVisible, ghost: ghost,
+		})
 	}
 	sort.SliceStable(families, func(i, j int) bool {
-		ri, rj := familyRank(families[i].key, families[i].root, all), familyRank(families[j].key, families[j].root, all)
+		ri, rj := v.familyRank(families[i].key, families[i].root, families[i].members, all), v.familyRank(families[j].key, families[j].root, families[j].members, all)
 		if ri != rj {
 			return ri < rj
 		}
-		ai, aj := familyActivity(families[i].key, families[i].root, all), familyActivity(families[j].key, families[j].root, all)
+		ai, aj := v.familyActivity(families[i].key, families[i].root, families[i].members, all), v.familyActivity(families[j].key, families[j].root, families[j].members, all)
 		if !ai.Equal(aj) {
 			return ai.After(aj)
 		}
@@ -187,18 +198,17 @@ func (v listView) prepareGrouped(all []models.Item, showBacklog bool, collapsed 
 			}
 			return members[i].ID < members[j].ID
 		})
-		if !family.hasRoot {
-			// The parent is outside this view. Do not imply that one child is
-			// the parent of its siblings; all terminal members remain directly
-			// selectable in the archive.
+		if !family.rootVisible && !family.ghost {
+			// The parent is absent, rather than merely outside this view. Do not
+			// imply that one child is the parent of its siblings.
 			for _, member := range members {
 				member.Parent = ""
 				out = append(out, member)
 			}
 			continue
 		}
-		out = append(out, visible[family.root.ID])
-		if collapsed[family.key] {
+		out = append(out, family.root)
+		if v.familyCollapsed(family.root, collapsed) {
 			continue
 		}
 		for _, child := range members {
@@ -210,7 +220,20 @@ func (v listView) prepareGrouped(all []models.Item, showBacklog bool, collapsed 
 	return out, hidden
 }
 
-func familyRank(key string, root models.Item, all []models.Item) int {
+// familyCollapsed gives archived roots a tidy default while retaining an
+// explicit false value after the user expands one. Ghost roots are live, so
+// they default open and expose the archived children they stand in for.
+func (v listView) familyCollapsed(root models.Item, collapsed map[string]bool) bool {
+	if folded, set := collapsed[root.ID]; set {
+		return folded
+	}
+	return v.archive && models.TerminalStatuses[root.Status]
+}
+
+func (v listView) familyRank(key string, root models.Item, visible, all []models.Item) int {
+	if v.archive {
+		return memberRank(visible)
+	}
 	rank := rankOf(root.Status)
 	for _, item := range all {
 		if rootID(item) == key && rankOf(item.Status) < rank {
@@ -220,7 +243,26 @@ func familyRank(key string, root models.Item, all []models.Item) int {
 	return rank
 }
 
-func familyActivity(key string, root models.Item, all []models.Item) time.Time {
+func memberRank(items []models.Item) int {
+	rank := len(statusRank)
+	for _, item := range items {
+		if rankOf(item.Status) < rank {
+			rank = rankOf(item.Status)
+		}
+	}
+	return rank
+}
+
+func (v listView) familyActivity(key string, root models.Item, visible, all []models.Item) time.Time {
+	if v.archive {
+		latest := time.Time{}
+		for _, item := range visible {
+			if lastActivity(item).After(latest) {
+				latest = lastActivity(item)
+			}
+		}
+		return latest
+	}
 	latest := lastActivity(root)
 	for _, item := range all {
 		if rootID(item) == key && lastActivity(item).After(latest) {

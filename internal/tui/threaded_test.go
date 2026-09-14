@@ -40,19 +40,22 @@ func TestPrepareGroupedDetachesChildWhenParentIsOutsideView(t *testing.T) {
 	}
 }
 
-func TestPrepareGroupedArchiveKeepsAllChildrenWhenRootIsOutsideView(t *testing.T) {
+func TestPrepareGroupedArchiveGhostsLiveRootForArchivedChildren(t *testing.T) {
 	created := time.Date(2026, 8, 17, 5, 0, 0, 0, time.UTC)
 	root := models.Item{ID: "root", Channel: models.ChannelInbox, Status: models.StatusActive, Created: created, Title: "Root"}
 	first := models.Item{ID: "first", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(time.Minute), Title: "First"}
 	second := models.Item{ID: "second", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(2 * time.Minute), Title: "Second"}
 
 	items, _ := archiveView.prepareGrouped([]models.Item{root, second, first}, false, nil)
-	if len(items) != 2 || items[0].ID != first.ID || items[1].ID != second.ID {
-		t.Fatalf("archived children = %+v, want both children in creation order", items)
+	if len(items) != 3 || items[0].ID != root.ID || items[1].ID != first.ID || items[2].ID != second.ID {
+		t.Fatalf("archived family = %+v, want ghost root followed by both children", items)
 	}
-	for _, item := range items {
-		if item.Parent != "" {
-			t.Errorf("child %q retained invisible parent %q", item.ID, item.Parent)
+	if items[0].Status != models.StatusActive {
+		t.Fatalf("ghost root status = %q, want unchanged live status", items[0].Status)
+	}
+	for _, item := range items[1:] {
+		if item.Parent != root.ID {
+			t.Errorf("child %q parent = %q, want %q", item.ID, item.Parent, root.ID)
 		}
 	}
 }
@@ -64,13 +67,30 @@ func TestPrepareGroupedArchiveExpandsArchivedFamily(t *testing.T) {
 	second := models.Item{ID: "second", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(2 * time.Minute), Title: "Second"}
 	all := []models.Item{root, second, first}
 
-	items, _ := archiveView.prepareGrouped(all, false, nil)
+	items, _ := archiveView.prepareGrouped(all, false, map[string]bool{root.ID: false})
 	if len(items) != 3 || items[0].ID != root.ID || items[1].ID != first.ID || items[2].ID != second.ID {
 		t.Fatalf("expanded archived family = %+v, want root followed by both children", items)
 	}
-	items, _ = archiveView.prepareGrouped(all, false, map[string]bool{root.ID: true})
+	items, _ = archiveView.prepareGrouped(all, false, nil)
 	if len(items) != 1 || items[0].ID != root.ID {
-		t.Fatalf("collapsed archived family = %+v, want root only", items)
+		t.Fatalf("default collapsed archived family = %+v, want root only", items)
+	}
+}
+
+func TestPrepareGroupedArchiveDoesNotTreatRelatedRootAsChild(t *testing.T) {
+	created := time.Date(2026, 8, 17, 5, 0, 0, 0, time.UTC)
+	root := models.Item{ID: "root", Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created, Title: "Root", Related: []string{"related"}}
+	child := models.Item{ID: "child", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(time.Minute), Title: "Child"}
+	related := models.Item{ID: "related", Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(2 * time.Minute), Title: "Related", Related: []string{root.ID}}
+
+	items, _ := archiveView.prepareGrouped([]models.Item{root, child, related}, false, nil)
+	if len(items) != 2 {
+		t.Fatalf("default collapsed archive = %+v, want two root rows", items)
+	}
+	for _, item := range items {
+		if item.Parent != "" {
+			t.Fatalf("related archive root %q rendered as child of %q", item.ID, item.Parent)
+		}
 	}
 }
 
