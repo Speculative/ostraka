@@ -3037,6 +3037,13 @@ const (
 func (m *model) animateConversationTo(target int) tea.Cmd {
 	maxOffset := max(0, m.conv.TotalLineCount()-m.conv.Height)
 	target = max(0, min(target, maxOffset))
+	// Repeated page keys can run beyond the document boundary while the
+	// viewport is still catching up. Once clamped, they all name the same
+	// destination; keep the existing deadline instead of asymptotically
+	// restarting the final few lines on every key-repeat event.
+	if m.conversationScrollActive && target == m.conversationScrollTarget {
+		return nil
+	}
 	m.conversationScrollGeneration++
 	m.conversationScrollTarget = target
 	m.conversationScrollActive = false

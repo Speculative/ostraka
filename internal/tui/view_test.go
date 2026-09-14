@@ -1040,6 +1040,36 @@ func TestRepeatedPageKeyAccumulatesFromPendingTarget(t *testing.T) {
 	}
 }
 
+func TestRepeatedPageKeyAtBoundaryKeepsExistingAnimation(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.conv.Height = 20
+	m.conv.SetContent(strings.Repeat("line\n", 100))
+	maxOffset := m.conv.TotalLineCount() - m.conv.Height
+	m.conv.SetYOffset(maxOffset - 15)
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = next.(model)
+	next, activeCmd := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = next.(model)
+	if m.conversationScrollTarget != maxOffset {
+		t.Fatalf("pending target = %d, want bottom %d", m.conversationScrollTarget, maxOffset)
+	}
+	generation := m.conversationScrollGeneration
+
+	next, replacementCmd := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = next.(model)
+	if replacementCmd != nil {
+		t.Fatal("repeated PgDn at the pending bottom replaced the animation")
+	}
+	if m.conversationScrollGeneration != generation {
+		t.Fatal("repeated PgDn at the pending bottom restarted the deadline")
+	}
+	m = finishConversationScroll(m, activeCmd)
+	if got := m.conv.YOffset; got != maxOffset {
+		t.Fatalf("boundary animation finished at %d, want %d", got, maxOffset)
+	}
+}
+
 func TestRepeatedBoundaryKeyDoesNotCancelConversationCatchUp(t *testing.T) {
 	m := newModel(nil, nil, nil)
 	m.conv.Height = 20
