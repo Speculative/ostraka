@@ -835,29 +835,29 @@ func TestPageKeysScrollConversationByHalfAPane(t *testing.T) {
 
 	tests := []struct {
 		name string
-		page func(model, tea.KeyMsg) model
+		page func(model, tea.KeyMsg) (model, tea.Cmd)
 	}{
 		{
 			name: "item navigation",
-			page: func(m model, key tea.KeyMsg) model {
-				next, _ := m.handleNavKey(key)
-				return next.(model)
+			page: func(m model, key tea.KeyMsg) (model, tea.Cmd) {
+				next, cmd := m.handleNavKey(key)
+				return next.(model), cmd
 			},
 		},
 		{
 			name: "project navigation",
-			page: func(m model, key tea.KeyMsg) model {
+			page: func(m model, key tea.KeyMsg) (model, tea.Cmd) {
 				m.projectPane = 1
-				next, _ := m.handleNavKey(key)
-				return next.(model)
+				next, cmd := m.handleNavKey(key)
+				return next.(model), cmd
 			},
 		},
 		{
 			name: "turn composer",
-			page: func(m model, key tea.KeyMsg) model {
+			page: func(m model, key tea.KeyMsg) (model, tea.Cmd) {
 				m.mode = modeCompose
-				next, _ := m.handleInputKey(key)
-				return next.(model)
+				next, cmd := m.handleInputKey(key)
+				return next.(model), cmd
 			},
 		},
 	}
@@ -869,15 +869,185 @@ func TestPageKeysScrollConversationByHalfAPane(t *testing.T) {
 			m.conv.SetContent(strings.Repeat("line\n", 100))
 			m.conv.SetYOffset(30)
 
-			m = tt.page(m, keyDown)
+			var cmd tea.Cmd
+			m, cmd = tt.page(m, keyDown)
+			if got := m.conv.YOffset; got != 31 {
+				t.Fatalf("first PgDn frame offset = %d, want 31", got)
+			}
+			m = finishConversationScroll(m, cmd)
 			if got := m.conv.YOffset; got != 40 {
 				t.Fatalf("PgDn offset = %d, want 40", got)
 			}
-			m = tt.page(m, keyUp)
+			m, cmd = tt.page(m, keyUp)
+			m = finishConversationScroll(m, cmd)
 			if got := m.conv.YOffset; got != 30 {
 				t.Errorf("PgUp offset = %d, want 30", got)
 			}
 		})
+	}
+}
+
+func finishConversationScroll(m model, cmd tea.Cmd) model {
+	for cmd != nil {
+		next, nextCmd := m.Update(cmd())
+		m = next.(model)
+		cmd = nextCmd
+	}
+	return m
+}
+
+func TestOpposingPageKeySupersedesConversationScrollAnimation(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.conv.Height = 20
+	m.conv.SetContent(strings.Repeat("line\n", 100))
+	m.conv.SetYOffset(30)
+
+	next, staleCmd := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = next.(model)
+	if got := m.conv.YOffset; got != 31 {
+		t.Fatalf("first PgDn frame offset = %d, want 31", got)
+	}
+	next, currentCmd := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = next.(model)
+	if got := m.conv.YOffset; got != 30 {
+		t.Fatalf("first reversing PgUp frame offset = %d, want 30", got)
+	}
+
+	next, _ = m.Update(staleCmd())
+	m = next.(model)
+	if got := m.conv.YOffset; got != 30 {
+		t.Fatalf("stale PgDn tick changed offset to %d, want 30", got)
+	}
+	m = finishConversationScroll(m, currentCmd)
+	if got := m.conv.YOffset; got != 30 {
+		t.Fatalf("reversing PgUp finished at %d, want original offset 30", got)
+	}
+}
+
+func TestConversationScrollInterpolatesFromElapsedTime(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.conv.Height = 20
+	m.conv.SetContent(strings.Repeat("line\n", 100))
+	m.conv.SetYOffset(31) // the immediate first frame already moved from 30
+	m.conversationScrollGeneration = 1
+	startedAt := time.Unix(100, 0)
+
+	next, _ := m.Update(conversationScrollMsg{
+		origin: 30, target: 50, startedAt: startedAt,
+		now: startedAt.Add(20 * time.Millisecond), duration: 50 * time.Millisecond, generation: 1,
+	})
+	if got := next.(model).conv.YOffset; got != 38 {
+		t.Fatalf("offset after 20ms = %d, want elapsed-time position 38", got)
+	}
+}
+
+func TestConversationScrollDurationScalesAndCapsWithDistance(t *testing.T) {
+	tests := []struct {
+		distance int
+		want     time.Duration
+	}{
+		{distance: 1, want: 50 * time.Millisecond},
+		{distance: -10, want: 77 * time.Millisecond},
+		{distance: 20, want: 107 * time.Millisecond},
+		{distance: 100, want: 150 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		if got := conversationScrollDurationFor(tt.distance); got != tt.want {
+			t.Errorf("duration for %d lines = %s, want %s", tt.distance, got, tt.want)
+		}
+	}
+}
+
+func TestRepeatedPageKeyAccumulatesFromPendingTarget(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.conv.Height = 20
+	m.conv.SetContent(strings.Repeat("line\n", 100))
+	m.conv.SetYOffset(30)
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = next.(model)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = finishConversationScroll(next.(model), cmd)
+	if got := m.conv.YOffset; got != 50 {
+		t.Fatalf("two PgDn animations finished at %d, want accumulated target 50", got)
+	}
+}
+
+func TestRepeatedBoundaryKeyDoesNotCancelConversationCatchUp(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.conv.Height = 20
+	m.conv.SetContent(strings.Repeat("line\n", 100))
+	m.conv.SetYOffset(30)
+	m.focus = focusReadingPane
+	m.convSelectable = []conversationEvent{{kind: conversationTurn}}
+	m.convSelection = 0
+
+	cmd := m.animateConversationTo(60)
+	next, replacementCmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(model)
+	if replacementCmd != nil {
+		t.Fatal("Down at the final selection unexpectedly started another command")
+	}
+	m = finishConversationScroll(m, cmd)
+	if got := m.conv.YOffset; got != 60 {
+		t.Fatalf("catch-up stopped at %d after repeated boundary key, want 60", got)
+	}
+}
+
+func TestSelectionChangeCancelsPriorConversationTarget(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.conv.Height = 20
+	m.conv.SetContent(strings.Repeat("line\n", 100))
+	m.conv.SetYOffset(30)
+	m.focus = focusReadingPane
+	m.convSelectable = []conversationEvent{
+		{kind: conversationTurn},
+		{kind: conversationTurn},
+	}
+	m.convSelection = 0
+
+	staleCmd := m.animateConversationTo(60)
+	staleGeneration := m.conversationScrollGeneration
+	m.moveConversationSelection(1)
+	if m.conversationScrollGeneration == staleGeneration {
+		t.Fatal("selection change did not invalidate the prior scroll")
+	}
+	if m.conversationScrollActive {
+		t.Fatal("selection change with no replacement target left scrolling active")
+	}
+	next, _ := m.Update(staleCmd())
+	if got := next.(model).conv.YOffset; got != m.conv.YOffset {
+		t.Fatalf("stale selection tick changed offset from %d to %d", m.conv.YOffset, got)
+	}
+}
+
+func TestRapidConversationSelectionKeepsSelectionInViewport(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.items = []models.Item{{
+		ID: "one", Channel: models.ChannelInbox, Status: models.StatusActive,
+		Title: "one",
+		Turns: []models.Turn{
+			{Actor: models.ActorUser, Timestamp: t0, Content: strings.Repeat("long first turn\n", 20)},
+			{Actor: models.ActorAgent, Timestamp: t0.Add(time.Minute), Content: "second turn"},
+		},
+	}}
+	m.selected = 0
+	m.conv.Width = 70
+	m.conv.Height = 8
+	m.convSelection = 0
+	m.updateConv()
+	m.conv.GotoTop()
+	m.conversationSelectionMovedAt = time.Now()
+
+	cmd := m.moveConversationSelection(1)
+	if cmd != nil {
+		t.Fatal("rapid selection change started an animation")
+	}
+	if m.convSelectTop < m.conv.YOffset || m.convSelectBottom > m.conv.YOffset+m.conv.Height {
+		t.Fatalf(
+			"selected entry [%d,%d) is outside viewport [%d,%d)",
+			m.convSelectTop, m.convSelectBottom, m.conv.YOffset, m.conv.YOffset+m.conv.Height,
+		)
 	}
 }
 

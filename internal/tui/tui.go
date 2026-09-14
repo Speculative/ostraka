@@ -39,6 +39,14 @@ type watchEventMsg struct{}
 type errMsg error
 type draftCheckpointMsg struct{ sequence int }
 type draftSafetyMsg struct{}
+type conversationScrollMsg struct {
+	origin     int
+	target     int
+	startedAt  time.Time
+	now        time.Time
+	duration   time.Duration
+	generation uint64
+}
 
 // modelsLoadedMsg carries the result of fetching a provider's AvailableModels
 // for the modeSessionModel popup. provider is included so a stale response
@@ -337,6 +345,13 @@ type model struct {
 	// below the reader, who was scrolled up at the time and so was not
 	// auto-followed down to it.
 	newBelow bool
+	// conversationScrollGeneration invalidates queued animation ticks when a
+	// newer scroll starts. Keeping this state local makes animated scrolling a
+	// presentation detail rather than part of the viewport or item model.
+	conversationScrollGeneration uint64
+	conversationScrollTarget     int
+	conversationScrollActive     bool
+	conversationSelectionMovedAt time.Time
 	// projectPane is 0 for item views, 1 for user instructions, and 2 for the
 	// agent-curated brief. Project documents use the existing reader/editor,
 	// while the brief also exposes its immutable history in the list pane.
@@ -712,6 +727,31 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case conversationScrollMsg:
+		if msg.generation != m.conversationScrollGeneration {
+			return m, nil
+		}
+		elapsed := max(time.Duration(0), msg.now.Sub(msg.startedAt))
+		delta := msg.target - msg.origin
+		desired := msg.target
+		if elapsed < msg.duration {
+			desired = msg.origin + int(int64(delta)*int64(elapsed)/int64(msg.duration))
+			// animateConversationTo already presented the first line. Do not
+			// let an early interpolated frame move backwards over it.
+			if delta > 0 {
+				desired = max(msg.origin+1, desired)
+			} else {
+				desired = min(msg.origin-1, desired)
+			}
+		}
+		m.conv.SetYOffset(desired)
+		m.syncNewBelow()
+		if m.conv.YOffset == msg.target || elapsed >= msg.duration {
+			m.conversationScrollActive = false
+			return m, nil
+		}
+		return m, conversationScrollTick(msg.origin, msg.target, msg.startedAt, msg.duration, msg.generation)
+
 	case tea.KeyMsg:
 		// A bracketed paste is content, never a command. In particular, pasted
 		// q, esc, or ctrl+s must not quit or submit the editor. Bubble Tea's
@@ -798,17 +838,15 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.updateConv()
 		m.convSelection = len(m.convSelectable) - 1
 		m.updateConv()
-		m.revealConversationSelection()
-		return m, nil
+		m.conversationSelectionMovedAt = time.Time{}
+		return m, m.revealConversationSelection(true)
 	}
 	if m.projectPane == 0 && m.focus == focusReadingPane {
 		switch {
 		case msg.Type == tea.KeyUp || msg.Type == tea.KeyShiftUp || msg.String() == "k":
-			m.moveConversationSelection(-1)
-			return m, nil
+			return m, m.moveConversationSelection(-1)
 		case msg.Type == tea.KeyDown || msg.Type == tea.KeyShiftDown || msg.String() == "j":
-			m.moveConversationSelection(1)
-			return m, nil
+			return m, m.moveConversationSelection(1)
 		}
 	}
 	if m.projectPane == 0 && isSpaceKey(msg) {
@@ -861,11 +899,9 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showProjectContext()
 			return m, nil
 		case "pgdown":
-			m.pageConversation(1)
-			return m, nil
+			return m, m.pageConversation(1)
 		case "pgup":
-			m.pageConversation(-1)
-			return m, nil
+			return m, m.pageConversation(-1)
 		case "f":
 			return m.enterCopyMode(), nil
 		case "e":
@@ -903,9 +939,9 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "k", "up", "shift+up":
 		m.moveItemSelection(-1)
 	case "pgdown":
-		m.pageConversation(1)
+		return m, m.pageConversation(1)
 	case "pgup":
-		m.pageConversation(-1)
+		return m, m.pageConversation(-1)
 	case "f":
 		m = m.enterCopyMode()
 	case "1":
@@ -987,19 +1023,23 @@ func (m model) handleCopyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = m.copyReturnFocus
 		m = m.recalcLayout()
 	case "up", "shift+up", "k":
+		m.stopConversationScroll()
 		m.conv.ScrollUp(1)
 		m.syncNewBelow()
 	case "down", "shift+down", "j":
+		m.stopConversationScroll()
 		m.conv.ScrollDown(1)
 		m.syncNewBelow()
 	case "pgup":
-		m.pageConversation(-1)
+		return m, m.pageConversation(-1)
 	case "pgdown":
-		m.pageConversation(1)
+		return m, m.pageConversation(1)
 	case "home", "g":
+		m.stopConversationScroll()
 		m.conv.GotoTop()
 		m.syncNewBelow()
 	case "end", "G":
+		m.stopConversationScroll()
 		m.conv.GotoBottom()
 		m.syncNewBelow()
 	}
@@ -1684,11 +1724,9 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "pgdown":
 		// The textarea binds neither page key, so they stay available for
 		// scrolling the conversation while composing a reply to it.
-		m.pageConversation(1)
-		return m, nil
+		return m, m.pageConversation(1)
 	case "pgup":
-		m.pageConversation(-1)
-		return m, nil
+		return m, m.pageConversation(-1)
 	}
 	prevH := m.currentInputHeight()
 	visualLines := m.inputVisualLineCount()
@@ -2824,6 +2862,7 @@ func wrapLine(line string, width int) []string {
 // content. Opening an item at the top means scrolling past the entire history
 // to reach the part that changed, which is almost never what the reader wants.
 func (m *model) showSelected() {
+	m.conversationSelectionMovedAt = time.Time{}
 	m.convSelection = -1
 	if m.draftVisible() && m.draftSelected {
 		m.restoreNewItemDraft()
@@ -2913,9 +2952,9 @@ func (m *model) toggleSelectedTrace() {
 // moveConversationSelection changes the reading-pane cursor without touching
 // the item-list cursor. The latest entry is selected when focus enters the
 // pane, so Up moves naturally toward older turns and Down toward newer ones.
-func (m *model) moveConversationSelection(delta int) {
+func (m *model) moveConversationSelection(delta int) tea.Cmd {
 	if len(m.convSelectable) == 0 {
-		return
+		return nil
 	}
 	next := m.convSelection
 	if next < 0 {
@@ -2934,44 +2973,118 @@ func (m *model) moveConversationSelection(delta int) {
 		next = len(m.convSelectable) - 1
 	}
 	if next == m.convSelection {
-		return
+		return nil
 	}
+	now := time.Now()
+	rapid := !m.conversationSelectionMovedAt.IsZero() &&
+		now.Sub(m.conversationSelectionMovedAt) <= conversationSelectionBurstInterval
+	m.conversationSelectionMovedAt = now
+	// A repeated key at the boundary returns above and lets catch-up finish.
+	// For a real change, updateConv below invalidates the prior destination even
+	// when the new selection is already visible and needs no replacement.
 	m.convSelection = next
 	m.updateConv()
-	m.revealConversationSelection()
+	return m.revealConversationSelection(!rapid)
 }
 
 // revealConversationSelection keeps the highlighted turn on screen when the
 // reading cursor moves. The bounds are recorded while updateConv renders the
 // selected block, so this works even when the conversation contains wrapped
 // markdown and retained traces.
-func (m *model) revealConversationSelection() {
+func (m *model) revealConversationSelection(animated bool) tea.Cmd {
 	if m.convSelectBottom <= m.convSelectTop || m.conv.Height <= 0 {
-		return
+		return nil
 	}
+	target := m.conv.YOffset
 	if m.convSelectTop < m.conv.YOffset {
-		m.conv.SetYOffset(m.convSelectTop)
-		return
+		target = m.convSelectTop
+	} else if m.convSelectBottom > m.conv.YOffset+m.conv.Height {
+		target = m.convSelectBottom - m.conv.Height
+	} else {
+		return nil
 	}
-	if m.convSelectBottom > m.conv.YOffset+m.conv.Height {
-		m.conv.SetYOffset(m.convSelectBottom - m.conv.Height)
+	if animated {
+		return m.animateConversationTo(target)
 	}
+	m.conv.SetYOffset(target)
+	m.syncNewBelow()
+	return nil
 }
 
 // pageConversation keeps half of the current pane visible across page-key
 // presses, so a reader retains context instead of jumping by a whole screen.
 // A one-line pane is the only case where half its height would not move at all.
-func (m *model) pageConversation(direction int) {
+func (m *model) pageConversation(direction int) tea.Cmd {
 	distance := max(1, m.conv.Height/2)
-	if direction > 0 {
-		m.conv.ScrollDown(distance)
-	} else {
-		m.conv.ScrollUp(distance)
+	base := m.conv.YOffset
+	if m.conversationScrollActive {
+		base = m.conversationScrollTarget
+	}
+	return m.animateConversationTo(base + direction*distance)
+}
+
+const (
+	conversationScrollFrameInterval    = time.Second / 60
+	conversationScrollMinDuration      = 50 * time.Millisecond
+	conversationScrollMaxDuration      = 150 * time.Millisecond
+	conversationScrollDurationPerLine  = 3 * time.Millisecond
+	conversationSelectionBurstInterval = 100 * time.Millisecond
+)
+
+// animateConversationTo begins immediately with one line, then lets Bubble
+// Tea repaint between elapsed-time-derived positions. If rendering delays a
+// frame, the next tick catches up instead of making the whole animation late.
+func (m *model) animateConversationTo(target int) tea.Cmd {
+	maxOffset := max(0, m.conv.TotalLineCount()-m.conv.Height)
+	target = max(0, min(target, maxOffset))
+	m.conversationScrollGeneration++
+	m.conversationScrollTarget = target
+	m.conversationScrollActive = false
+
+	origin := m.conv.YOffset
+	switch {
+	case origin < target:
+		m.conv.ScrollDown(1)
+	case origin > target:
+		m.conv.ScrollUp(1)
+	default:
+		return nil
 	}
 	m.syncNewBelow()
+	if m.conv.YOffset == target || m.conv.YOffset == origin {
+		return nil
+	}
+	m.conversationScrollActive = true
+	duration := conversationScrollDurationFor(target - origin)
+	return conversationScrollTick(origin, target, time.Now(), duration, m.conversationScrollGeneration)
+}
+
+func conversationScrollDurationFor(distance int) time.Duration {
+	distance = max(distance, -distance)
+	duration := conversationScrollMinDuration + time.Duration(max(0, distance-1))*conversationScrollDurationPerLine
+	return min(duration, conversationScrollMaxDuration)
+}
+
+func (m *model) stopConversationScroll() {
+	m.conversationScrollGeneration++
+	m.conversationScrollTarget = m.conv.YOffset
+	m.conversationScrollActive = false
+}
+
+func conversationScrollTick(origin, target int, startedAt time.Time, duration time.Duration, generation uint64) tea.Cmd {
+	return tea.Tick(conversationScrollFrameInterval, func(now time.Time) tea.Msg {
+		return conversationScrollMsg{
+			origin: origin, target: target, startedAt: startedAt, now: now,
+			duration: duration, generation: generation,
+		}
+	})
 }
 
 func (m *model) updateConv() {
+	// Rendered row coordinates are the animation's coordinate system. Any
+	// redraw can change them because content, width, or selected styling changed,
+	// so queued ticks must never survive across SetContent.
+	m.stopConversationScroll()
 	if m.projectPane != 0 {
 		m.updateProjectConv()
 		return
