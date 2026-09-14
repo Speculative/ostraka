@@ -36,10 +36,20 @@ func TestChildActivityDispatchIncludesAndHandlesEvents(t *testing.T) {
 	if _, err := st.SetStatus(child.ID, models.StatusArchived); err != nil {
 		t.Fatal(err)
 	}
+	if err := saveItemSession(s.root, root.ID, sessionFile{
+		Provider:      ProviderClaude,
+		SessionID:     "existing-session",
+		PromptedTurns: intPointer(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	h.store, h.rootID = st, root.ID
 	s.dispatch(enqueueMsg{itemID: root.ID, activity: true})
 	if !strings.Contains(h.prompt, "subthread.closed") || !strings.Contains(h.prompt, child.ID) {
 		t.Fatalf("activity prompt = %q", h.prompt)
+	}
+	if strings.Contains(h.prompt, "ostraka item show "+root.ID+" --json") {
+		t.Fatalf("activity-only prompt reloads root item: %q", h.prompt)
 	}
 	if pending, err := st.PendingActivities(root.ID); err != nil || len(pending) != 0 {
 		t.Fatalf("pending activities after synthesis = %+v, err=%v", pending, err)

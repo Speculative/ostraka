@@ -15,60 +15,7 @@ import (
 	"github.com/Speculative/ostraka/internal/store"
 )
 
-// nudgePrompt is deliberately short because the provider session already has
-// the bootstrap context. It carries only the event that woke the agent and the
-// invariant most likely to be violated by a continuation.
-func nudgePrompt(itemID, userTurn string) string {
-	if userTurn != "" {
-		return fmt.Sprintf(
-			"There is a new user turn on Ostraka item %s. Continue the item's work; do not post an acknowledgement before doing the requested work.\n\n"+
-				"--- latest user turn ---\n%s\n--- end latest user turn ---\n\n"+
-				"Post one substantive `ostraka item turn` only after work and validation are complete; it ends this dispatch. Use actual multiline content, never literal `\\n` text.",
-			itemID, userTurn)
-	}
-	return fmt.Sprintf(
-		"Resume Ostraka item %s. Read it with `ostraka item show %s --json`, carry out any outstanding request, and send one final Ostraka item reply only after work and validation are complete. That reply ends this dispatch.",
-		itemID, itemID)
-}
-
-func activityNudgePrompt(itemID, userTurn string, activities []models.Activity) string {
-	base := nudgePrompt(itemID, userTurn)
-	if len(activities) == 0 {
-		return base
-	}
-	var sb strings.Builder
-	sb.WriteString(base)
-	sb.WriteString("\n\n--- unhandled subthread activity ---\n")
-	for _, activity := range activities {
-		title := activity.ChildTitle
-		if title == "" {
-			title = activity.ChildID
-		}
-		sb.WriteString(fmt.Sprintf("%s: %s (%s, result=%s, actor=%s)\n", activity.Type, title, activity.ChildID, activity.Result, activity.Actor))
-	}
-	sb.WriteString("Review each affected subthread with `ostraka item show <child-id> --json`, reconcile its decision with the root item, and include the consequences in your final root reply.")
-	return sb.String()
-}
-
 const bootstrapItemContextMaxChars = 24000
-
-func bootstrapPrompt(itemID, instructions, brief, itemContext, replyCmd string) string {
-	return fmt.Sprintf(`You are starting a new agent session for Ostraka item %s.
-
-%s
-
---- user-owned project instructions ---
-%s
---- end user-owned project instructions ---
-
---- agent-curated project brief ---
-%s
---- end agent-curated project brief ---
-
---- Ostraka item context ---
-%s
---- end Ostraka item context ---`, itemID, agentprompt.AgentOrientation(replyCmd), emptyContext(instructions), emptyContext(brief), itemContext)
-}
 
 func itemContext(item models.Item) string {
 	var sb strings.Builder
@@ -152,32 +99,6 @@ func trimRunes(s string, max int) string {
 
 func replyCommand(root, itemID string) string {
 	return agentprompt.ReplyCommand(filepath.Dir(root), itemID)
-}
-
-func emptyContext(s string) string {
-	if s == "" {
-		return "(none)"
-	}
-	return s
-}
-
-func (s *Supervisor) latestUserTurn(itemID string) string {
-	if s.store == nil {
-		return ""
-	}
-	item, err := s.store.GetItem(itemID)
-	if err != nil {
-		s.logger.Printf("item %s: cannot read latest user turn: %v", itemID, err)
-		return ""
-	}
-	if len(item.Turns) == 0 {
-		return ""
-	}
-	latest := item.Turns[len(item.Turns)-1]
-	if latest.Actor != models.ActorUser {
-		return ""
-	}
-	return latest.Content
 }
 
 const queueCapacity = 64
@@ -769,6 +690,8 @@ func (s *Supervisor) revertAcknowledged(itemID string, to models.Status) {
 
 func (s *Supervisor) dispatch(msg enqueueMsg) {
 	var beforeTurns int
+	var dispatchItem models.Item
+	haveDispatchItem := false
 	s.queueMu.Lock()
 	if s.activityBusy == nil {
 		s.activityBusy = make(map[string]bool)
@@ -789,6 +712,8 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	if s.store != nil {
 		activities, _ = s.store.PendingActivities(msg.itemID)
 		if item, err := s.store.GetItem(msg.itemID); err == nil {
+			dispatchItem = item
+			haveDispatchItem = true
 			beforeTurns = len(item.Turns)
 		}
 	}
@@ -837,8 +762,11 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	s.setBusy(msg.itemID)
 	defer s.setBusy("")
 
-	userTurn := s.latestUserTurn(msg.itemID)
-	prompt := activityNudgePrompt(msg.itemID, userTurn, activities)
+	var userTurns []string
+	if haveDispatchItem && sf.SessionID != "" {
+		userTurns = unseenUserTurns(dispatchItem, sf.PromptedTurns)
+	}
+	prompt := agentprompt.Nudge(msg.itemID, userTurns, activities)
 	if sf.SessionID == "" {
 		instructions, brief := "", ""
 		context := fmt.Sprintf("Ostraka item %s could not be read.", msg.itemID)
@@ -849,11 +777,8 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 				context = boundedItemContext(item)
 				context += relationshipContext(s.store, item)
 			}
-			if len(activities) > 0 {
-				context += "\n\n" + activityNudgePrompt(msg.itemID, "", activities)
-			}
 		}
-		prompt = bootstrapPrompt(msg.itemID, instructions, brief, context, replyCommand(s.root, msg.itemID))
+		prompt = agentprompt.Bootstrap(msg.itemID, instructions, brief, context, replyCommand(s.root, msg.itemID), activities)
 	}
 	harness := s.harnessFor(sf.Provider)
 	turnCtx, turnCancel := context.WithCancel(s.runContext())
@@ -920,7 +845,7 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		// whatever the agent did before it was stopped. Persisting the id is
 		// what stops the resume cursor rewinding past that work — the id is
 		// known from the stream's opening event, long before the result.
-		s.persistSession(msg.itemID, sf, result.SessionID)
+		s.persistSession(msg.itemID, sf, result.SessionID, beforeTurns)
 		return
 	}
 	partialStatus = "completed"
@@ -949,7 +874,7 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	} else {
 		s.revertAcknowledged(msg.itemID, models.StatusPendingUser)
 	}
-	s.persistSession(msg.itemID, sf, result.SessionID)
+	s.persistSession(msg.itemID, sf, result.SessionID, beforeTurns)
 	s.logger.Printf("item %s: dispatch complete (session=%s is_error=%v duration_ms=%d cost_usd=%.4f num_turns=%d model=%s context_used=%d context_window=%d)",
 		msg.itemID, result.SessionID, result.IsError, result.DurationMs, result.TotalCostUSD, result.NumTurns,
 		result.Model, result.Context.UsedTokens, result.Context.WindowTokens)
@@ -1043,21 +968,72 @@ func (s *Supervisor) retainPartialTrace(itemID string, beforeTurns int, startedA
 	}
 }
 
-// persistSession advances the resume cursor, but only if the session it was
-// dispatched under is still the selected one: the user may have started a
-// fresh session mid-turn, and the finishing turn must not resurrect the old.
-func (s *Supervisor) persistSession(itemID string, dispatched sessionFile, sessionID string) {
+// persistSession advances the provider resume ID and the item-turn boundary
+// included in its prompt, but only if the dispatched session is still
+// selected: the user may have started a fresh session mid-turn, and the
+// finishing turn must not resurrect the old.
+func (s *Supervisor) persistSession(itemID string, dispatched sessionFile, sessionID string, promptedTurns int) {
 	if sessionID == "" {
 		return
 	}
 	s.session.mu.Lock()
 	current, loadErr := loadItemSession(s.root, itemID)
 	var saveErr error
-	if loadErr == nil && current == dispatched {
-		saveErr = saveItemSession(s.root, itemID, sessionFile{Provider: dispatched.Provider, Model: dispatched.Model, Effort: dispatched.Effort, SessionID: sessionID})
+	if loadErr == nil && sameSessionState(current, dispatched) {
+		saveErr = saveItemSession(s.root, itemID, sessionFile{
+			Provider:      dispatched.Provider,
+			Model:         dispatched.Model,
+			Effort:        dispatched.Effort,
+			SessionID:     sessionID,
+			PromptedTurns: intPointer(promptedTurns),
+		})
 	}
 	s.session.mu.Unlock()
 	if saveErr != nil {
 		s.logger.Printf("item %s: failed to persist session id %s: %v", itemID, sessionID, saveErr)
 	}
+}
+
+func unseenUserTurns(item models.Item, promptedTurns *int) []string {
+	start := 0
+	if promptedTurns != nil && *promptedTurns >= 0 && *promptedTurns <= len(item.Turns) {
+		start = *promptedTurns
+	} else {
+		// A saved session from before turn cursors existed has already seen all
+		// history through its last agent reply. Preserve any user turns after
+		// that boundary without replaying the whole conversation.
+		for i := len(item.Turns) - 1; i >= 0; i-- {
+			if item.Turns[i].Actor == models.ActorAgent {
+				start = i + 1
+				break
+			}
+		}
+	}
+	var unseen []string
+	for _, turn := range item.Turns[start:] {
+		if turn.Actor == models.ActorUser {
+			unseen = append(unseen, turn.Content)
+		}
+	}
+	return unseen
+}
+
+func sameSessionState(a, b sessionFile) bool {
+	return a.Provider == b.Provider &&
+		a.Model == b.Model &&
+		a.Effort == b.Effort &&
+		a.SessionID == b.SessionID &&
+		a.UpdatedAt.Equal(b.UpdatedAt) &&
+		equalIntPointers(a.PromptedTurns, b.PromptedTurns)
+}
+
+func equalIntPointers(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func intPointer(value int) *int {
+	return &value
 }

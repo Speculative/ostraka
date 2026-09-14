@@ -47,7 +47,7 @@ func TestItemSessionsRoundTripIndependently(t *testing.T) {
 	if err := os.MkdirAll(supervisorDir(root), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveItemSession(root, "item-1", sessionFile{Provider: ProviderCodex, SessionID: "thread-1"}); err != nil {
+	if err := saveItemSession(root, "item-1", sessionFile{Provider: ProviderCodex, SessionID: "thread-1", PromptedTurns: intPointer(7)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := saveItemSession(root, "item-2", sessionFile{Provider: ProviderClaude, SessionID: "thread-2"}); err != nil {
@@ -57,7 +57,7 @@ func TestItemSessionsRoundTripIndependently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sf.Provider != ProviderCodex || sf.SessionID != "thread-1" {
+	if sf.Provider != ProviderCodex || sf.SessionID != "thread-1" || sf.PromptedTurns == nil || *sf.PromptedTurns != 7 {
 		t.Errorf("got %+v", sf)
 	}
 	other, err := loadItemSession(root, "item-2")

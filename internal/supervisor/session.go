@@ -32,10 +32,14 @@ type sessionFile struct {
 	// Model applies only when SessionID is empty: it selects the model for
 	// the next fresh session launch. A resumed session ignores it and keeps
 	// whatever model it already started with.
-	Model     string    `json:"model,omitempty"`
-	Effort    string    `json:"effort,omitempty"`
-	SessionID string    `json:"session_id"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Model     string `json:"model,omitempty"`
+	Effort    string `json:"effort,omitempty"`
+	SessionID string `json:"session_id"`
+	// PromptedTurns is the item-turn boundary included in the most recent
+	// provider prompt. Nil identifies session files written before this cursor
+	// was introduced.
+	PromptedTurns *int      `json:"prompted_turns,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // sessionsFile keeps each item in its own provider conversation. The old

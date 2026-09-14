@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Speculative/ostraka/internal/models"
-	"github.com/Speculative/ostraka/internal/prompt"
 	"github.com/Speculative/ostraka/internal/store"
 )
 
@@ -97,6 +96,15 @@ func TestDispatchStartsFreshThenResumesPerItem(t *testing.T) {
 	}
 	if fh.calls[2] != "session-a" {
 		t.Errorf("third dispatch should resume item-1's session, got %q", fh.calls[2])
+	}
+	if !strings.Contains(fh.prompts[0], "Ostraka's initial prompt for this item") {
+		t.Errorf("fresh dispatch did not use the bootstrap prompt: %q", fh.prompts[0])
+	}
+	if !strings.Contains(fh.prompts[2], "continues the conversation") {
+		t.Errorf("resumed dispatch did not use the continuation prompt: %q", fh.prompts[2])
+	}
+	if strings.Contains(fh.prompts[2], "initial prompt for this item") {
+		t.Errorf("resumed dispatch incorrectly used session-start wording: %q", fh.prompts[2])
 	}
 
 	got, err := loadItemSession(s.root, "item-1")
@@ -525,14 +533,16 @@ type userTurnFollowupHarness struct {
 	firstStarted chan struct{}
 	releaseFirst chan struct{}
 
-	mu    sync.Mutex
-	calls int
+	mu      sync.Mutex
+	calls   int
+	prompts []string
 }
 
-func (h *userTurnFollowupHarness) RunTurn(_ context.Context, _ string, _ string, _ string, _ string, _ func(string)) (TurnResult, error) {
+func (h *userTurnFollowupHarness) RunTurn(_ context.Context, prompt string, _ string, _ string, _ string, _ func(string)) (TurnResult, error) {
 	h.mu.Lock()
 	h.calls++
 	call := h.calls
+	h.prompts = append(h.prompts, prompt)
 	h.mu.Unlock()
 	if call == 1 {
 		close(h.firstStarted)
@@ -566,7 +576,10 @@ func TestUserTurnDuringDispatchQueuesSerializedFollowup(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("initial dispatch did not start")
 	}
-	if _, err := st.AddTurn(item.ID, models.ActorUser, "work arrived during the run"); err != nil {
+	if _, err := st.AddTurn(item.ID, models.ActorUser, "first request during the run"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddTurn(item.ID, models.ActorUser, "second request during the run"); err != nil {
 		t.Fatal(err)
 	}
 	// This is the watcher response to the external item turn. The active
@@ -575,20 +588,28 @@ func TestUserTurnDuringDispatchQueuesSerializedFollowup(t *testing.T) {
 	close(h.releaseFirst)
 
 	deadline := time.Now().Add(2 * time.Second)
+	completed := false
 	for time.Now().Before(deadline) {
 		h.mu.Lock()
 		calls := h.calls
 		h.mu.Unlock()
 		if calls == 2 {
-			break
+			after, itemErr := st.GetItem(item.ID)
+			sf, sessionErr := loadItemSession(s.root, item.ID)
+			if itemErr == nil && sessionErr == nil && after.Status == models.StatusPendingUser &&
+				sf.PromptedTurns != nil && *sf.PromptedTurns == 2 {
+				completed = true
+				break
+			}
 		}
 		time.Sleep(time.Millisecond)
 	}
 	h.mu.Lock()
 	calls := h.calls
+	prompts := append([]string(nil), h.prompts...)
 	h.mu.Unlock()
-	if calls != 2 {
-		t.Fatalf("harness calls = %d, want initial turn plus serialized follow-up", calls)
+	if calls != 2 || !completed {
+		t.Fatalf("follow-up did not complete; harness calls = %d, want two", calls)
 	}
 	after, err := st.GetItem(item.ID)
 	if err != nil {
@@ -597,8 +618,44 @@ func TestUserTurnDuringDispatchQueuesSerializedFollowup(t *testing.T) {
 	if after.Status != models.StatusPendingUser {
 		t.Fatalf("item status after follow-up = %q, want pending-user", after.Status)
 	}
-	if len(after.Turns) != 2 || after.Turns[1].Content != "follow-up answer" {
+	if len(after.Turns) != 3 || after.Turns[2].Content != "follow-up answer" {
 		t.Fatalf("turns after follow-up = %+v", after.Turns)
+	}
+	if len(prompts) != 2 {
+		t.Fatalf("prompts = %d, want two", len(prompts))
+	}
+	first := strings.Index(prompts[1], "first request during the run")
+	second := strings.Index(prompts[1], "second request during the run")
+	if first < 0 || second < 0 || first >= second {
+		t.Fatalf("follow-up prompt did not batch unseen user turns in order: %q", prompts[1])
+	}
+	sf, err := loadItemSession(s.root, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sf.PromptedTurns == nil || *sf.PromptedTurns != 2 {
+		t.Fatalf("prompted-turn cursor = %v, want 2", sf.PromptedTurns)
+	}
+}
+
+func TestUnseenUserTurnsUsesPersistedAndLegacyBoundaries(t *testing.T) {
+	item := models.Item{Turns: []models.Turn{
+		{Actor: models.ActorUser, Content: "old user turn"},
+		{Actor: models.ActorAgent, Content: "old agent turn"},
+		{Actor: models.ActorUser, Content: "first unseen"},
+		{Actor: models.ActorUser, Content: "second unseen"},
+		{Actor: models.ActorAgent, Content: "agent reply appended during dispatch"},
+	}}
+
+	got := unseenUserTurns(item, intPointer(2))
+	if len(got) != 2 || got[0] != "first unseen" || got[1] != "second unseen" {
+		t.Fatalf("cursor-based unseen turns = %v", got)
+	}
+
+	item.Turns = append(item.Turns, models.Turn{Actor: models.ActorUser, Content: "legacy pending turn"})
+	got = unseenUserTurns(item, nil)
+	if len(got) != 1 || got[0] != "legacy pending turn" {
+		t.Fatalf("legacy unseen turns = %v", got)
 	}
 }
 
@@ -636,29 +693,6 @@ func TestInterruptedTurnStillPersistsItsSession(t *testing.T) {
 	}
 }
 
-func TestNudgePromptIncludesLatestUserTurn(t *testing.T) {
-	got := nudgePrompt("20260808-054612", "Please implement this.")
-	if !strings.Contains(got, "Please implement this.") {
-		t.Errorf("prompt does not include the latest user turn: %q", got)
-	}
-	if strings.Contains(got, "item show") {
-		t.Errorf("prompt still makes the agent reread an included user turn: %q", got)
-	}
-}
-
-func TestBootstrapPromptIncludesItemAndExactReplyCommand(t *testing.T) {
-	command := "ostraka item turn item-1 --actor agent --content-stdin"
-	got := bootstrapPrompt("item-1", "instructions", "brief", "full item context", command)
-	for _, want := range []string{"full item context", "instructions", "brief", "ostraka item turn item-1 --actor agent --content-stdin", "final Ostraka item reply"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("bootstrap prompt missing %q: %q", want, got)
-		}
-	}
-	if !strings.Contains(got, prompt.AgentOrientation(command)) {
-		t.Errorf("bootstrap prompt does not contain shared orientation: %q", got)
-	}
-}
-
 func TestBoundedItemContextMarksOmission(t *testing.T) {
 	item := models.Item{ID: "item-1", Title: "title", Body: strings.Repeat("b", bootstrapItemContextMaxChars), Turns: []models.Turn{{Actor: models.ActorUser, Content: strings.Repeat("old", bootstrapItemContextMaxChars)}, {Actor: models.ActorUser, Content: "recent"}}}
 	got := boundedItemContext(item)
@@ -667,19 +701,6 @@ func TestBoundedItemContextMarksOmission(t *testing.T) {
 	}
 	if !strings.Contains(got, "recent") {
 		t.Errorf("bounded context lost newest reply: %q", got)
-	}
-}
-
-func TestNudgePromptFallsBackToShowingTheItem(t *testing.T) {
-	// The prompt must not send the agent hunting via a status query: dispatch
-	// marks the item agent-acknowledged, so a pending-agent search finds
-	// nothing by the time the agent runs.
-	got := nudgePrompt("20260808-054612", "")
-	if !strings.Contains(got, "20260808-054612") {
-		t.Errorf("prompt does not name the item: %q", got)
-	}
-	if strings.Contains(got, "--status pending-agent") {
-		t.Errorf("prompt still sends the agent to a query that excludes the dispatched item: %q", got)
 	}
 }
 
