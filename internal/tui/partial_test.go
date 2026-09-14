@@ -202,7 +202,7 @@ func TestSpaceExpandsTraceAttachedToSelectedTurn(t *testing.T) {
 		case strings.Contains(plain, "final answer"):
 			finalLine = i
 		}
-		if strings.TrimSpace(plain) == strings.Repeat("─", 40) {
+		if strings.TrimSpace(plain) == strings.Repeat("─", m.conv.Width) {
 			dividerLine = i
 		}
 	}

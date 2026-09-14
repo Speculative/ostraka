@@ -15,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 func item(ch models.Channel, st models.Status, created time.Time, turns ...time.Time) models.Item {
@@ -61,6 +62,72 @@ func TestConversationShowsPersistedDispatchFailure(t *testing.T) {
 	}
 	if m.convFailure == 0 {
 		t.Fatal("conversation did not track the dispatch failure")
+	}
+}
+
+func TestConversationTurnDividersSpanTheReadingPane(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.items = []models.Item{{
+		ID:      "item-1",
+		Channel: models.ChannelInbox,
+		Status:  models.StatusActive,
+		Title:   "visible boundaries",
+		Body:    "opening prompt",
+		Turns: []models.Turn{
+			{Actor: models.ActorUser, Timestamp: t0, Content: "first turn"},
+			{Actor: models.ActorAgent, Timestamp: t0.Add(time.Minute), Content: "second turn"},
+		},
+	}}
+	m.selected = 0
+	m.conv.Width = 72
+	m.conv.Height = 30
+	m.updateConv()
+
+	divider := strings.Repeat("─", m.conv.Width)
+	count := 0
+	for _, line := range strings.Split(ansi.Strip(m.conv.View()), "\n") {
+		if line == divider {
+			count++
+		}
+	}
+	if count != len(m.items[0].Turns) {
+		t.Fatalf("full-width divider count = %d, want %d in %q", count, len(m.items[0].Turns), ansi.Strip(m.conv.View()))
+	}
+}
+
+func TestConversationColorsUserAndAgentNames(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previousProfile) })
+
+	m := newModel(nil, nil, nil)
+	m.items = []models.Item{{
+		ID: "item-1", Channel: models.ChannelInbox, Status: models.StatusActive,
+		Title: "colored actors", Body: "opening prompt",
+		Turns: []models.Turn{
+			{Actor: models.ActorUser, Timestamp: t0, Content: "first turn"},
+			{Actor: models.ActorAgent, Timestamp: t0.Add(time.Minute), Content: "second turn"},
+		},
+	}}
+	m.selected = 0
+	m.conv.Width = 72
+	m.conv.Height = 30
+	m.updateConv()
+
+	view := m.conv.View()
+	if !strings.Contains(view, warningHeaderStyle.Render("user")) {
+		t.Fatalf("user name does not use the user-action color: %q", view)
+	}
+	if !strings.Contains(view, liveHeaderStyle.Render("agent")) {
+		t.Fatalf("agent name does not use the agent-action color: %q", view)
+	}
+
+	m.focus = focusReadingPane
+	m.convSelection = 0
+	m.updateConv()
+	selected := m.conv.View()
+	if !strings.Contains(selected, "\x1b[1;93;48;5;237muser") || !strings.Contains(selected, "48;5;237") {
+		t.Fatalf("selected user turn did not retain its actor color and selection background: %q", selected)
 	}
 }
 

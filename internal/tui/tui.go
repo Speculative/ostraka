@@ -3147,10 +3147,11 @@ func (m *model) updateConv() {
 	m.convSelectBottom = 0
 	w := m.conv.Width
 
-	// Rules are drawn to the pane, not to fixed 60/40 — a fixed rule in a
-	// narrow pane is just another line that overflows.
+	// The item heading stays compact, while timeline rules span the pane so a
+	// turn boundary remains visible even when the conversation is long. Both
+	// still contract in a narrow pane rather than overflowing it.
 	headRule := strings.Repeat("─", clampRule(w, 60))
-	turnRule := strings.Repeat("─", clampRule(w, 40))
+	turnRule := strings.Repeat("─", max(0, w))
 
 	var sb strings.Builder
 	meta := fmt.Sprintf("[%s]  %s  %s", item.Channel, item.Status, item.ID)
@@ -3187,7 +3188,7 @@ func (m *model) updateConv() {
 			if status := partialStatusForTurn(partials, event.turn.Timestamp); status != "" {
 				turnHeader += "  ·  " + status
 			}
-			parts := []conversationPart{{content: turnHeader}}
+			parts := []conversationPart{{content: turnHeader, actor: event.turn.Actor}}
 			for _, partial := range partials {
 				if !partial.TurnTimestamp.IsZero() && partial.TurnTimestamp.Equal(event.turn.Timestamp) {
 					if m.traceExpanded[traceSelectionKey(item.ID, event)] {
@@ -3236,7 +3237,7 @@ func (m *model) updateConv() {
 			sb.WriteString(fmt.Sprintf("\n\n%s\nactivity  ·  %s  ·  %s [%s]",
 				turnRule, event.activity.Type, title, status))
 		case conversationPartial:
-			parts := []conversationPart{{content: renderStandalonePartialHeader(event.partial)}}
+			parts := []conversationPart{{content: renderStandalonePartialHeader(event.partial), actor: models.ActorAgent}}
 			if m.traceExpanded[traceSelectionKey(item.ID, event)] {
 				parts = append(parts, conversationPart{
 					content: renderMarkdown(event.partial.Content, w),
@@ -3426,6 +3427,7 @@ func partialStatusForTurn(partials []models.PartialTrace, timestamp time.Time) s
 type conversationPart struct {
 	content string
 	muted   bool
+	actor   models.Actor
 }
 
 func renderStandalonePartialHeader(partial models.PartialTrace) string {
@@ -3445,7 +3447,7 @@ func renderAgentEndedWithoutResponse(timestamp time.Time, status string, width i
 	if status != "" {
 		header += "  ·  " + status
 	}
-	return header + "\n\n" + renderMarkdown(agentEndedWithoutResponse, width)
+	return renderActorHeader(header, models.ActorAgent) + "\n\n" + renderMarkdown(agentEndedWithoutResponse, width)
 }
 
 const agentEndedWithoutResponse = "(agent ended without a response)"
@@ -3463,7 +3465,7 @@ func renderConversationParts(parts []conversationPart, selected bool, width int)
 	if !selected {
 		rendered := make([]string, len(parts))
 		for i, part := range parts {
-			rendered[i] = part.content
+			rendered[i] = renderActorHeader(part.content, part.actor)
 			if part.muted {
 				rendered[i] = dimStyle.Render(ansi.Strip(part.content))
 			}
@@ -3471,22 +3473,61 @@ func renderConversationParts(parts []conversationPart, selected bool, width int)
 		return strings.Join(rendered, "\n\n")
 	}
 
-	style := lipgloss.NewStyle().Width(max(1, width)).Background(selectedBg).Bold(true)
+	style := lipgloss.NewStyle().Background(selectedBg).Bold(true)
 	mutedStyle := style.Foreground(dimFg)
 	lines := make([]string, 0)
 	for i, part := range parts {
 		if i > 0 {
-			lines = append(lines, style.Render(""))
+			lines = append(lines, style.Width(max(1, width)).Render(""))
 		}
 		lineStyle := style
 		if part.muted {
 			lineStyle = mutedStyle
 		}
-		for _, line := range strings.Split(ansi.Strip(part.content), "\n") {
-			lines = append(lines, lineStyle.Render(line))
+		for lineIndex, line := range strings.Split(ansi.Strip(part.content), "\n") {
+			if lineIndex == 0 && part.actor != "" {
+				lines = append(lines, renderSelectedActorHeader(line, part.actor, width, lineStyle))
+				continue
+			}
+			lines = append(lines, lineStyle.Width(max(1, width)).Render(line))
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func actorHeaderStyle(actor models.Actor) (lipgloss.Style, bool) {
+	switch actor {
+	case models.ActorUser:
+		return warningHeaderStyle, true
+	case models.ActorAgent:
+		return liveHeaderStyle, true
+	default:
+		return lipgloss.NewStyle(), false
+	}
+}
+
+func renderActorHeader(header string, actor models.Actor) string {
+	name := string(actor)
+	style, ok := actorHeaderStyle(actor)
+	if !ok || (header != name && !strings.HasPrefix(header, name+"  ")) {
+		return header
+	}
+	return style.Render(name) + header[len(name):]
+}
+
+func renderSelectedActorHeader(header string, actor models.Actor, width int, base lipgloss.Style) string {
+	name := string(actor)
+	actorStyle, ok := actorHeaderStyle(actor)
+	if !ok || (header != name && !strings.HasPrefix(header, name+"  ")) {
+		return base.Width(max(1, width)).Render(header)
+	}
+	nameWidth := lipgloss.Width(name)
+	if width <= nameWidth {
+		return base.Foreground(actorStyle.GetForeground()).Width(max(1, width)).Render(header)
+	}
+	coloredName := base.Foreground(actorStyle.GetForeground()).Render(name)
+	rest := base.Width(width - nameWidth).Render(header[len(name):])
+	return coloredName + rest
 }
 
 func (m *model) updateProjectConv() {
