@@ -1,9 +1,12 @@
 package store_test
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Speculative/ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/store"
 )
 
 func TestSubthreadsStayOneLevelAndCreateActivity(t *testing.T) {
@@ -93,5 +96,70 @@ func TestRelatedItemsUnionBacklinks(t *testing.T) {
 	}
 	if _, err := s.AddRelated(a.ID, a.ID); err == nil {
 		t.Fatal("self relation accepted")
+	}
+}
+
+func TestMentionsAreDirectedAndMayUseChildren(t *testing.T) {
+	s := newTestStore(t)
+	root, _ := s.CreateItem(models.ChannelInbox, "root", "root body", models.TypeThread, models.StatusActive, "")
+	child, _ := s.CreateSubthread(root.ID, "child", "child body", models.TypeThread, models.StatusActive)
+	other, _ := s.CreateItem(models.ChannelInbox, "other", "other body", models.TypeThread, models.StatusActive, "")
+
+	if _, err := s.AddMention(child.ID, other.ID); err != nil {
+		t.Fatalf("child mention: %v", err)
+	}
+	updated, err := s.GetItem(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Parent != root.ID {
+		t.Fatalf("parent changed while adding mention: got %q want %q", updated.Parent, root.ID)
+	}
+	if updated.Body != "child body\n\n@"+other.ID {
+		t.Fatalf("mention body = %q", updated.Body)
+	}
+	if _, err := s.AddMention(child.ID, other.ID); err != nil {
+		t.Fatalf("duplicate mention: %v", err)
+	}
+	updated, _ = s.GetItem(child.ID)
+	if strings.Count(updated.Body, "@"+other.ID) != 1 {
+		t.Fatalf("duplicate mention was appended: %q", updated.Body)
+	}
+
+	mentioned, err := s.MentionedItems(child.ID)
+	if err != nil || len(mentioned) != 1 || mentioned[0].ID != other.ID {
+		t.Fatalf("mentions = %+v, err=%v", mentioned, err)
+	}
+	backlinks, err := s.BacklinkItems(other.ID)
+	if err != nil || len(backlinks) != 1 || backlinks[0].ID != child.ID {
+		t.Fatalf("backlinks = %+v, err=%v", backlinks, err)
+	}
+	if related, err := s.RelatedItems(other.ID); err != nil || len(related) != 1 || related[0].ID != child.ID {
+		t.Fatalf("compatibility related = %+v, err=%v", related, err)
+	}
+}
+
+func TestLegacyRelatedFrontmatterRemainsReadable(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateItem(models.ChannelInbox, "a", "a", models.TypeThread, models.StatusActive, "")
+	b, _ := s.CreateItem(models.ChannelInbox, "b", "b", models.TypeThread, models.StatusActive, "")
+
+	path := filepath.Join(s.Root, "INBOX", a.ID+".md")
+	item, err := store.ParseItem(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.Related = []string{b.ID}
+	if err := store.WriteItem(item, path); err != nil {
+		t.Fatal(err)
+	}
+
+	mentioned, err := s.MentionedItems(a.ID)
+	if err != nil || len(mentioned) != 1 || mentioned[0].ID != b.ID {
+		t.Fatalf("legacy mentions = %+v, err=%v", mentioned, err)
+	}
+	backlinks, err := s.BacklinkItems(b.ID)
+	if err != nil || len(backlinks) != 1 || backlinks[0].ID != a.ID {
+		t.Fatalf("legacy backlinks = %+v, err=%v", backlinks, err)
 	}
 }

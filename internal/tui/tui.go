@@ -1274,7 +1274,7 @@ func (m model) commitDraft(body string) model {
 	}
 	m.clearNewItemDraft()
 	if m.relatedDraftFrom != "" {
-		if _, err := m.store.AddRelated(item.ID, m.relatedDraftFrom); err != nil {
+		if _, err := m.store.AddMention(item.ID, m.relatedDraftFrom); err != nil {
 			m.err = err
 			return m.cancelDraft()
 		}
@@ -3176,10 +3176,16 @@ func (m *model) updateConv() {
 	sb.WriteString(wrapText(meta, w) + "\n" + headRule + "\n\n")
 	sb.WriteString(renderMarkdown(item.Body, w))
 	if m.store != nil {
-		if related, err := m.store.RelatedItems(item.ID); err == nil && len(related) > 0 {
-			sb.WriteString("\n\nrelated\n")
-			for _, peer := range related {
-				sb.WriteString(wrapText(peer.Title+"  ["+peer.ID+"]", w) + "\n")
+		if mentions, err := m.store.MentionedItems(item.ID); err == nil && len(mentions) > 0 {
+			sb.WriteString("\n\nmentions\n")
+			for _, mentioned := range mentions {
+				sb.WriteString(wrapText(mentioned.Title+"  ["+mentioned.ID+"]", w) + "\n")
+			}
+		}
+		if backlinks, err := m.store.BacklinkItems(item.ID); err == nil && len(backlinks) > 0 {
+			sb.WriteString("\n\nbacklinks\n")
+			for _, backlink := range backlinks {
+				sb.WriteString(wrapText(backlink.Title+"  ["+backlink.ID+"]", w) + "\n")
 			}
 		}
 	}

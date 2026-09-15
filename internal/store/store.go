@@ -141,6 +141,7 @@ func (s *Store) listOnce(opts ListOpts) (items []models.Item, unstable bool, err
 		return nil, false, err
 	}
 	seen := make(map[string]bool, len(paths))
+	var parsed []models.Item
 	for _, p := range paths {
 		item, err := ParseItem(p)
 		if err != nil {
@@ -155,6 +156,23 @@ func (s *Store) listOnce(opts ListOpts) (items []models.Item, unstable bool, err
 			continue
 		}
 		seen[item.ID] = true
+		parsed = append(parsed, item)
+	}
+
+	// Backlinks are a read-time view over the text-owned outgoing mentions.
+	// Build them after parsing the complete collection so filtered listings do
+	// not hide the source of a backlink.
+	byMentionedID := make(map[string][]string)
+	for _, item := range parsed {
+		for _, mentionedID := range outgoingMentionIDs(item) {
+			byMentionedID[mentionedID] = appendUnique(byMentionedID[mentionedID], item.ID)
+		}
+	}
+	for i := range parsed {
+		parsed[i].Backlinks = append([]string(nil), byMentionedID[parsed[i].ID]...)
+	}
+
+	for _, item := range parsed {
 
 		if opts.Channel != nil && item.Channel != *opts.Channel {
 			continue
@@ -253,6 +271,7 @@ func (s *Store) CreateItem(channel models.Channel, title, body string, itemType 
 		Title:   strings.TrimSpace(title),
 		Body:    body,
 	}
+	item.Mentions = itemMentionIDs(item.Body, nil)
 	if err := WriteItem(item, s.itemPath(item)); err != nil {
 		return models.Item{}, err
 	}
@@ -279,10 +298,11 @@ func (s *Store) CreateSubthread(contextID string, title, body string, itemType m
 	return s.CreateItem(context.Channel, title, body, itemType, status, rootID)
 }
 
-// AddRelated makes a symmetric root-to-root link. Both endpoints currently
-// store the edge for convenient inspection, while readers still union links
-// so a manually edited or partially written endpoint cannot hide a relation.
-func (s *Store) AddRelated(firstID, secondID string) (models.Item, error) {
+// AddMention creates a directed mention from firstID to secondID by
+// appending @secondID to the first item's text. Only the mentioner is written,
+// so reparenting or editing either endpoint cannot leave a reciprocal edge
+// index out of sync.
+func (s *Store) AddMention(firstID, secondID string) (models.Item, error) {
 	first, err := s.GetItem(firstID)
 	if err != nil {
 		return models.Item{}, err
@@ -291,27 +311,28 @@ func (s *Store) AddRelated(firstID, secondID string) (models.Item, error) {
 	if err != nil {
 		return models.Item{}, err
 	}
-	if first.Parent != "" || second.Parent != "" {
-		return models.Item{}, fmt.Errorf("related items must be top-level roots")
-	}
 	if first.ID == second.ID {
 		return models.Item{}, fmt.Errorf("an item cannot be related to itself")
 	}
-	first.Related = appendUnique(first.Related, second.ID)
-	second.Related = appendUnique(second.Related, first.ID)
-	if err := WriteItem(first, s.itemPath(first)); err != nil {
-		return models.Item{}, err
+	if !contains(first.Mentions, second.ID) {
+		first.Body = appendMention(first.Body, second.ID)
+		first.Mentions = MentionIDs(first.Body)
 	}
-	if err := WriteItem(second, s.itemPath(second)); err != nil {
+	if err := WriteItem(first, s.itemPath(first)); err != nil {
 		return models.Item{}, err
 	}
 	return first, nil
 }
 
-// RelatedItems returns the symmetric union of stored outgoing links and
-// backlinks. Dangling references are ignored rather than making an item
-// unreadable after its related peer is deleted.
-func (s *Store) RelatedItems(id string) ([]models.Item, error) {
+// AddRelated is the compatibility name used by the existing CLI and TUI.
+// New code should prefer AddMention, which makes the direction explicit.
+func (s *Store) AddRelated(firstID, secondID string) (models.Item, error) {
+	return s.AddMention(firstID, secondID)
+}
+
+// MentionedItems returns the items named by id's outgoing @mentions. Legacy
+// related frontmatter is included as a compatibility source of outgoing IDs.
+func (s *Store) MentionedItems(id string) ([]models.Item, error) {
 	item, err := s.GetItem(id)
 	if err != nil {
 		return nil, err
@@ -321,23 +342,89 @@ func (s *Store) RelatedItems(id string) ([]models.Item, error) {
 		return nil, err
 	}
 	ids := make(map[string]bool)
-	for _, related := range item.Related {
+	for _, mentionedID := range outgoingMentionIDs(item) {
+		ids[mentionedID] = true
+	}
+	return itemsWithIDs(all, ids), nil
+}
+
+// BacklinkItems returns items whose text mentions id. It scans the item files
+// at read time, so deleting an item leaves harmless dangling text rather than
+// requiring cleanup of a maintained reverse index.
+func (s *Store) BacklinkItems(id string) ([]models.Item, error) {
+	if _, err := s.GetItem(id); err != nil {
+		return nil, err
+	}
+	all, err := s.ListItems(ListOpts{})
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]bool)
+	for _, candidate := range all {
+		if contains(outgoingMentionIDs(candidate), id) {
+			ids[candidate.ID] = true
+		}
+	}
+	return itemsWithIDs(all, ids), nil
+}
+
+// RelatedItems preserves the old symmetric traversal API by returning the
+// union of outgoing mentions and backlinks. New callers that care about
+// presentation direction should use MentionedItems and BacklinkItems.
+func (s *Store) RelatedItems(id string) ([]models.Item, error) {
+	if _, err := s.GetItem(id); err != nil {
+		return nil, err
+	}
+	all, err := s.ListItems(ListOpts{})
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]bool)
+	item, _ := s.GetItem(id)
+	for _, related := range outgoingMentionIDs(item) {
 		ids[related] = true
 	}
 	for _, candidate := range all {
-		for _, related := range candidate.Related {
-			if related == id {
-				ids[candidate.ID] = true
-			}
+		if contains(outgoingMentionIDs(candidate), id) {
+			ids[candidate.ID] = true
 		}
 	}
+	return itemsWithIDs(all, ids), nil
+}
+
+func outgoingMentionIDs(item models.Item) []string {
+	ids := append([]string(nil), item.Mentions...)
+	for _, legacyID := range item.Related {
+		ids = appendUnique(ids, legacyID)
+	}
+	return ids
+}
+
+func itemsWithIDs(items []models.Item, ids map[string]bool) []models.Item {
 	var out []models.Item
-	for _, candidate := range all {
-		if ids[candidate.ID] {
-			out = append(out, candidate)
+	for _, item := range items {
+		if ids[item.ID] {
+			out = append(out, item)
 		}
 	}
-	return out, nil
+	return out
+}
+
+func contains(values []string, value string) bool {
+	for _, existing := range values {
+		if existing == value {
+			return true
+		}
+	}
+	return false
+}
+
+func appendMention(body, id string) string {
+	mention := "@" + id
+	if strings.TrimSpace(body) == "" {
+		return mention
+	}
+	return strings.TrimRight(body, "\n") + "\n\n" + mention
 }
 
 func appendUnique(values []string, value string) []string {
@@ -363,6 +450,7 @@ func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.I
 		Timestamp: time.Now().UTC(),
 		Content:   content,
 	})
+	item.Mentions = itemMentionIDs(item.Body, item.Turns)
 	if actor == models.ActorAgent {
 		if next, ok := StatusAfterAgentTurn(item.Status); ok {
 			item.Status = next

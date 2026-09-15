@@ -118,7 +118,17 @@ type Item struct {
 	Status  Status
 	Created time.Time
 	Parent  string // empty if none
+	// Related is the legacy frontmatter relation field. New relations are
+	// stored as @mentions in item text; it remains here so old items and API
+	// callers can be read without a migration.
 	Related []string
+	// Mentions contains item IDs found in the item's body and turns. It is
+	// derived from text and is never persisted as a second edge index.
+	Mentions []string
+	// Backlinks contains IDs of items whose text mentions this item. Stores
+	// populate it when listing items; GetItem leaves it empty because finding
+	// backlinks requires scanning the collection.
+	Backlinks []string
 	// Title is a single line: it is the item's label in list views, where a
 	// multi-line one would crowd out every other row. Body carries the
 	// opening description at whatever length it needs.

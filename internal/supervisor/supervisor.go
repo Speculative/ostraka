@@ -24,8 +24,11 @@ func itemContext(item models.Item) string {
 	if item.Parent != "" {
 		sb.WriteString("parent: " + item.Parent + "\n\n")
 	}
+	if len(item.Mentions) > 0 {
+		sb.WriteString("mentions: " + strings.Join(item.Mentions, ", ") + "\n\n")
+	}
 	if len(item.Related) > 0 {
-		sb.WriteString("related: " + strings.Join(item.Related, ", ") + "\n\n")
+		sb.WriteString("related (legacy): " + strings.Join(item.Related, ", ") + "\n\n")
 	}
 	sb.WriteString(item.Body)
 	for _, turn := range item.Turns {
@@ -53,8 +56,23 @@ func relationshipContext(s *store.Store, item models.Item) string {
 			}
 		}
 	}
-	if len(item.Related) > 0 {
-		sb.WriteString("\nrelated roots: " + strings.Join(item.Related, ", "))
+	if mentions, err := s.MentionedItems(item.ID); err == nil && len(mentions) > 0 {
+		sb.WriteString("\nmentions: ")
+		for i, mentioned := range mentions {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(mentioned.ID + " — " + mentioned.Title)
+		}
+	}
+	if backlinks, err := s.BacklinkItems(item.ID); err == nil && len(backlinks) > 0 {
+		sb.WriteString("\nbacklinks: ")
+		for i, backlink := range backlinks {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(backlink.ID + " — " + backlink.Title)
+		}
 	}
 	return sb.String()
 }

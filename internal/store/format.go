@@ -17,6 +17,11 @@ const turnSep = "\n\n---\n"
 
 var attributionRe = regexp.MustCompile(`^\*\*(\w+) · (.+?)\*\*$`)
 
+// mentionRe deliberately recognizes a conservative item-ID-shaped token.
+// The store still treats unresolved mentions as text: once an item with that
+// ID exists, backlink traversal will discover it without any index update.
+var mentionRe = regexp.MustCompile(`(^|[^A-Za-z0-9_-])@([A-Za-z0-9]+(-[A-Za-z0-9]+)*)`)
+
 type frontmatter struct {
 	ID      string   `yaml:"id"`
 	Channel string   `yaml:"channel"`
@@ -60,6 +65,40 @@ func ValidateTitle(title string) error {
 		return ErrTitleNotSingleLine
 	}
 	return nil
+}
+
+// MentionIDs extracts distinct @mention IDs in encounter order. Mentions are
+// embedded in item text so they travel with the item during moves, exports,
+// and manual edits; there is no second relation index to keep synchronized.
+func MentionIDs(text string) []string {
+	matches := mentionRe.FindAllStringSubmatch(text, -1)
+	ids := make([]string, 0, len(matches))
+	seen := make(map[string]bool, len(matches))
+	for _, match := range matches {
+		if len(match) < 3 || seen[match[2]] {
+			continue
+		}
+		seen[match[2]] = true
+		ids = append(ids, match[2])
+	}
+	return ids
+}
+
+func itemMentionIDs(body string, turns []models.Turn) []string {
+	ids := MentionIDs(body)
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		seen[id] = true
+	}
+	for _, turn := range turns {
+		for _, id := range MentionIDs(turn.Content) {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
 }
 
 func ParseItem(path string) (models.Item, error) {
@@ -142,7 +181,7 @@ func ParseItem(path string) (models.Item, error) {
 		title = DeriveTitle(itemBody)
 	}
 
-	return models.Item{
+	item := models.Item{
 		ID:      fm.ID,
 		Channel: channel,
 		Type:    itemType,
@@ -153,7 +192,9 @@ func ParseItem(path string) (models.Item, error) {
 		Title:   title,
 		Body:    itemBody,
 		Turns:   turns,
-	}, nil
+	}
+	item.Mentions = itemMentionIDs(item.Body, item.Turns)
+	return item, nil
 }
 
 func WriteItem(item models.Item, path string) error {

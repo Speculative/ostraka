@@ -270,7 +270,7 @@ func addItemAddFlags() {
 	f.StringVarP(&addFlags.itype, "type", "t", "thread", "thread|doc")
 	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|archived")
 	f.StringVarP(&addFlags.parent, "parent", "p", "", "parent item ID")
-	f.StringSliceVar(&addFlags.related, "related", nil, "top-level item IDs to relate")
+	f.StringSliceVar(&addFlags.related, "related", nil, "item IDs to mention (legacy flag name)")
 	itemAddCmd.MarkFlagRequired("channel")
 	itemAddCmd.MarkFlagRequired("title")
 	itemAddCmd.MarkFlagRequired("body")
@@ -304,7 +304,7 @@ var itemAddCmd = &cobra.Command{
 			return err
 		}
 		for _, related := range addFlags.related {
-			if _, err := s.AddRelated(item.ID, related); err != nil {
+			if _, err := s.AddMention(item.ID, related); err != nil {
 				return err
 			}
 		}
@@ -322,7 +322,7 @@ var suggestFlags struct {
 
 var itemSuggestCmd = &cobra.Command{
 	Use:   "suggest --title <title> --body <body> --related <id>",
-	Short: "Create a proposed top-level item related to existing work",
+	Short: "Create a proposed item related to existing work",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s := mustStore()
@@ -333,7 +333,7 @@ var itemSuggestCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if _, err := s.AddRelated(item.ID, suggestFlags.related); err != nil {
+		if _, err := s.AddMention(item.ID, suggestFlags.related); err != nil {
 			return err
 		}
 		fmt.Println(item.ID)
@@ -346,7 +346,7 @@ func init() {
 	f.StringVarP(&suggestFlags.channel, "channel", "c", string(models.ChannelInbox), "inbox")
 	f.StringVar(&suggestFlags.title, "title", "", "single-line label for list views (required)")
 	f.StringVar(&suggestFlags.body, "body", "", "opening description (required)")
-	f.StringVar(&suggestFlags.related, "related", "", "existing top-level item ID (required)")
+	f.StringVar(&suggestFlags.related, "related", "", "existing item ID to mention (required)")
 	itemSuggestCmd.MarkFlagRequired("title")
 	itemSuggestCmd.MarkFlagRequired("body")
 	itemSuggestCmd.MarkFlagRequired("related")
@@ -421,6 +421,12 @@ var itemShowCmd = &cobra.Command{
 		if err != nil {
 			die(err)
 		}
+		if backlinks, err := s.BacklinkItems(item.ID); err == nil {
+			item.Backlinks = make([]string, len(backlinks))
+			for i, backlink := range backlinks {
+				item.Backlinks[i] = backlink.ID
+			}
+		}
 		if showFlags.asJSON {
 			return json.NewEncoder(os.Stdout).Encode(itemToJSON(item))
 		}
@@ -432,7 +438,17 @@ var itemShowCmd = &cobra.Command{
 			fmt.Println("parent:", item.Parent)
 		}
 		if len(item.Related) > 0 {
-			fmt.Println("related:", strings.Join(item.Related, ", "))
+			fmt.Println("related (legacy):", strings.Join(item.Related, ", "))
+		}
+		if len(item.Mentions) > 0 {
+			fmt.Println("mentions:", strings.Join(item.Mentions, ", "))
+		}
+		if backlinks, err := s.BacklinkItems(item.ID); err == nil && len(backlinks) > 0 {
+			ids := make([]string, len(backlinks))
+			for i, backlink := range backlinks {
+				ids[i] = backlink.ID
+			}
+			fmt.Println("backlinks:", strings.Join(ids, ", "))
 		}
 		fmt.Println()
 		fmt.Println(item.Body)
@@ -581,16 +597,18 @@ func itemToJSON(item models.Item) map[string]any {
 		}
 	}
 	return map[string]any{
-		"id":      item.ID,
-		"channel": item.Channel,
-		"type":    item.Type,
-		"status":  item.Status,
-		"created": item.Created.Format(time.RFC3339Nano),
-		"parent":  item.Parent,
-		"related": item.Related,
-		"title":   item.Title,
-		"body":    item.Body,
-		"turns":   turns,
+		"id":        item.ID,
+		"channel":   item.Channel,
+		"type":      item.Type,
+		"status":    item.Status,
+		"created":   item.Created.Format(time.RFC3339Nano),
+		"parent":    item.Parent,
+		"related":   item.Related,
+		"mentions":  item.Mentions,
+		"backlinks": item.Backlinks,
+		"title":     item.Title,
+		"body":      item.Body,
+		"turns":     turns,
 	}
 }
 

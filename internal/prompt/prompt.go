@@ -118,7 +118,7 @@ branch is independently discussable or likely to need multiple exchanges.
 Creating from a child attaches a sibling; never create a grandchild. A
 subthread normally starts pending-user for a question to the user or
 backlog when parked. For work outside this item's scope, suggest a related
-top-level item with "ostraka item suggest --related <item-id> ..."; proposals
+item with "ostraka item suggest --related <item-id> ..."; proposals
 need the user's keep/start decision before they become active work.
 
 Final reply command:

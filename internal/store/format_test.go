@@ -3,6 +3,7 @@ package store_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +95,36 @@ func TestParseWithTurns(t *testing.T) {
 	}
 	if got.Turns[1].Actor != models.ActorUser {
 		t.Errorf("turn[1] actor: got %q want %q", got.Turns[1].Actor, models.ActorUser)
+	}
+}
+
+func TestParseMentionsFromBodyAndTurns(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	item := models.Item{
+		ID:      "20240101-120000",
+		Channel: models.ChannelInbox,
+		Type:    models.TypeThread,
+		Status:  models.StatusActive,
+		Created: now,
+		Body:    "See @20240101-120001 and @20240101-120001 again.",
+		Turns: []models.Turn{{
+			Actor:     models.ActorUser,
+			Timestamp: now,
+			Content:   "Also see @20240101-120002.",
+		}},
+	}
+
+	path := filepath.Join(t.TempDir(), "item.md")
+	if err := store.WriteItem(item, path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ParseItem(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"20240101-120001", "20240101-120002"}
+	if !reflect.DeepEqual(got.Mentions, want) {
+		t.Fatalf("mentions = %v, want %v", got.Mentions, want)
 	}
 }
 
