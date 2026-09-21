@@ -71,7 +71,7 @@ outstanding work, a prior incomplete or failed check, or changed inputs warrant
 them. Then send one substantive Ostraka item reply; it ends this dispatch.`
 
 const activitySectionText = `--- unhandled subthread activity ---
-{{range .Activities}}{{.Type}}: {{.Title}} ({{.ChildID}}, result={{.Result}}, actor={{.Actor}})
+{{range .Activities}}{{.Type}}: {{.Title}} ({{.ChildID}}{{if .FromRootID}}, from={{.FromRootID}}{{end}}{{if .ToRootID}}, to={{.ToRootID}}{{end}}, result={{.Result}}, actor={{.Actor}})
 {{end}}Review each distinct affected subthread once with
 "ostraka item show <child-id> --json" unless a later event requires another
 read. Reconcile its decision with the root item and include the consequences in
@@ -164,11 +164,13 @@ type activitySectionData struct {
 }
 
 type activityData struct {
-	Type    string
-	Title   string
-	ChildID string
-	Result  string
-	Actor   models.Actor
+	Type       string
+	Title      string
+	ChildID    string
+	FromRootID string
+	ToRootID   string
+	Result     string
+	Actor      models.Actor
 }
 
 type agentOrientationData struct {
@@ -224,11 +226,13 @@ func activitySection(activities []models.Activity) string {
 			title = activity.ChildID
 		}
 		data.Activities = append(data.Activities, activityData{
-			Type:    activity.Type,
-			Title:   title,
-			ChildID: activity.ChildID,
-			Result:  activity.Result,
-			Actor:   activity.Actor,
+			Type:       activity.Type,
+			Title:      title,
+			ChildID:    activity.ChildID,
+			FromRootID: activity.FromRootID,
+			ToRootID:   activity.ToRootID,
+			Result:     activity.Result,
+			Actor:      activity.Actor,
 		})
 	}
 	return "\n\n" + renderPrompt(activitySectionTemplate, data)

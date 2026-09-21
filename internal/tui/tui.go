@@ -311,6 +311,12 @@ type model struct {
 	// efforts; no additional provider round trip is needed.
 	sessionEffortIdx int
 	sessionEfforts   []string
+	// Reparenting is a short destination picker. The source ID is fixed when
+	// the picker opens so a reload or list reorder cannot move a different item.
+	reparentItemID    string
+	reparentTargets   []models.Item
+	reparentTargetIdx int
+	reparentFlatten   bool
 
 	// convTurns is the turn count of the item currently rendered into conv,
 	// so a reload can tell "new turn arrived" from "same item, redrawn".
@@ -392,6 +398,7 @@ const (
 	modeSessionEffort
 	modeQuit
 	modeProposal
+	modeReparent
 )
 
 type paneFocus uint8
@@ -788,6 +795,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleQuitKey(msg)
 		case modeProposal:
 			return m.handleProposalKey(msg)
+		case modeReparent:
+			return m.handleReparentKey(msg)
 		}
 		return m.handleNavKey(msg)
 	}
@@ -999,6 +1008,98 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			provider, _, _, _, _ := m.sup.Session(itemID)
 			m.sessionIdx = sessionProviderIndex(provider)
 		}
+	case "m":
+		if itemID := m.selectedID(); itemID != "" {
+			return m.beginReparent()
+		}
+	}
+	return m, nil
+}
+
+func (m model) beginReparent() (tea.Model, tea.Cmd) {
+	if m.store == nil {
+		m.err = fmt.Errorf("cannot reparent without a store")
+		return m, nil
+	}
+	sourceID := m.selectedID()
+	if sourceID == "" {
+		return m, nil
+	}
+	current, err := m.store.GetItem(sourceID)
+	if err != nil {
+		m.err = err
+		return m, nil
+	}
+	allItems := m.allItems
+	if len(allItems) == 0 {
+		allItems, err = m.store.ListItems(store.ListOpts{})
+		if err != nil {
+			m.err = err
+			return m, nil
+		}
+	}
+	targets := make([]models.Item, 0, len(allItems))
+	for _, item := range allItems {
+		if item.ID == sourceID || item.Parent != "" || models.TerminalStatuses[item.Status] || item.ID == current.Parent {
+			continue
+		}
+		if item.Channel == current.Channel {
+			targets = append(targets, item)
+		}
+	}
+	if len(targets) == 0 {
+		m.err = fmt.Errorf("no compatible root is available for item %q", sourceID)
+		return m, nil
+	}
+	m.reparentItemID = sourceID
+	m.reparentTargets = targets
+	m.reparentTargetIdx = 0
+	m.reparentFlatten = false
+	m.mode = modeReparent
+	m.updateConv()
+	return m, nil
+}
+
+func (m model) handleReparentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.mode = modeNav
+		m.updateConv()
+	case "j", "down":
+		if m.reparentTargetIdx < len(m.reparentTargets)-1 {
+			m.reparentTargetIdx++
+		}
+	case "k", "up":
+		if m.reparentTargetIdx > 0 {
+			m.reparentTargetIdx--
+		}
+	case "f":
+		if m.hasChildren(m.reparentItemID) {
+			m.reparentFlatten = !m.reparentFlatten
+		} else {
+			m.err = fmt.Errorf("--flatten-children is only valid for item %q when it has subthreads", m.reparentItemID)
+		}
+	case "enter":
+		if m.store == nil || m.reparentTargetIdx < 0 || m.reparentTargetIdx >= len(m.reparentTargets) {
+			m.mode = modeNav
+			return m, nil
+		}
+		targetID := m.reparentTargets[m.reparentTargetIdx].ID
+		if _, err := m.store.ReparentItem(m.reparentItemID, targetID, m.reparentFlatten); err != nil {
+			m.err = err
+			return m, nil
+		}
+		sourceID := m.reparentItemID
+		m.err = nil
+		m.mode = modeNav
+		m.reparentItemID = ""
+		m.reparentTargets = nil
+		m.reparentTargetIdx = 0
+		m.reparentFlatten = false
+		m.reload()
+		m.restoreSelection(sourceID)
+		m.updateConv()
+		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	}
 	return m, nil
 }
@@ -1995,6 +2096,8 @@ func (m model) renderConv() string {
 		lines = m.overlaySessionEffortPopup(lines)
 	} else if m.mode == modeProposal {
 		lines = m.overlayProposalPopup(lines)
+	} else if m.mode == modeReparent {
+		lines = m.overlayReparentPopup(lines)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -2192,6 +2295,44 @@ func (m model) overlayProposalPopup(lines []string) []string {
 	return overlayBox(lines, box, m.conv.Width)
 }
 
+func (m model) overlayReparentPopup(lines []string) []string {
+	source := m.reparentItemID
+	maxTargets := max(1, len(lines)-8)
+	start := 0
+	if m.reparentTargetIdx >= maxTargets {
+		start = m.reparentTargetIdx - maxTargets + 1
+	}
+	end := min(len(m.reparentTargets), start+maxTargets)
+	rows := make([]string, 0, end-start+2)
+	if start > 0 {
+		rows = append(rows, dimStyle.Render("  ↑ more roots"))
+	}
+	for i := start; i < end; i++ {
+		target := m.reparentTargets[i]
+		marker, style := "  ", lipgloss.NewStyle()
+		if i == m.reparentTargetIdx {
+			marker, style = "› ", lipgloss.NewStyle().Bold(true).Foreground(pendingFg)
+		}
+		rows = append(rows, style.Render(marker+target.Title+"  ["+target.ID+"]"))
+	}
+	if end < len(m.reparentTargets) {
+		rows = append(rows, dimStyle.Render("  ↓ more roots"))
+	}
+	if len(rows) == 0 {
+		rows = []string{"(no compatible roots)"}
+	}
+	help := "enter move   esc cancel"
+	if m.hasChildren(source) {
+		state := "off"
+		if m.reparentFlatten {
+			state = "on"
+		}
+		help = "f flatten children: " + state + "   " + help
+	}
+	box := popupStyle.Render("move " + source + " under\n" + strings.Join(rows, "\n") + "\n\n" + dimStyle.Render(help))
+	return overlayBox(lines, box, m.conv.Width)
+}
+
 func (m model) renderHeader() string {
 	tabs := make([]string, len(m.views))
 	for i, v := range m.views {
@@ -2252,19 +2393,21 @@ func (m model) renderFooter() string {
 		text = "y quit and stop the running turn  any other key stay"
 	case modeProposal:
 		text = "k keep for later  s start  x reject  esc cancel"
+	case modeReparent:
+		text = "j/k select root  enter move  f flatten children  esc cancel"
 	default:
 		if m.projectPane != 0 {
 			text = "←/→/h/l pane  j/k versions  f copy view  tab switch document  e edit  esc/ctrl+c interrupt  1-3 view  q quit"
 			break
 		}
-		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S session  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
+		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
 		}
 		if m.showBacklog {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S session  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
+				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
 			}
 		}
 	}
@@ -3247,8 +3390,12 @@ func (m *model) updateConv() {
 			if title == "" {
 				title = event.activity.ChildID
 			}
+			activityType := event.activity.Type
+			if event.activity.Type == store.ActivitySubthreadMoved && event.activity.FromRootID != "" && event.activity.ToRootID != "" {
+				activityType += "  " + event.activity.FromRootID + " → " + event.activity.ToRootID
+			}
 			sb.WriteString(fmt.Sprintf("\n\n%s\nactivity  ·  %s  ·  %s [%s]",
-				turnRule, event.activity.Type, title, status))
+				turnRule, activityType, title, status))
 		case conversationPartial:
 			parts := []conversationPart{{content: renderStandalonePartialHeader(event.partial), actor: models.ActorAgent}}
 			if m.traceExpanded[traceSelectionKey(item.ID, event)] {

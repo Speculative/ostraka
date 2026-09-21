@@ -31,7 +31,7 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd, preambleCmd)
-	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRmCmd)
+	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRmCmd, itemReparentCmd)
 	rootCmd.AddCommand(projectCmd)
 	projectCmd.AddCommand(projectInstructionsCmd, projectBriefCmd)
 	projectInstructionsCmd.AddCommand(projectInstructionsShowCmd, projectInstructionsReplaceCmd)
@@ -43,6 +43,7 @@ func init() {
 	addItemShowFlags()
 	addItemTurnFlags()
 	addItemRmFlags()
+	addItemReparentFlags()
 }
 
 // ── ostraka preamble ────────────────────────────────────────────────────────
@@ -248,6 +249,49 @@ func storeForTUI(cmd *cobra.Command) (*store.Store, error) {
 var itemCmd = &cobra.Command{
 	Use:   "item",
 	Short: "Create and manage items",
+}
+
+// ── item reparent ───────────────────────────────────────────────────────────
+
+var reparentFlags struct {
+	parent          string
+	flattenChildren bool
+}
+
+var itemReparentCmd = &cobra.Command{
+	Use:     "reparent <item-id> [<root-id>]",
+	Aliases: []string{"move"},
+	Short:   "Move an item under another root",
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) < 1 || len(args) > 2 {
+			return fmt.Errorf("requires <item-id> and a destination root, either as an argument or with --parent")
+		}
+		if len(args) == 2 && reparentFlags.parent != "" {
+			return fmt.Errorf("destination root supplied both as an argument and with --parent")
+		}
+		if len(args) == 1 && strings.TrimSpace(reparentFlags.parent) == "" {
+			return fmt.Errorf("requires a destination root argument or --parent <root-id>")
+		}
+		return nil
+	},
+	RunE: func(cmd *cobra.Command, args []string) error {
+		parent := reparentFlags.parent
+		if len(args) == 2 {
+			parent = args[1]
+		}
+		item, err := mustStore().ReparentItem(args[0], parent, reparentFlags.flattenChildren)
+		if err != nil {
+			return err
+		}
+		fmt.Println(item.ID)
+		return nil
+	},
+}
+
+func addItemReparentFlags() {
+	f := itemReparentCmd.Flags()
+	f.StringVarP(&reparentFlags.parent, "parent", "p", "", "destination root item ID")
+	f.BoolVar(&reparentFlags.flattenChildren, "flatten-children", false, "move the item's direct children as siblings under the destination root")
 }
 
 // ── item add ─────────────────────────────────────────────────────────────────
@@ -458,7 +502,11 @@ var itemShowCmd = &cobra.Command{
 		if activities, err := s.ListActivities(item.ID); err == nil && len(activities) > 0 {
 			fmt.Println("\n── activity ──")
 			for _, activity := range activities {
-				fmt.Printf("%s %s %s [%s]\n", activity.Timestamp.Format("2006-01-02 15:04:05"), activity.Type, activity.ChildID, activity.Result)
+				detail := activity.ChildID
+				if activity.Type == store.ActivitySubthreadMoved && activity.FromRootID != "" && activity.ToRootID != "" {
+					detail += " (" + activity.FromRootID + " → " + activity.ToRootID + ")"
+				}
+				fmt.Printf("%s %s %s [%s]\n", activity.Timestamp.Format("2006-01-02 15:04:05"), activity.Type, detail, activity.Result)
 			}
 		}
 		return nil

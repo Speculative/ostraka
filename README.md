@@ -12,6 +12,12 @@ after one hour, which is Claude Code's documented cache TTL. Codex's App
 Server uses the GPT-5.6 30-minute cache-reuse window. Both are recommendations:
 providers may retain cache entries longer.
 
+Use `ostraka item reparent <item-id> <root-id>` (or `--parent <root-id>`) to
+move an item under another live root. The `m` TUI action opens the same root
+picker. An item with subthreads requires `--flatten-children`; that moves the
+item and its direct children as siblings under the destination. Passing the
+flag for an item without children is rejected.
+
 Run `ostraka preamble` when an agent needs the static orientation and final
 reply guidance. Normal dispatched sessions receive the same guidance directly
 in their initial prompt.

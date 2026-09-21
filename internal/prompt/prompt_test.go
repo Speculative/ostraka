@@ -130,6 +130,22 @@ func TestPromptIncludesActivityContext(t *testing.T) {
 	}
 }
 
+func TestPromptIncludesReparentActivityRoots(t *testing.T) {
+	activity := models.Activity{
+		Type:       "subthread.moved",
+		ChildID:    "child-1",
+		ChildTitle: "Moved branch",
+		FromRootID: "old-root",
+		ToRootID:   "new-root",
+		Result:     "moved",
+		Actor:      models.ActorUser,
+	}
+	got := Nudge("new-root", nil, []models.Activity{activity})
+	if !strings.Contains(got, "subthread.moved: Moved branch (child-1, from=old-root, to=new-root, result=moved, actor=user)") {
+		t.Fatalf("reparent activity roots missing from prompt: %q", got)
+	}
+}
+
 func TestAgentOrientationIncludesExactReplyCommand(t *testing.T) {
 	command := "go run ./cmd/ostraka item turn <item-id> --actor agent --content-stdin"
 	got := AgentOrientation(command)

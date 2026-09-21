@@ -105,6 +105,8 @@ type Activity struct {
 	Type       string    `json:"type"`
 	ChildID    string    `json:"child_id,omitempty"`
 	ChildTitle string    `json:"child_title,omitempty"`
+	FromRootID string    `json:"from_root_id,omitempty"`
+	ToRootID   string    `json:"to_root_id,omitempty"`
 	Result     string    `json:"result,omitempty"`
 	Actor      Actor     `json:"actor"`
 	Timestamp  time.Time `json:"timestamp"`

@@ -61,6 +61,69 @@ func TestItemTurnArgumentRules(t *testing.T) {
 	}
 }
 
+func TestItemReparentCommandMovesItemAndHonorsFlattenFlag(t *testing.T) {
+	project := t.TempDir()
+	rootDir := filepath.Join(project, ".ostraka")
+	s, err := store.NewStore(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRoot, _ := s.CreateItem(models.ChannelInbox, "old root", "old body", models.TypeThread, models.StatusActive, "")
+	newRoot, _ := s.CreateItem(models.ChannelInbox, "new root", "new body", models.TypeThread, models.StatusActive, "")
+	child, _ := s.CreateSubthread(oldRoot.ID, "child", "child body", models.TypeThread, models.StatusActive)
+
+	t.Chdir(project)
+	oldParent, oldFlatten := reparentFlags.parent, reparentFlags.flattenChildren
+	t.Cleanup(func() {
+		reparentFlags.parent = oldParent
+		reparentFlags.flattenChildren = oldFlatten
+	})
+	reparentFlags.parent = newRoot.ID
+	reparentFlags.flattenChildren = false
+	if err := itemReparentCmd.Args(itemReparentCmd, []string{oldRoot.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := itemReparentCmd.RunE(itemReparentCmd, []string{oldRoot.ID}); err == nil || !strings.Contains(err.Error(), "--flatten-children") {
+		t.Fatalf("parent move without flag error = %v", err)
+	}
+
+	reparentFlags.flattenChildren = true
+	if err := itemReparentCmd.RunE(itemReparentCmd, []string{oldRoot.ID}); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := s.GetItem(oldRoot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.Parent != newRoot.ID {
+		t.Fatalf("CLI moved root parent = %q, want %q", moved.Parent, newRoot.ID)
+	}
+	movedChild, _ := s.GetItem(child.ID)
+	if movedChild.Parent != newRoot.ID {
+		t.Fatalf("CLI flattened child parent = %q, want %q", movedChild.Parent, newRoot.ID)
+	}
+}
+
+func TestItemReparentCommandAcceptsPositionalDestination(t *testing.T) {
+	oldParent, oldFlatten := reparentFlags.parent, reparentFlags.flattenChildren
+	t.Cleanup(func() {
+		reparentFlags.parent = oldParent
+		reparentFlags.flattenChildren = oldFlatten
+	})
+	reparentFlags.parent = ""
+	reparentFlags.flattenChildren = false
+	if err := itemReparentCmd.Args(itemReparentCmd, []string{"source", "target"}); err != nil {
+		t.Fatalf("positional destination rejected: %v", err)
+	}
+	if err := itemReparentCmd.Args(itemReparentCmd, []string{"source"}); err == nil {
+		t.Fatal("missing destination accepted")
+	}
+	reparentFlags.parent = "target"
+	if err := itemReparentCmd.Args(itemReparentCmd, []string{"source", "other-target"}); err == nil {
+		t.Fatal("duplicate destinations accepted")
+	}
+}
+
 func TestUserSettableStatus(t *testing.T) {
 	for _, status := range models.UserSettableStatuses() {
 		got, err := userSettableStatus(string(status))

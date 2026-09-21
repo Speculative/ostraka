@@ -20,6 +20,7 @@ const activityDir = "ACTIVITY"
 const (
 	ActivitySubthreadCreated               = "subthread.created"
 	ActivitySubthreadClosed                = "subthread.closed"
+	ActivitySubthreadMoved                 = "subthread.moved"
 	ActivityAgentInterrupted               = "agent.interrupted"
 	ActivityAgentEndedWithoutFinalResponse = "agent.ended_without_final_response"
 )
