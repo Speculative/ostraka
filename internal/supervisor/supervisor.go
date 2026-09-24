@@ -15,7 +15,10 @@ import (
 	"github.com/Speculative/ostraka/internal/store"
 )
 
-const bootstrapItemContextMaxChars = 24000
+const (
+	bootstrapItemContextMaxChars  = 24000
+	bootstrapPartialTraceMaxChars = 12000
+)
 
 func itemContext(item models.Item) string {
 	var sb strings.Builder
@@ -113,6 +116,68 @@ func trimRunes(s string, max int) string {
 		return s
 	}
 	return string(r[:max]) + "\n[opening body truncated]"
+}
+
+// partialTraceContext gives a fresh provider session the useful output from
+// earlier runs. Partial traces are otherwise only a TUI concern and a new
+// provider session would have no way to know that an interrupted or failed
+// run had already explored the problem.
+func partialTraceContext(partials []models.PartialTrace) string {
+	if len(partials) == 0 {
+		return ""
+	}
+
+	header := "\n\n--- captured partial traces from earlier agent dispatches ---"
+	footer := "\n--- end captured partial traces ---"
+	available := bootstrapPartialTraceMaxChars - len([]rune(header)) - len([]rune(footer))
+	if available <= 0 {
+		return ""
+	}
+
+	sections := make([]string, 0, len(partials))
+	omitted := 0
+	used := 0
+	for i := len(partials) - 1; i >= 0; i-- {
+		partial := partials[i]
+		status := partial.Status
+		if status == "" {
+			status = "retained"
+		}
+		timestamp := "unknown time"
+		if !partial.Timestamp.IsZero() {
+			timestamp = partial.Timestamp.Format(time.RFC3339)
+		}
+		relationship := "standalone; no final agent turn was posted"
+		if !partial.TurnTimestamp.IsZero() {
+			relationship = "linked to posted turn " + partial.TurnTimestamp.Format(time.RFC3339)
+		}
+		section := fmt.Sprintf("\n--- partial trace · %s · %s · %s ---\n%s", timestamp, status, relationship, partial.Content)
+		sectionRunes := []rune(section)
+		remaining := available - used
+		if len(sectionRunes) > remaining {
+			if len(sections) == 0 && remaining > 0 {
+				section = string(sectionRunes[:remaining]) + "\n[partial trace truncated]"
+				sections = append(sections, section)
+				used = available
+			} else {
+				omitted++
+			}
+			continue
+		}
+		sections = append(sections, section)
+		used += len(sectionRunes)
+	}
+
+	// We collected newest traces first so that the bounded context always
+	// retains the latest failed or interrupted run. Restore recorded order in
+	// the prompt for easier comparison with the TUI timeline.
+	for i, j := 0, len(sections)-1; i < j; i, j = i+1, j-1 {
+		sections[i], sections[j] = sections[j], sections[i]
+	}
+	if omitted > 0 {
+		sections = append(sections, fmt.Sprintf("\n[%d earlier partial trace(s) omitted from bootstrap context; query `ostraka item show <item-id> --include-partial --json` for the complete journal.]", omitted))
+	}
+	return header + strings.Join(sections, "") + footer
 }
 
 func replyCommand(root, itemID string) string {
@@ -793,6 +858,11 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 			brief, _ = s.store.ProjectBrief()
 			if item, err := s.store.GetItem(msg.itemID); err == nil {
 				context = boundedItemContext(item)
+				if partials, partialErr := s.store.ListPartialTraces(item.ID); partialErr == nil {
+					context += partialTraceContext(partials)
+				} else {
+					s.logger.Printf("item %s: cannot load partial traces for bootstrap context: %v", item.ID, partialErr)
+				}
 				context += relationshipContext(s.store, item)
 			}
 		}

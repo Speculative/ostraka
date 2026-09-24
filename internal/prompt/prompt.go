@@ -83,8 +83,26 @@ are the conversation for that work. Direct subthreads hold independently
 discussable branches.
 
 Your normal harness progress and partial responses are streamed into Ostraka
-and are visible to the user. Use them for concise progress updates. Reserve the
-final Ostraka item reply for the substantive handoff that ends the dispatch.
+and are visible to the user. Use them for concise progress updates. A retained
+provider trace, also called a partial trace in the JSON field "partial_traces",
+is provider progress output captured during an agent dispatch, such as
+reasoning or tool activity; it is not a posted conversation turn. It may be
+linked to a posted agent turn or stand alone when a run ends before a final
+response. Retained traces from earlier runs are included in fresh-session item
+context when available; the complete journal is queryable with "ostraka item
+show <item-id> --include-partial --json". Reserve the final Ostraka item reply
+for the substantive handoff that ends the dispatch.
+
+A standalone retained trace is a conversation hole: provider progress was
+emitted, but no final agent turn was posted for that dispatch. In JSON, a
+non-zero "turn_timestamp" links a trace to its posted agent turn; a zero
+"turn_timestamp" means the trace is standalone and has no posted response.
+
+For long items, pipe the JSON through jq so only the needed portion enters
+context. Turn indexes are zero-based. Common queries:
+  ostraka item show <item-id> --json | jq '.turns[-20:]'
+  ostraka item show <item-id> --json | jq '[.turns[] | select(.actor == "user")]'
+  ostraka item show <item-id> --include-partial --json | jq --argjson turn 42 '. as $item | ($item.turns[$turn].timestamp) as $ts | $item | .partial_traces = [.partial_traces[] | select(.turn_timestamp == $ts)]'
 
 Use your normal harness turns and tools while working. The initial prompt
 contains the item context available to this dispatch. Starting a new Ostraka

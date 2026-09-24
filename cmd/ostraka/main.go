@@ -449,16 +449,35 @@ var itemListCmd = &cobra.Command{
 
 // ── item show ────────────────────────────────────────────────────────────────
 
-var showFlags struct{ asJSON bool }
+var showFlags struct {
+	asJSON         bool
+	includePartial bool
+}
 
 func addItemShowFlags() {
 	itemShowCmd.Flags().BoolVar(&showFlags.asJSON, "json", false, "output as JSON")
+	itemShowCmd.Flags().BoolVar(&showFlags.includePartial, "include-partial", false, "include retained provider partial traces")
 }
 
 var itemShowCmd = &cobra.Command{
 	Use:   "show <id>",
 	Short: "Show an item and its conversation",
-	Args:  cobra.ExactArgs(1),
+	Long: `Show an item and its complete conversation. JSON output includes the full
+turns array. Retained provider partial traces are excluded unless
+--include-partial is supplied. For long items, use jq to select only the
+context you need; turn indexes are zero-based. A retained provider trace
+(called a partial trace in the partial_traces JSON field) is provider progress
+output captured during a dispatch, such as reasoning or tool activity; it is
+not a posted conversation turn. It may be linked to a posted agent turn or be
+standalone when a run ends before a final response.
+In JSON, a non-zero turn_timestamp identifies the linked turn; a zero
+turn_timestamp means the trace is standalone and no final agent turn was posted.
+
+Examples:
+  ostraka item show <item-id> --json | jq '.turns[-20:]'
+  ostraka item show <item-id> --json | jq '[.turns[] | select(.actor == "user")]'
+  ostraka item show <item-id> --include-partial --json | jq --argjson turn 42 '. as $item | ($item.turns[$turn].timestamp) as $ts | $item | .partial_traces = [.partial_traces[] | select(.turn_timestamp == $ts)]'`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s := mustStore()
 		item, err := s.GetItem(args[0])
@@ -471,7 +490,18 @@ var itemShowCmd = &cobra.Command{
 				item.Backlinks[i] = backlink.ID
 			}
 		}
+		var partials []models.PartialTrace
+		var partialErr error
+		if showFlags.includePartial {
+			partials, partialErr = s.ListPartialTraces(item.ID)
+		}
 		if showFlags.asJSON {
+			if partialErr != nil {
+				return partialErr
+			}
+			if showFlags.includePartial {
+				return json.NewEncoder(os.Stdout).Encode(itemToJSONWithPartialTraces(item, partials))
+			}
 			return json.NewEncoder(os.Stdout).Encode(itemToJSON(item))
 		}
 		fmt.Printf("── %s ──\n", item.ID)
@@ -498,6 +528,15 @@ var itemShowCmd = &cobra.Command{
 		fmt.Println(item.Body)
 		for _, turn := range item.Turns {
 			fmt.Printf("\n── %s · %s ──\n%s\n", turn.Actor, turn.Timestamp.Format("2006-01-02 15:04:05"), turn.Content)
+		}
+		if partialErr == nil {
+			for _, partial := range partials {
+				status := partial.Status
+				if status == "" {
+					status = "retained"
+				}
+				fmt.Printf("\n── agent partial trace · %s · %s ──\n%s\n", status, partial.Timestamp.Format("2006-01-02 15:04:05"), partial.Content)
+			}
 		}
 		if activities, err := s.ListActivities(item.ID); err == nil && len(activities) > 0 {
 			fmt.Println("\n── activity ──")
@@ -658,6 +697,22 @@ func itemToJSON(item models.Item) map[string]any {
 		"body":      item.Body,
 		"turns":     turns,
 	}
+}
+
+func itemToJSONWithPartialTraces(item models.Item, partials []models.PartialTrace) map[string]any {
+	out := itemToJSON(item)
+	traces := make([]map[string]any, len(partials))
+	for i, partial := range partials {
+		traces[i] = map[string]any{
+			"id":             partial.ID,
+			"timestamp":      partial.Timestamp.Format(time.RFC3339Nano),
+			"turn_timestamp": partial.TurnTimestamp.Format(time.RFC3339Nano),
+			"status":         partial.Status,
+			"content":        partial.Content,
+		}
+	}
+	out["partial_traces"] = traces
+	return out
 }
 
 func itemsToJSON(items []models.Item) []map[string]any {

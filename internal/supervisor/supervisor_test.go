@@ -704,6 +704,52 @@ func TestBoundedItemContextMarksOmission(t *testing.T) {
 	}
 }
 
+func TestPartialTraceContextIncludesLatestRetainedOutput(t *testing.T) {
+	got := partialTraceContext([]models.PartialTrace{
+		{Timestamp: time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC), Status: "failed", Content: "older investigation"},
+		{Timestamp: time.Date(2026, 9, 24, 15, 1, 0, 0, time.UTC), Status: "interrupted", Content: "latest investigation", TurnTimestamp: time.Date(2026, 9, 24, 15, 2, 0, 0, time.UTC)},
+	})
+	for _, want := range []string{
+		"captured partial traces from earlier agent dispatches",
+		"failed",
+		"older investigation",
+		"interrupted",
+		"latest investigation",
+		"standalone; no final agent turn was posted",
+		"linked to posted turn",
+		"end captured partial traces",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("partial trace context missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestDispatchBootstrapIncludesRetainedPartialTraces(t *testing.T) {
+	h := &fakeHarness{}
+	s, st := newStoreBackedSupervisor(t, h)
+	item, err := st.CreateItem(models.ChannelInbox, "trace", "body", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendPartialTrace(item.ID, models.PartialTrace{
+		Status:  "failed",
+		Content: "provider explored the issue before failing",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.dispatch(enqueueMsg{itemID: item.ID})
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.prompts) != 1 ||
+		!strings.Contains(h.prompts[0], "provider explored the issue before failing") ||
+		!strings.Contains(h.prompts[0], "standalone; no final agent turn was posted") {
+		t.Fatalf("bootstrap prompt omitted retained partial trace: %q", h.prompts)
+	}
+}
+
 func TestDispatchIncludesFinalUserTurnInNudge(t *testing.T) {
 	fh := &fakeHarness{}
 	s, st := newStoreBackedSupervisor(t, fh)

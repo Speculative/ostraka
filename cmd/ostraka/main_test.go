@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Speculative/ostraka/internal/models"
 	"github.com/Speculative/ostraka/internal/store"
@@ -144,6 +145,47 @@ func TestUserSettableStatus(t *testing.T) {
 	} {
 		if _, err := userSettableStatus(string(status)); err == nil {
 			t.Errorf("userSettableStatus(%q) accepted non-user status", status)
+		}
+	}
+}
+
+func TestItemJSONWithPartialTracesIncludesProviderOutput(t *testing.T) {
+	item := models.Item{ID: "item-1", Title: "trace"}
+	started := time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC)
+	got := itemToJSONWithPartialTraces(item, []models.PartialTrace{{
+		ID:            "trace-1",
+		Timestamp:     started,
+		TurnTimestamp: started.Add(time.Minute),
+		Status:        "failed",
+		Content:       "provider output",
+	}})
+
+	traces, ok := got["partial_traces"].([]map[string]any)
+	if !ok || len(traces) != 1 {
+		t.Fatalf("partial_traces = %#v, want one trace", got["partial_traces"])
+	}
+	if traces[0]["id"] != "trace-1" || traces[0]["status"] != "failed" || traces[0]["content"] != "provider output" {
+		t.Fatalf("partial trace JSON = %#v", traces[0])
+	}
+	if _, ok := itemToJSON(item)["partial_traces"]; ok {
+		t.Fatal("default item JSON unexpectedly includes partial_traces")
+	}
+}
+
+func TestItemShowHelpDocumentsLongItemQueries(t *testing.T) {
+	for _, want := range []string{
+		"jq '.turns[-20:]'",
+		"select(.actor == \"user\")",
+		"--argjson turn 42",
+		"--include-partial",
+		"turn indexes are zero-based",
+		"provider progress",
+		"not a posted conversation turn",
+		"zero",
+		"no final agent turn was posted",
+	} {
+		if !strings.Contains(itemShowCmd.Long, want) {
+			t.Errorf("item show help missing %q: %s", want, itemShowCmd.Long)
 		}
 	}
 }
