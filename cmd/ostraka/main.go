@@ -541,6 +541,14 @@ Examples:
 		if activities, err := s.ListActivities(item.ID); err == nil && len(activities) > 0 {
 			fmt.Println("\n── activity ──")
 			for _, activity := range activities {
+				if activity.Type == store.ActivityAgentSessionStarted {
+					provider := activity.Result
+					if provider == "" {
+						provider = "provider"
+					}
+					fmt.Printf("%s new %s session started\n", activity.Timestamp.Format("2006-01-02 15:04:05"), provider)
+					continue
+				}
 				detail := activity.ChildID
 				if activity.Type == store.ActivitySubthreadMoved && activity.FromRootID != "" && activity.ToRootID != "" {
 					detail += " (" + activity.FromRootID + " → " + activity.ToRootID + ")"

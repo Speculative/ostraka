@@ -23,6 +23,8 @@ func TestBootstrapIntroducesItemWithoutReinitializingHarness(t *testing.T) {
 		"brief",
 		command,
 		"Starting a new Ostraka turn does not by itself require revalidation",
+		"bounded checkpoints",
+		"self-scheduling commands",
 	} {
 		if !strings.Contains(normalized, want) {
 			t.Errorf("bootstrap prompt missing %q: %q", want, got)
@@ -47,6 +49,8 @@ func TestNudgeExplicitlyContinuesTheConversation(t *testing.T) {
 		"Starting a new Ostraka turn does not by itself require revalidation",
 		"Do not rerun a successful check against unchanged inputs merely to reorient",
 		"ordinary harness progress updates remain visible to the user",
+		"bounded checkpoints",
+		"self-scheduling commands",
 	} {
 		if !strings.Contains(normalized, want) {
 			t.Errorf("continuation prompt missing %q: %q", want, got)

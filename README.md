@@ -7,10 +7,12 @@ scroll.
 The TUI dispatches turns through Claude Code by default. Each item keeps its
 own provider session and resume cursor, so unrelated work never shares agent
 context. Press `S` on an item to start a fresh Claude or Codex session for that
-item. On a Claude subscription, the session picker recommends a fresh context
-after one hour, which is Claude Code's documented cache TTL. Codex's App
-Server uses the GPT-5.6 30-minute cache-reuse window. Both are recommendations:
-providers may retain cache entries longer.
+item. The supervisor also starts a fresh session automatically on the next
+dispatch after the provider's cache-reuse window expires, preserving the
+selected model and effort while rebuilding context from the item. On a Claude
+subscription that window is one hour; Codex's App Server uses the GPT-5.6
+30-minute cache-reuse window. Both are recommendations: providers may retain
+cache entries longer.
 
 Use `ostraka item reparent <item-id> <root-id>` (or `--parent <root-id>`) to
 move an item under another live root. The `m` TUI action opens the same root

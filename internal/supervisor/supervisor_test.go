@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,6 +118,64 @@ func TestDispatchStartsFreshThenResumesPerItem(t *testing.T) {
 	other, err := loadItemSession(s.root, "item-2")
 	if err != nil || other.SessionID != "session-b" {
 		t.Errorf("item-2 session = %+v, %v", other, err)
+	}
+}
+
+func TestDispatchRotatesStaleSessionAndKeepsSelection(t *testing.T) {
+	fh := &fakeHarness{}
+	s := newTestSupervisor(t, fh)
+
+	if err := saveItemSession(s.root, "item-1", sessionFile{
+		Provider:      ProviderClaude,
+		Model:         "opus",
+		Effort:        "xhigh",
+		SessionID:     "stale-session",
+		PromptedTurns: intPointer(4),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := loadSessions(s.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := sessions.Sessions["item-1"]
+	stale.UpdatedAt = time.Now().Add(-claudeSubscriptionCacheTTL)
+	sessions.Sessions["item-1"] = stale
+	b, err := json.MarshalIndent(sessions, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sessionPath(s.root), b, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s.dispatch(enqueueMsg{itemID: "item-1"})
+
+	fh.mu.Lock()
+	if len(fh.calls) != 1 {
+		fh.mu.Unlock()
+		t.Fatalf("expected one harness call, got %d", len(fh.calls))
+	}
+	if fh.calls[0] != "" {
+		t.Errorf("stale session should be replaced with a fresh session, got %q", fh.calls[0])
+	}
+	if fh.models[0] != "opus" || fh.efforts[0] != "xhigh" {
+		t.Errorf("selection = (%q, %q), want (opus, xhigh)", fh.models[0], fh.efforts[0])
+	}
+	if !strings.Contains(fh.prompts[0], "Ostraka's initial prompt for this item") {
+		t.Errorf("rotated dispatch did not use the bootstrap prompt: %q", fh.prompts[0])
+	}
+	fh.mu.Unlock()
+
+	got, err := loadItemSession(s.root, "item-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SessionID != "session-a" {
+		t.Errorf("rotated session id = %q, want session-a", got.SessionID)
+	}
+	if got.Model != "opus" || got.Effort != "xhigh" {
+		t.Errorf("persisted selection = (%q, %q), want (opus, xhigh)", got.Model, got.Effort)
 	}
 }
 
@@ -337,6 +396,40 @@ func TestDispatchMarksItemInProgress(t *testing.T) {
 	}
 }
 
+func TestFreshDispatchRecordsSessionStartedActivity(t *testing.T) {
+	fh := &fakeHarness{}
+	s, st := newStoreBackedSupervisor(t, fh)
+	item, err := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.dispatch(enqueueMsg{itemID: item.ID})
+
+	activities, err := st.ListActivities(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var activity models.Activity
+	found := false
+	for _, candidate := range activities {
+		if candidate.Type == store.ActivityAgentSessionStarted {
+			activity = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("activities = %+v, missing session-start event", activities)
+	}
+	if activity.Type != store.ActivityAgentSessionStarted || activity.Result != string(ProviderClaude) {
+		t.Errorf("session activity = %+v", activity)
+	}
+	if activity.Actor != models.ActorAgent || !activity.Handled {
+		t.Errorf("session activity metadata = %+v", activity)
+	}
+}
+
 func TestDispatchFailureRestoresPendingAgent(t *testing.T) {
 	spy := &statusSpyHarness{err: context.DeadlineExceeded}
 	s, st := newStoreBackedSupervisor(t, spy)
@@ -354,11 +447,28 @@ func TestDispatchFailureRestoresPendingAgent(t *testing.T) {
 
 func TestDispatchLeavesNonPendingAgentItemsAlone(t *testing.T) {
 	// The user may have moved the item since it was queued; a stale dispatch
-	// must not drag it back into the agent's column.
+	// must not drag it back into the agent's column or rotate its session.
 	spy := &statusSpyHarness{}
 	s, st := newStoreBackedSupervisor(t, spy)
 	item, _ := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusBacklog, "")
 	spy.st, spy.itemID = st, item.ID
+	if err := saveItemSession(s.root, item.ID, sessionFile{Provider: ProviderClaude, SessionID: "stale-session"}); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := loadSessions(s.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := sessions.Sessions[item.ID]
+	stale.UpdatedAt = time.Now().Add(-claudeSubscriptionCacheTTL)
+	sessions.Sessions[item.ID] = stale
+	b, err := json.MarshalIndent(sessions, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sessionPath(s.root), b, 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	s.dispatch(enqueueMsg{itemID: item.ID})
 
@@ -368,6 +478,13 @@ func TestDispatchLeavesNonPendingAgentItemsAlone(t *testing.T) {
 	after, _ := st.GetItem(item.ID)
 	if after.Status != models.StatusBacklog {
 		t.Errorf("status after run: got %q want %q", after.Status, models.StatusBacklog)
+	}
+	session, err := loadItemSession(s.root, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.SessionID != "stale-session" {
+		t.Errorf("stale dispatch changed session id to %q", session.SessionID)
 	}
 }
 

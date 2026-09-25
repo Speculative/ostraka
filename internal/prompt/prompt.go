@@ -52,7 +52,12 @@ rerun a successful check against unchanged inputs merely to reorient.
 Do not use the final Ostraka item reply for a progress-only acknowledgement;
 ordinary harness progress updates remain visible to the user. Send one
 substantive "ostraka item turn" when the work is ready to hand back; it ends
-this dispatch. Use actual multiline content, never literal \n text.`
+this dispatch. For work likely to exceed one dispatch, prefer bounded
+checkpoints: finish a coherent slice, leave a concise substantive handoff
+describing what remains, and make the next dispatch easy to resume from the
+item and working tree. Do not invent self-scheduling commands or fake user
+turns; use a self-scheduling or loop facility only when this prompt explicitly
+provides one. Use actual multiline content, never literal \n text.`
 
 const activityOnlyText = `This continues the conversation on Ostraka item {{.ItemID}}.
 No unseen user turns are included in this dispatch. Review the subthread updates
@@ -127,6 +132,12 @@ When finished, send one final Ostraka item reply using the exact command below.
 Do not send that reply as a progress acknowledgement: it hands the item back to
 the user and ends this dispatch. Pass real multiline content through stdin;
 never put literal \n text in the reply.
+
+For work likely to exceed one dispatch, prefer bounded checkpoints: finish a
+coherent slice, leave a concise substantive handoff describing what remains,
+and make the next dispatch easy to resume from the item and working tree. Do
+not invent self-scheduling commands or fake user turns; use a self-scheduling
+or loop facility only when the prompt explicitly provides one.
 
 Threading guidance: keep supporting explanation inline, but create a direct
 subthread with "ostraka item add --parent <root-or-child-id> --channel inbox
@@ -234,8 +245,16 @@ func Nudge(itemID string, userTurns []string, activities []models.Activity) stri
 			ItemID: itemID,
 		})
 	}
-	return base + activitySection(activities)
+	return base + dispatchLengthGuidance + activitySection(activities)
 }
+
+const dispatchLengthGuidance = `
+
+For work likely to exceed one dispatch, prefer bounded checkpoints: finish a
+coherent slice, leave a concise substantive handoff describing what remains,
+and make the next dispatch easy to resume from the item and working tree. Do
+not invent self-scheduling commands or fake user turns; use a self-scheduling
+or loop facility only when the prompt explicitly provides one.`
 
 func activitySection(activities []models.Activity) string {
 	if len(activities) == 0 {

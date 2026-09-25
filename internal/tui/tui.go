@@ -3382,6 +3382,15 @@ func (m *model) updateConv() {
 					renderAgentEndedWithoutResponse(event.activity.Timestamp, "interrupted", w))
 				break
 			}
+			if event.activity.Type == store.ActivityAgentSessionStarted {
+				provider := event.activity.Result
+				if provider == "" {
+					provider = "provider"
+				}
+				sb.WriteString(fmt.Sprintf("\n\n%s\nactivity  ·  new %s session started",
+					turnRule, provider))
+				break
+			}
 			status := "pending"
 			if event.activity.Handled {
 				status = "handled"

@@ -101,6 +101,37 @@ func TestInterruptedActivityRendersAsAnActivityLine(t *testing.T) {
 	}
 }
 
+func TestSessionStartedActivityRendersInConversation(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "session", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddActivity(item.ID, models.Activity{
+		Type:      store.ActivityAgentSessionStarted,
+		Result:    "codex",
+		Actor:     models.ActorAgent,
+		Timestamp: time.Now().UTC(),
+		Handled:   true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(s, nil, nil)
+	m.items = []models.Item{item}
+	m.selected = 0
+	m.conv.Width = 80
+	m.conv.Height = 20
+	m.updateConv()
+	view := ansi.Strip(m.conv.View())
+	if !strings.Contains(view, "activity  ·  new codex session started") {
+		t.Fatalf("conversation omitted session-start activity: %q", view)
+	}
+}
+
 func containsTurnWithBody(view, header, body string) bool {
 	lines := strings.Split(view, "\n")
 	for i := 0; i+2 < len(lines); i++ {

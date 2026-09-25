@@ -171,7 +171,14 @@ func TestNoOutputRunRecordsNoFinalResponseMarker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(activities) != 1 || activities[0].Type != store.ActivityAgentEndedWithoutFinalResponse {
+			ended := false
+			for _, activity := range activities {
+				if activity.Type == store.ActivityAgentEndedWithoutFinalResponse {
+					ended = true
+					break
+				}
+			}
+			if !ended {
 				t.Fatalf("no-output activities = %+v", activities)
 			}
 		})
@@ -234,7 +241,14 @@ func TestInterruptRetainsTraceAndAddsActivity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(activities) != 1 || activities[0].Type != store.ActivityAgentInterrupted {
+	interrupted := false
+	for _, activity := range activities {
+		if activity.Type == store.ActivityAgentInterrupted {
+			interrupted = true
+			break
+		}
+	}
+	if !interrupted {
 		t.Fatalf("activities = %+v", activities)
 	}
 }

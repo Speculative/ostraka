@@ -800,20 +800,6 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 			beforeTurns = len(item.Turns)
 		}
 	}
-	s.session.mu.Lock()
-	sf, err := loadItemSession(s.root, msg.itemID)
-	s.session.mu.Unlock()
-	if err != nil {
-		s.logger.Printf("item %s: failed to load session, starting fresh with Claude: %v", msg.itemID, err)
-		sf = sessionFile{Provider: ProviderClaude}
-	}
-
-	if sf.SessionID == "" {
-		s.logger.Printf("item %s: dispatching (fresh %s session)", msg.itemID, sf.Provider)
-	} else {
-		s.logger.Printf("item %s: dispatching (%s session %s)", msg.itemID, sf.Provider, sf.SessionID)
-	}
-
 	// Clear before marking, not after: the pane renders the live log only for
 	// an acknowledged item, so an item that is acknowledged while a previous
 	// log still exists shows that log as though it were this run's. The
@@ -836,6 +822,50 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		return
 	}
 	runStarted = true
+	s.session.mu.Lock()
+	sf, err := loadItemSession(s.root, msg.itemID)
+	if err == nil && sessionIsStale(sf, time.Now()) {
+		staleSessionID := sf.SessionID
+		fresh := sf
+		fresh.SessionID = ""
+		fresh.PromptedTurns = nil
+		if resetErr := saveItemSession(s.root, msg.itemID, fresh); resetErr != nil {
+			s.logger.Printf("item %s: cannot rotate stale session %s: %v", msg.itemID, staleSessionID, resetErr)
+		} else {
+			// saveItemSession refreshes UpdatedAt. Reload the record so the
+			// completion guard can recognize this freshly selected state.
+			sf = fresh
+			if rotated, loadErr := loadItemSession(s.root, msg.itemID); loadErr != nil {
+				s.logger.Printf("item %s: cannot reload rotated session: %v", msg.itemID, loadErr)
+			} else {
+				sf = rotated
+			}
+			s.logger.Printf("item %s: rotating stale session %s before dispatch", msg.itemID, staleSessionID)
+		}
+	}
+	s.session.mu.Unlock()
+	if err != nil {
+		s.logger.Printf("item %s: failed to load session, starting fresh with Claude: %v", msg.itemID, err)
+		sf = sessionFile{Provider: ProviderClaude}
+	}
+
+	if sf.SessionID == "" {
+		s.logger.Printf("item %s: dispatching (fresh %s session)", msg.itemID, sf.Provider)
+		if s.store != nil {
+			if activityErr := s.store.AddActivity(msg.itemID, models.Activity{
+				Type:      store.ActivityAgentSessionStarted,
+				Result:    string(sf.Provider),
+				Actor:     models.ActorAgent,
+				Timestamp: time.Now().UTC(),
+				Handled:   true,
+			}); activityErr != nil {
+				s.logger.Printf("item %s: cannot record session start: %v", msg.itemID, activityErr)
+			}
+		}
+	} else {
+		s.logger.Printf("item %s: dispatching (%s session %s)", msg.itemID, sf.Provider, sf.SessionID)
+	}
+
 	// The marker makes the working header visible before the provider emits
 	// its first display-worthy event (often after an initial reasoning phase).
 	live.start()
