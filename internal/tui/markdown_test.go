@@ -25,6 +25,29 @@ func TestRenderMarkdownStylesMarkdownAndTaggedCode(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownDoesNotLeaveInlineCodeBackgroundOnPreviousRow(t *testing.T) {
+	got := renderMarkdown("one two three four `code`", 22)
+	lines := strings.Split(got, "\n")
+	codeLine := -1
+	for i, line := range lines {
+		if strings.Contains(ansi.Strip(line), "code") {
+			codeLine = i
+			break
+		}
+	}
+	if codeLine <= 0 {
+		t.Fatalf("inline code did not wrap to a later row: %q", got)
+	}
+	for i, line := range lines[:codeLine] {
+		if strings.Contains(line, "48;5;236m") {
+			t.Fatalf("row %d has inline-code background before code begins: %q", i, line)
+		}
+	}
+	if !strings.Contains(lines[codeLine], "48;5;236m") {
+		t.Fatalf("code row lost inline-code background: %q", lines[codeLine])
+	}
+}
+
 func TestRenderMarkdownUsesBoxDrawingForTables(t *testing.T) {
 	got := ansi.Strip(renderMarkdown("| Name | Value |\n| --- | ---: |\n| café | 42 |", 40))
 

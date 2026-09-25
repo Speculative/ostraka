@@ -38,6 +38,13 @@ func renderMarkdown(markdown string, width int) string {
 	// impossible to search for in the rendered conversation. Markdown-specific
 	// elements and fenced code retain their own styles below.
 	style.Document.Color = nil
+	// Glamour pads inline-code spans with spaces inside the code style. Those
+	// styled spaces are separated from the code when a span moves wholly to the
+	// next row, leaving an empty background run at the end of the previous row.
+	// Keep the background on the code itself and let the surrounding Markdown
+	// whitespace provide separation.
+	style.Code.Prefix = ""
+	style.Code.Suffix = ""
 	renderer, err := glamour.NewTermRenderer(
 		glamour.WithStyles(style),
 		glamour.WithColorProfile(termenv.ANSI256),
