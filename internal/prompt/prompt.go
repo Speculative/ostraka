@@ -133,6 +133,10 @@ subthread with "ostraka item add --parent <root-or-child-id> --channel inbox
 --status pending-user --title <one-line-title> --body
 <self-contained-question>" when an in-scope
 branch is independently discussable or likely to need multiple exchanges.
+Every new item has its own provider session and starts without this
+conversation. Write its title and body for that cold start: include the
+context, constraints, prior decisions, and desired outcome needed to act, but
+omit unrelated history.
 Creating from a child attaches a sibling; never create a grandchild. A
 subthread normally starts pending-user for a question to the user or
 backlog when parked. For work outside this item's scope, suggest a related

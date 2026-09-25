@@ -186,6 +186,11 @@ func TestAgentOrientationIncludesExactReplyCommand(t *testing.T) {
 		"--argjson turn 42",
 		"Starting a new Ostraka turn does not by itself require revalidation",
 		"Do not rerun a successful check against unchanged inputs merely to reorient",
+		"Every new item has its own provider session",
+		"starts without this conversation",
+		"Write its title and body for that cold start",
+		"context, constraints, prior decisions, and desired outcome needed to act",
+		"omit unrelated history",
 	} {
 		if !strings.Contains(normalized, want) {
 			t.Fatalf("orientation missing %q: %q", want, got)
