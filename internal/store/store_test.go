@@ -3,6 +3,7 @@ package store_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
@@ -70,6 +71,49 @@ func TestCreateAndGet(t *testing.T) {
 	}
 	if got.Channel != models.ChannelInbox {
 		t.Errorf("Channel: got %q want %q", got.Channel, models.ChannelInbox)
+	}
+}
+
+func TestCreateUsesShortCrockfordID(t *testing.T) {
+	s := newTestStore(t)
+	item, err := s.CreateItem(models.ChannelInbox, "short ID", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := regexp.MustCompile(`^[0123456789abcdefghjkmnpqrstvwxyz]{4}-[0123456789abcdefghjkmnpqrstvwxyz]{4}$`)
+	if !want.MatchString(item.ID) {
+		t.Fatalf("item ID = %q, want four-four lowercase Crockford base32 symbols", item.ID)
+	}
+}
+
+func TestLegacyTimestampIDCoexistsWithNewIDs(t *testing.T) {
+	s := newTestStore(t)
+	legacy := models.Item{
+		ID:      "20260819-055535",
+		Channel: models.ChannelInbox,
+		Type:    models.TypeThread,
+		Status:  models.StatusActive,
+		Created: time.Date(2026, 8, 19, 5, 55, 35, 0, time.UTC),
+		Title:   "legacy",
+		Body:    "legacy body",
+	}
+	if err := store.WriteItem(legacy, filepath.Join(s.Root, "INBOX", legacy.ID+".md")); err != nil {
+		t.Fatal(err)
+	}
+
+	child, err := s.CreateSubthread(legacy.ID, "new child", "body", models.TypeThread, models.StatusBacklog)
+	if err != nil {
+		t.Fatalf("CreateSubthread under legacy ID: %v", err)
+	}
+	if child.Parent != legacy.ID {
+		t.Errorf("new child parent = %q, want %q", child.Parent, legacy.ID)
+	}
+	if _, err := s.GetItem(legacy.ID); err != nil {
+		t.Fatalf("legacy item is no longer readable: %v", err)
+	}
+	if _, err := s.GetItem(child.ID); err != nil {
+		t.Fatalf("new item is not readable: %v", err)
 	}
 }
 

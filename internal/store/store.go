@@ -2,7 +2,7 @@ package store
 
 import (
 	"crypto/rand"
-	"encoding/hex"
+	"encoding/base32"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +18,10 @@ var channelDirs = map[models.Channel]string{
 }
 
 const archiveDir = "ARCHIVE"
+
+const itemIDAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
+
+var itemIDEncoding = base32.NewEncoding(itemIDAlphabet).WithPadding(base32.NoPadding)
 
 type ListOpts struct {
 	Channel *models.Channel
@@ -243,10 +247,8 @@ func (s *Store) CreateItem(channel models.Channel, title, body string, itemType 
 			return models.Item{}, fmt.Errorf("cannot create a subthread under terminal item %q", parent)
 		}
 	}
-	now := time.Now().UTC()
-	id := now.Format("20060102-150405")
-
-	// Check for collision across all existing IDs
+	// Check collisions across the complete namespace so live and archived
+	// items, including legacy timestamp IDs, can coexist safely.
 	paths, err := s.allPaths()
 	if err != nil {
 		return models.Item{}, err
@@ -255,14 +257,9 @@ func (s *Store) CreateItem(channel models.Channel, title, body string, itemType 
 	for _, p := range paths {
 		existing[filepath.Base(p[:len(p)-3])] = true // strip .md
 	}
-	for existing[id] {
-		b := make([]byte, 2)
-		rand.Read(b)
-		id = now.Format("20060102-150405") + "-" + hex.EncodeToString(b)
-	}
 
+	now := time.Now().UTC()
 	item := models.Item{
-		ID:      id,
 		Channel: channel,
 		Type:    itemType,
 		Status:  status,
@@ -272,8 +269,28 @@ func (s *Store) CreateItem(channel models.Channel, title, body string, itemType 
 		Body:    body,
 	}
 	item.Mentions = itemMentionIDs(item.Body, nil)
-	if err := WriteItem(item, s.itemPath(item)); err != nil {
-		return models.Item{}, err
+	for {
+		id, err := newItemID()
+		if err != nil {
+			return models.Item{}, err
+		}
+		if existing[id] {
+			continue
+		}
+		release, acquired, err := s.reserveItemID(id)
+		if err != nil {
+			return models.Item{}, err
+		}
+		if !acquired {
+			continue
+		}
+		item.ID = id
+		err = WriteItem(item, s.itemPath(item))
+		release()
+		if err != nil {
+			return models.Item{}, err
+		}
+		break
 	}
 	if parent != "" {
 		if err := s.addSubthreadActivity(parentItem, item, ActivitySubthreadCreated, ""); err != nil {
@@ -281,6 +298,36 @@ func (s *Store) CreateItem(channel models.Channel, title, body string, itemType 
 		}
 	}
 	return item, nil
+}
+
+func newItemID() (string, error) {
+	// Five bytes encode to eight base32 symbols: 40 bits of project-local
+	// entropy. Grouping the symbols makes IDs easier to scan and type.
+	var random [5]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate item ID: %w", err)
+	}
+	encoded := itemIDEncoding.EncodeToString(random[:])
+	return encoded[:4] + "-" + encoded[4:], nil
+}
+
+// reserveItemID prevents concurrent creators from publishing the same ID in
+// different item directories. A reservation left by a crash only removes one
+// random value from the 40-bit namespace; later creations simply choose again.
+func (s *Store) reserveItemID(id string) (release func(), acquired bool, err error) {
+	path := filepath.Join(s.Root, ".item-id-"+id)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if os.IsExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, false, err
+	}
+	return func() { _ = os.Remove(path) }, true, nil
 }
 
 // CreateSubthread accepts either a root or one of its children and always
