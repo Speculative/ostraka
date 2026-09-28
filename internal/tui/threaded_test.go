@@ -10,6 +10,8 @@ import (
 	"github.com/Speculative/ostraka/internal/models"
 	"github.com/Speculative/ostraka/internal/store"
 	"github.com/Speculative/ostraka/internal/supervisor"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestPrepareGroupedSortsByFamilyAttentionAndFoldsPerRoot(t *testing.T) {
@@ -170,6 +172,82 @@ func TestActivityReloadKeepsConversationAtBottom(t *testing.T) {
 	m = next.(model)
 	if !m.conv.AtBottom() {
 		t.Fatal("activity reload lost the bottom scroll anchor")
+	}
+}
+
+func TestStatusModalFollowsLiveOutputWhenClosingAtBottom(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := s.CreateItem(
+		models.ChannelInbox,
+		"long item",
+		strings.Repeat("opening context ", 80),
+		models.TypeThread,
+		models.StatusActive,
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sup := &fakeSupervisor{}
+	m := newModel(s, nil, sup)
+	m.width = 100
+	m.height = 20
+	m.showBacklog = true
+	m.backlogVisibilityInitialized = true
+	m.items = []models.Item{root}
+	m.allItems = append([]models.Item(nil), m.items...)
+	m.selected = 0
+	m = m.recalcLayout()
+	m.conv.GotoBottom()
+	if !m.conv.AtBottom() {
+		t.Fatal("fixture did not produce a scrollable conversation at the bottom")
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = next.(model)
+	if m.mode != modeStatus {
+		t.Fatalf("status shortcut opened mode %v, want status modal", m.mode)
+	}
+	if !m.conv.AtBottom() {
+		t.Fatal("opening the status modal lost the bottom anchor")
+	}
+
+	if err := os.MkdirAll(filepath.Join(s.Root, "supervisor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.Root, "supervisor", "live-"+root.ID+".txt"), []byte(strings.Repeat("new output\n", 8)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(s.Root, "supervisor", "live-"+root.ID+".txt"))
+	})
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if m.mode != modeNav {
+		t.Fatalf("status modal remained open after enter: %v", m.mode)
+	}
+	if m.convLive == 0 {
+		t.Fatal("live output was not rendered while closing the modal")
+	}
+	if !m.conv.AtBottom() {
+		t.Fatalf("closing the status modal lost the bottom anchor: offset=%d height=%d total=%d", m.conv.YOffset, m.conv.Height, m.conv.TotalLineCount())
+	}
+
+	if cmd == nil {
+		t.Fatal("status submission did not request an item reload")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	if m.newBelow {
+		t.Fatal("status reload marked live output as below the reader")
+	}
+	if !m.conv.AtBottom() {
+		t.Fatal("status reload lost the bottom anchor")
 	}
 }
 

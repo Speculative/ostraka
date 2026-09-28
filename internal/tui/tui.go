@@ -4300,6 +4300,17 @@ func (m *model) setConvHeight(h int) {
 }
 
 func (m model) recalcLayout() model {
+	// updateConv can observe content that arrived while a modal or composer
+	// transition was in flight. Preserve the semantic bottom anchor across that
+	// redraw instead of relying on setConvHeight's numeric offset adjustment,
+	// which cannot account for newly appended lines.
+	// An empty viewport is vacuously at the bottom. It must not cause the first
+	// content render (including entering copy mode) to skip to the end. A
+	// non-empty convItemID is the model's durable indication that this pane has
+	// already rendered a conversation rather than just the viewport's empty
+	// placeholder line.
+	wasAtBottom := m.convItemID != "" && m.conv.AtBottom()
+
 	// Width(n) includes padding, so Padding(1) on the list panel leaves listW-2 for
 	// content and makes the total rendered width listW+1 (content+padding+border).
 	listPanelTotal := m.listWidth() + 1 // +1 for border-right
@@ -4354,6 +4365,10 @@ func (m model) recalcLayout() model {
 	m.conv.Width = convW
 	m.updateConv()
 	m.setConvHeight(convH)
+	if wasAtBottom {
+		m.conv.GotoBottom()
+		m.newBelow = false
+	}
 	return m
 }
 
