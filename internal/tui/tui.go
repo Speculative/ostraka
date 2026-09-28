@@ -4375,7 +4375,16 @@ func Run(s *store.Store) error {
 	}
 	sup.Start()
 	sup.EnqueuePendingActivityRoots()
-	p := tea.NewProgram(newModel(s, watchCh, sup), tea.WithAltScreen())
+	reporter := &panicReporter{root: s.Root}
+	p := tea.NewProgram(
+		panicLoggingModel{inner: newModel(s, watchCh, sup), reporter: reporter},
+		tea.WithAltScreen(),
+	)
 	_, err = p.Run()
+	if path, writeErr := reporter.result(); path != "" {
+		fmt.Fprintf(os.Stderr, "Ostraka: TUI panic details saved to %s\n", path)
+	} else if writeErr != nil {
+		fmt.Fprintf(os.Stderr, "Ostraka: could not save TUI panic details: %v\n", writeErr)
+	}
 	return err
 }
