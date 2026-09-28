@@ -317,6 +317,10 @@ type model struct {
 	reparentTargets   []models.Item
 	reparentTargetIdx int
 	reparentFlatten   bool
+	// mentionPicker is presentation-only state for the composer. The selected
+	// item is written back as a literal @canonical-id, so no picker state is
+	// persisted with the item or turn.
+	mentionPicker mentionPickerState
 
 	// convTurns is the turn count of the item currently rendered into conv,
 	// so a reload can tell "new turn arrived" from "same item, redrawn".
@@ -601,6 +605,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = modeProposal
 		}
 		m.refreshPendingDraft()
+		if m.mentionPicker.open {
+			m.refreshMentionPicker()
+		}
 		if wasComposerVisible != m.composerVisible() {
 			m = m.recalcLayout()
 		}
@@ -1158,6 +1165,7 @@ func (m model) beginNewDraft(parent string) (tea.Model, tea.Cmd) {
 	m.draftParent = parent
 	m.relatedDraftFrom = ""
 	m.draftItemID = ""
+	m.closeMentionPicker()
 	m.mode = modeTitle
 	m.title.Reset()
 	m.title.Width = m.titleWidth()
@@ -1226,6 +1234,7 @@ func (m model) activateNewItemDraft() (tea.Model, tea.Cmd) {
 		m.title.Blur()
 		m = m.recalcLayout()
 		m.updateConv()
+		m.refreshMentionPicker()
 		return m, tea.Batch(m.input.Focus(), draftSafetyCheckpoint())
 	}
 	m.mode = modeTitle
@@ -1259,6 +1268,7 @@ func sessionProviderIndex(provider supervisor.Provider) int {
 // openComposer focuses the turn textarea for the selected item.
 func (m model) openComposer() (tea.Model, tea.Cmd) {
 	m.mode = modeCompose
+	m.closeMentionPicker()
 	m.draftItemID = m.selectedID()
 	m.input.Reset()
 	if content, err := m.store.LoadDraft(m.draftItemID); err != nil {
@@ -1273,6 +1283,7 @@ func (m model) openComposer() (tea.Model, tea.Cmd) {
 		}
 	}
 	m = m.recalcLayout()
+	m.refreshMentionPicker()
 	return m, tea.Batch(m.input.Focus(), draftSafetyCheckpoint())
 }
 
@@ -1283,6 +1294,70 @@ func textareaCursor(ta textarea.Model) (row, col int) {
 		return int(rowField.Int()), int(colField.Int())
 	}
 	return 0, len([]rune(ta.Value()))
+}
+
+// textareaCursorOffset converts textarea's logical line/cursor pair into a
+// rune offset in Value. textarea keeps soft-wrapped rows separate from logical
+// lines, so using LineInfo.RowOffset here would make a mention split across a
+// soft wrap look like two tokens.
+func textareaCursorOffset(ta textarea.Model) int {
+	row, col := textareaCursor(ta)
+	lines := strings.Split(ta.Value(), "\n")
+	if len(lines) == 0 {
+		return 0
+	}
+	row = max(0, min(row, len(lines)-1))
+	offset := 0
+	for i := 0; i < row; i++ {
+		offset += len([]rune(lines[i])) + 1
+	}
+	return offset + max(0, min(col, len([]rune(lines[row]))))
+}
+
+// setTextareaCursorOffset restores a logical cursor after replacing a token.
+// Bubbles exposes SetCursor for a column but not the logical line; the
+// textarea's row/col are already read by textareaCursor above, so use the same
+// narrowly-scoped reflection seam to set the row before calling its public
+// column setter. This preserves Unicode rune offsets and avoids navigating
+// through soft-wrapped visual rows.
+func setTextareaCursorOffset(ta *textarea.Model, offset int) {
+	runes := []rune(ta.Value())
+	offset = clampMentionOffset(offset, len(runes))
+	row, lineStart := 0, 0
+	for i := 0; i < offset; i++ {
+		if runes[i] == '\n' {
+			row++
+			lineStart = i + 1
+		}
+	}
+	col := offset - lineStart
+
+	if setTextareaCursorOffsetRaw(ta, row, col) {
+		// A value replacement leaves the textarea viewport at the position
+		// where SetValue finished. A no-op update asks Bubbles to reposition
+		// that viewport around the restored cursor, including after soft wraps.
+		updated, _ := ta.Update(nil)
+		*ta = updated
+		return
+	}
+	// The fallback is only for a future textarea implementation that removes
+	// the private row field. It still leaves a valid cursor, if not the exact
+	// multiline location.
+	ta.CursorEnd()
+}
+
+// setTextareaCursorOffsetRaw changes only the private logical cursor fields.
+// It is used with textarea copies while measuring layout: those copies share
+// the viewport pointer, so running Update on one would scroll the live editor.
+func setTextareaCursorOffsetRaw(ta *textarea.Model, row, col int) bool {
+	v := reflect.ValueOf(ta).Elem()
+	rowField := v.FieldByName("row")
+	if rowField.IsValid() && rowField.CanAddr() {
+		reflect.NewAt(rowField.Type(), unsafe.Pointer(rowField.UnsafeAddr())).Elem().SetInt(int64(row))
+		ta.SetCursor(col)
+		return true
+	}
+	return false
 }
 
 func (m model) beginRelatedDraft() (tea.Model, tea.Cmd) {
@@ -1300,6 +1375,7 @@ func (m model) beginRelatedDraft() (tea.Model, tea.Cmd) {
 	m.draftChannel = m.view.channel
 	m.draftParent = ""
 	m.draftItemID = ""
+	m.closeMentionPicker()
 	m.mode = modeTitle
 	m.title.Reset()
 	m.title.Width = m.titleWidth()
@@ -1457,6 +1533,7 @@ func (m model) restoreRelatedComposer(createdID string) model {
 	m.title.Reset()
 	m.title.Blur()
 	m.input.Focus()
+	m.refreshMentionPicker()
 	m.updateConv()
 	if createdID != "" {
 		m.err = nil
@@ -1701,7 +1778,51 @@ func (m *model) reload() {
 	m.items, m.hiddenBacklog = m.view.prepareGrouped(items, m.showBacklog, m.collapsed)
 }
 
+// chooseMention replaces the complete token around the cursor with a
+// canonical literal mention. The picker closes because the inserted trailing
+// space is deliberately outside the mention token.
+func (m model) chooseMention() (tea.Model, tea.Cmd) {
+	if !m.mentionPicker.open || len(m.mentionPicker.items) == 0 {
+		return m, nil
+	}
+	selected := clampMentionOffset(m.mentionPicker.selected, len(m.mentionPicker.items)-1)
+	item := m.mentionPicker.items[selected]
+	oldHeight := m.currentInputHeight()
+	content, cursor := replaceMention(m.input.Value(), m.mentionPicker.start, m.mentionPicker.end, item.ID)
+	m.input.SetValue(content)
+	setTextareaCursorOffset(&m.input, cursor)
+	m.closeMentionPicker()
+	if height := m.currentInputHeight(); height != oldHeight {
+		m = m.adjustInputHeight(height)
+	}
+	return m.scheduleDraftCheckpoint(nil)
+}
+
 func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mentionPicker.open {
+		switch {
+		case msg.String() == "esc":
+			m.closeMentionPicker()
+			return m, nil
+		case msg.Type == tea.KeyUp || msg.String() == "up":
+			if m.mentionPicker.selected > 0 {
+				m.mentionPicker.selected--
+			}
+			return m, nil
+		case msg.Type == tea.KeyDown || msg.String() == "down":
+			if m.mentionPicker.selected < len(m.mentionPicker.items)-1 {
+				m.mentionPicker.selected++
+			}
+			return m, nil
+		case (msg.String() == "enter" || msg.String() == "tab") && len(m.mentionPicker.items) > 0:
+			return m.chooseMention()
+		case msg.String() == "tab":
+			// Tab is a picker command rather than textarea content even when
+			// there are no matches. Dismiss it without changing the draft.
+			m.closeMentionPicker()
+			return m, nil
+		}
+	}
 	switch msg.String() {
 	case "ctrl+n":
 		if !m.editingNewItemDraft() && !m.editingProject && m.selected < len(m.items) && m.items[m.selected].Status != models.StatusProposed {
@@ -1711,6 +1832,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+s":
 		content := strings.TrimSpace(m.input.Value())
 		if m.editingProject {
+			m.closeMentionPicker()
 			var err error
 			if m.projectPane == 1 {
 				err = m.store.ReplaceProjectInstructions(content)
@@ -1734,6 +1856,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if content == "" {
 				return m, nil
 			}
+			m.closeMentionPicker()
 			m.checkpointNewItemDraft()
 			branching := m.relatedDraftFrom != ""
 			m = m.commitDraft(content)
@@ -1746,6 +1869,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 		}
 		if content != "" && m.selected < len(m.items) {
+			m.closeMentionPicker()
 			item := m.items[m.selected]
 			m.store.AddTurn(item.ID, models.ActorUser, content) //nolint:errcheck
 			if err := m.store.ClearDraft(m.draftItemID); err != nil {
@@ -1770,6 +1894,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.conv.GotoBottom()
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "esc":
+		m.closeMentionPicker()
 		if m.editingProject {
 			m.editingProject = false
 			m.mode = modeNav
@@ -1799,6 +1924,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m = m.recalcLayout()
 		return m, nil
 	case "ctrl+c":
+		m.closeMentionPicker()
 		if m.editingNewItemDraft() && m.relatedDraftFrom != "" {
 			m.clearNewItemDraft()
 			return m.restoreRelatedComposer(""), nil
@@ -1853,6 +1979,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.refreshMentionPicker()
 	if m.editingNewItemDraft() || !m.editingProject {
 		m.draftSequence++
 		sequence := m.draftSequence
@@ -2054,6 +2181,9 @@ func (m model) View() string {
 			lipgloss.JoinHorizontal(lipgloss.Top, taView, scrollbar),
 		)
 		convPanel = lipgloss.JoinVertical(lipgloss.Left, viewportBlock, sep, inputBlock)
+		if m.mode == modeCompose && m.mentionPicker.open {
+			convPanel = m.overlayMentionPickerAtCursor(convPanel)
+		}
 	} else {
 		convPanel = lipgloss.NewStyle().Padding(1, 0, 1, 1).Render(convWithScrollbar)
 	}
@@ -2197,6 +2327,162 @@ func overlayBox(lines []string, box string, width int) []string {
 		lines[row] = pad.Render(boxLine)
 	}
 	return lines
+}
+
+// overlayBoxAt places a rendered popup at a particular row and column while
+// preserving ANSI styling in the content underneath. Popup rows replace whole
+// screen rows only where they overlap; the horizontal splice is ANSI-aware so
+// a cursor-line style cannot bleed through the popup or into the resumed row.
+func overlayBoxAt(lines []string, box string, top, left int) []string {
+	if len(lines) == 0 || box == "" {
+		return lines
+	}
+	boxRows := strings.Split(box, "\n")
+	boxWidth := lipgloss.Width(box)
+	panelWidth := 0
+	for _, line := range lines {
+		panelWidth = max(panelWidth, lipgloss.Width(line))
+	}
+	if boxWidth > panelWidth {
+		boxWidth = panelWidth
+	}
+	if boxWidth <= 0 {
+		return lines
+	}
+	left = max(0, min(left, panelWidth-boxWidth))
+	top = max(0, min(top, len(lines)-len(boxRows)))
+	for i, boxRow := range boxRows {
+		row := top + i
+		if row >= len(lines) {
+			break
+		}
+		under := lines[row]
+		before := ansi.Truncate(under, left, "")
+		if w := lipgloss.Width(before); w < left {
+			before += strings.Repeat(" ", left-w)
+		}
+		after := ansi.TruncateLeft(under, left+boxWidth, "")
+		lines[row] = before + ansiReset + boxRow + ansiReset + after
+	}
+	return lines
+}
+
+// overlayMentionPicker is retained as a small rendering seam for tests and
+// callers that only have conversation rows. The live composer uses
+// overlayMentionPickerAtCursor below, which anchors the same box above the @
+// token.
+func (m model) overlayMentionPicker(lines []string) []string {
+	return overlayBox(lines, m.mentionPickerBox(), m.conv.Width)
+}
+
+func (m model) mentionPickerBox() string {
+	const maxRows = 6
+	contentWidth := max(1, m.conv.Width-4) // popup border and horizontal padding
+	header := ansi.Truncate("mention item · @"+m.mentionPicker.query, contentWidth, "…")
+	rows := []string{header}
+	if len(m.mentionPicker.items) == 0 {
+		rows = append(rows, dimStyle.Render("(no matching items)"))
+	} else {
+		start := 0
+		if m.mentionPicker.selected >= maxRows {
+			start = m.mentionPicker.selected - maxRows + 1
+		}
+		end := min(len(m.mentionPicker.items), start+maxRows)
+		for i := start; i < end; i++ {
+			item := m.mentionPicker.items[i]
+			marker := "  "
+			style := lipgloss.NewStyle()
+			if i == m.mentionPicker.selected {
+				marker = "› "
+				style = style.Bold(true).Foreground(pendingFg)
+			}
+			meta := "@" + item.ID + " [" + string(item.Status) + "]"
+			metaWidth := lipgloss.Width(meta)
+			titleWidth := max(1, contentWidth-lipgloss.Width(marker)-metaWidth-2)
+			title := item.Title
+			if title == "" {
+				title = "(untitled)"
+			}
+			title = ansi.Truncate(title, titleWidth, "…")
+			row := marker + title + "  " + meta
+			rows = append(rows, style.Render(ansi.Truncate(row, contentWidth, "…")))
+		}
+	}
+	return popupStyle.Render(strings.Join(rows, "\n"))
+}
+
+// overlayMentionPickerAtCursor anchors the picker immediately above the
+// mention token in the composer. The textarea exposes the cursor's wrapped
+// line and display-column information, while its viewport supplies the
+// vertical scroll offset; together they are enough to place the popup without
+// depending on private rendering details beyond the existing viewport seam.
+func (m model) overlayMentionPickerAtCursor(panel string) string {
+	if !m.mentionPicker.open {
+		return panel
+	}
+	lines := strings.Split(panel, "\n")
+	if len(lines) == 0 {
+		return panel
+	}
+	// The composer layout is: one top padding row, the conversation viewport,
+	// one separator row, then the textarea block.
+	inputTop := m.conv.Height + 2
+	visualRow, column := textareaVisualPosition(m.input, m.mentionPicker.start)
+	textareaViewportOffset := textareaViewport(&m.input).YOffset
+	row := inputTop + visualRow - textareaViewportOffset
+	left := 1 + textareaGutterWidth(m.input) + column // input block's left padding
+	box := m.mentionPickerBox()
+	boxHeight := lipgloss.Height(box)
+	return strings.Join(overlayBoxAt(lines, box, row-boxHeight, left), "\n")
+}
+
+func textareaGutterWidth(ta textarea.Model) int {
+	if !ta.ShowLineNumbers {
+		return 0
+	}
+	// Bubbles reserves four columns for line numbers (two digits at the
+	// current MaxHeight, plus surrounding spaces). Ostraka uses the default
+	// line-number setting and an empty prompt for this composer.
+	return 4
+}
+
+// textareaVisualPosition returns the textarea-wide visual row and display
+// column for a logical rune offset. Probing a copy at each preceding logical
+// line lets us use Bubbles' own wrapping calculation, including Unicode
+// display widths, instead of maintaining a second word-wrap implementation.
+func textareaVisualPosition(ta textarea.Model, offset int) (row, column int) {
+	offset = clampMentionOffset(offset, len([]rune(ta.Value())))
+	probe := ta
+	// The probe shares ta's viewport pointer; only change its cursor fields so
+	// measuring a token cannot scroll the live textarea.
+	setTextareaLogicalCursor(&probe, offset)
+	logicalRow, _ := textareaCursor(probe)
+	lineInfo := probe.LineInfo()
+	row = lineInfo.RowOffset
+	lines := strings.Split(ta.Value(), "\n")
+	lineStart := 0
+	for i := 0; i < logicalRow && i < len(lines); i++ {
+		lineProbe := ta
+		setTextareaLogicalCursor(&lineProbe, lineStart)
+		row += lineProbe.LineInfo().Height
+		lineStart += len([]rune(lines[i])) + 1
+	}
+	return row, lineInfo.CharOffset
+}
+
+func setTextareaLogicalCursor(ta *textarea.Model, offset int) {
+	runes := []rune(ta.Value())
+	offset = clampMentionOffset(offset, len(runes))
+	row, lineStart := 0, 0
+	for i := 0; i < offset; i++ {
+		if runes[i] == '\n' {
+			row++
+			lineStart = i + 1
+		}
+	}
+	if !setTextareaCursorOffsetRaw(ta, row, offset-lineStart) {
+		ta.CursorEnd()
+	}
 }
 
 // busyDispatch reports the item being worked on right now. Tests build models
@@ -2368,7 +2654,11 @@ func (m model) renderFooter() string {
 	var text string
 	switch m.mode {
 	case modeCompose:
-		text = "ctrl+s submit  ctrl+n related item  esc cancel  pgup/pgdn scroll"
+		if m.mentionPicker.open {
+			text = "↑/↓ select  enter/tab insert  esc close"
+		} else {
+			text = "ctrl+s submit  ctrl+n related item  esc cancel  pgup/pgdn scroll"
+		}
 		if m.editingProject {
 			text = "ctrl+s save project document  esc cancel"
 		}
