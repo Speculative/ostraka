@@ -225,6 +225,27 @@ func (s *Store) GetItem(id string) (models.Item, error) {
 	return ParseItem(path)
 }
 
+// RenameItem changes an item's single-line title without changing its body,
+// turns, or filesystem location.
+func (s *Store) RenameItem(id, title string) (models.Item, error) {
+	if err := ValidateTitle(title); err != nil {
+		return models.Item{}, err
+	}
+	path, err := s.pathForID(id)
+	if err != nil {
+		return models.Item{}, err
+	}
+	item, err := ParseItem(path)
+	if err != nil {
+		return models.Item{}, err
+	}
+	item.Title = strings.TrimSpace(title)
+	if err := WriteItem(item, path); err != nil {
+		return models.Item{}, err
+	}
+	return item, nil
+}
+
 func (s *Store) CreateItem(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent string) (models.Item, error) {
 	status = models.NormalizeStatus(status)
 	if err := ValidateChannel(channel); err != nil {

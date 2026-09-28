@@ -20,6 +20,9 @@ picker. An item with subthreads requires `--flatten-children`; that moves the
 item and its direct children as siblings under the destination. Passing the
 flag for an item without children is rejected.
 
+Use `ostraka item rename <item-id> <new-title>` to change an item's label
+without changing its body or conversation.
+
 Run `ostraka preamble` when an agent needs the static orientation and final
 reply guidance. Normal dispatched sessions receive the same guidance directly
 in their initial prompt.

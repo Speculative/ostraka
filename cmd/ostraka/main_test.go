@@ -62,6 +62,41 @@ func TestItemTurnArgumentRules(t *testing.T) {
 	}
 }
 
+func TestItemRenameCommandRenamesItem(t *testing.T) {
+	project := t.TempDir()
+	s, err := store.NewStore(filepath.Join(project, ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "old title", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(project)
+	if err := itemRenameCmd.Args(itemRenameCmd, []string{item.ID, "new title"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := itemRenameCmd.RunE(itemRenameCmd, []string{item.ID, "new title"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "new title" {
+		t.Fatalf("CLI renamed title = %q, want %q", got.Title, "new title")
+	}
+}
+
+func TestItemRenameCommandRequiresIDAndTitle(t *testing.T) {
+	for _, args := range [][]string{{}, {"id"}, {"id", "title", "extra"}} {
+		if err := itemRenameCmd.Args(itemRenameCmd, args); err == nil {
+			t.Errorf("rename accepted %v", args)
+		}
+	}
+}
+
 func TestItemReparentCommandMovesItemAndHonorsFlattenFlag(t *testing.T) {
 	project := t.TempDir()
 	rootDir := filepath.Join(project, ".ostraka")

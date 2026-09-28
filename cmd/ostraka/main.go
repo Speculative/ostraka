@@ -31,7 +31,7 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd, preambleCmd)
-	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRmCmd, itemReparentCmd)
+	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRenameCmd, itemRmCmd, itemReparentCmd)
 	rootCmd.AddCommand(projectCmd)
 	projectCmd.AddCommand(projectInstructionsCmd, projectBriefCmd)
 	projectInstructionsCmd.AddCommand(projectInstructionsShowCmd, projectInstructionsReplaceCmd)
@@ -249,6 +249,21 @@ func storeForTUI(cmd *cobra.Command) (*store.Store, error) {
 var itemCmd = &cobra.Command{
 	Use:   "item",
 	Short: "Create and manage items",
+}
+
+// ── item rename ─────────────────────────────────────────────────────────────
+
+var itemRenameCmd = &cobra.Command{
+	Use:   "rename <id> <new-title>",
+	Short: "Rename an item",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		s := mustStore()
+		if _, err := s.RenameItem(args[0], args[1]); err != nil {
+			die(err)
+		}
+		return nil
+	},
 }
 
 // ── item reparent ───────────────────────────────────────────────────────────

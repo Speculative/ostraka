@@ -74,6 +74,57 @@ func TestCreateAndGet(t *testing.T) {
 	}
 }
 
+func TestRenameItemPreservesConversationAndUpdatesTitle(t *testing.T) {
+	s := newTestStore(t)
+	item, err := s.CreateItem(models.ChannelInbox, "old title", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTurn(item.ID, models.ActorUser, "a reply"); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := s.RenameItem(item.ID, "  new title  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Title != "new title" {
+		t.Fatalf("renamed title = %q, want %q", updated.Title, "new title")
+	}
+	if updated.Body != "body" || len(updated.Turns) != 1 || updated.Turns[0].Content != "a reply" {
+		t.Fatalf("rename changed conversation: %+v", updated)
+	}
+
+	got, err := s.GetItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "new title" {
+		t.Errorf("persisted title = %q, want %q", got.Title, "new title")
+	}
+}
+
+func TestRenameItemRejectsInvalidTitleWithoutChangingItem(t *testing.T) {
+	s := newTestStore(t)
+	item, err := s.CreateItem(models.ChannelInbox, "old title", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, title := range []string{"", "   ", "two\nlines", "carriage\rreturn"} {
+		if _, err := s.RenameItem(item.ID, title); err == nil {
+			t.Errorf("RenameItem(%q) accepted invalid title", title)
+		}
+	}
+	got, err := s.GetItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "old title" {
+		t.Errorf("title after rejected rename = %q, want %q", got.Title, "old title")
+	}
+}
+
 func TestCreateUsesShortCrockfordID(t *testing.T) {
 	s := newTestStore(t)
 	item, err := s.CreateItem(models.ChannelInbox, "short ID", "body", models.TypeThread, models.StatusActive, "")
