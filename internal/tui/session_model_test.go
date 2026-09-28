@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Speculative/ostraka/internal/models"
 	"github.com/Speculative/ostraka/internal/supervisor"
@@ -180,6 +181,36 @@ func TestModelsLoadedMsgPopulatesSessionModelPopupState(t *testing.T) {
 	}
 	if got.sessionModelIdx != 1 {
 		t.Errorf("sessionModelIdx = %d, want 1 (item has no prior model, falls back to the provider default)", got.sessionModelIdx)
+	}
+}
+
+func TestModelsLoadedMsgResizesTheModalSlot(t *testing.T) {
+	sup := newSessionModelTestSupervisor(t)
+	m := newModel(nil, nil, sup)
+	m.width = 100
+	m.height = 30
+	m.items = []models.Item{{ID: "item-1", Channel: models.ChannelInbox}}
+	m.selected = 0
+	m.mode = modeSessionModel
+	m.sessionProvider = supervisor.ProviderClaude
+	m.sessionModelsLoading = true
+	m = m.recalcLayout()
+	loadingHeight := m.conv.Height
+
+	next, _ := m.Update(modelsLoadedMsg{
+		provider: supervisor.ProviderClaude,
+		models: []supervisor.ModelOption{
+			{ID: "opus", DisplayName: "Opus"},
+			{ID: "sonnet", DisplayName: "Sonnet"},
+			{ID: "haiku", DisplayName: "Haiku"},
+		},
+	})
+	got := next.(model)
+	if got.conv.Height >= loadingHeight {
+		t.Fatalf("conversation height after models loaded = %d, want less than loading height %d", got.conv.Height, loadingHeight)
+	}
+	if renderedHeight := lipgloss.Height(got.View()); renderedHeight != got.height {
+		t.Fatalf("rendered height after models loaded = %d, want %d", renderedHeight, got.height)
 	}
 }
 

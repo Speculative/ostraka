@@ -1229,6 +1229,238 @@ func TestSelectionFollowsAnItemThatResorts(t *testing.T) {
 	}
 }
 
+func TestProposalPopupShowsTheSuggestedItemBodyAndStatus(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.width = 100
+	m.height = 30
+	m.items = []models.Item{{
+		ID:      "suggested-item",
+		Channel: models.ChannelInbox,
+		Status:  models.StatusProposed,
+		Title:   "Suggested follow-up",
+		Body:    "Please investigate the deployment notes before changing the release checklist.",
+	}}
+	m.allItems = append([]models.Item(nil), m.items...)
+	m.selected = 0
+	m.mode = modeProposal
+	m = m.recalcLayout()
+
+	plain := ansi.Strip(m.View())
+	for _, want := range []string{
+		"Suggested follow-up",
+		"Please investigate the deployment notes",
+		"agent suggestion [proposed]",
+		"k keep for later",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("proposal view missing %q: %q", want, plain)
+		}
+	}
+}
+
+func TestModalReplacesTheComposerAtTheBottomOfTheFrame(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.width = 100
+	m.height = 30
+	m.items = []models.Item{{
+		ID:      "visible-item",
+		Channel: models.ChannelInbox,
+		Status:  models.StatusActive,
+		Title:   "sidebar item remains visible",
+		Body:    "conversation remains behind the modal",
+	}}
+	m.allItems = append([]models.Item(nil), m.items...)
+	m.selected = 0
+	m.mode = modeStatus
+	m = m.recalcLayout()
+
+	view := m.View()
+	plain := ansi.Strip(view)
+	if !strings.Contains(plain, "sidebar item remains visible") {
+		t.Fatalf("modal hid the list item: %q", plain)
+	}
+	if !strings.Contains(plain, "set status") {
+		t.Fatalf("status modal did not render: %q", plain)
+	}
+	statusRow := -1
+	for i, row := range strings.Split(plain, "\n") {
+		if strings.Contains(row, "set status") {
+			statusRow = i
+			break
+		}
+	}
+	if statusRow <= m.height/2 {
+		t.Fatalf("status modal row = %d, want bottom half of frame", statusRow)
+	}
+	rows := strings.Split(view, "\n")
+	if len(rows) != m.height {
+		t.Fatalf("modal changed frame height to %d, want %d", len(rows), m.height)
+	}
+	for i, row := range rows {
+		if got := lipgloss.Width(row); got != m.width {
+			t.Fatalf("modal row %d is %d columns wide, want %d", i, got, m.width)
+		}
+	}
+}
+
+func TestOpeningModalRecalculatesTheComposerSlot(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.width = 100
+	m.height = 30
+	m.items = []models.Item{{
+		ID:      "visible-item",
+		Channel: models.ChannelInbox,
+		Status:  models.StatusActive,
+		Title:   "item selected before opening modal",
+		Body:    "conversation remains behind the modal",
+	}}
+	m.allItems = append([]models.Item(nil), m.items...)
+	m.selected = 0
+	m.mode = modeNav
+	m = m.recalcLayout()
+	navigationHeight := m.conv.Height
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = next.(model)
+	if m.mode != modeStatus {
+		t.Fatalf("status shortcut opened mode %v, want status modal", m.mode)
+	}
+	if m.conv.Height >= navigationHeight {
+		t.Fatalf("conversation height after opening modal = %d, want less than navigation height %d", m.conv.Height, navigationHeight)
+	}
+	if got := lipgloss.Height(m.View()); got != m.height {
+		t.Fatalf("rendered height after opening modal = %d, want %d", got, m.height)
+	}
+}
+
+func TestComposerSlotUsesBlueTopBorder(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previousProfile) })
+
+	for _, test := range []struct {
+		name string
+		mode uiMode
+	}{
+		{name: "turn composer", mode: modeCompose},
+		{name: "status modal", mode: modeStatus},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := newModel(nil, nil, nil)
+			m.width = 100
+			m.height = 30
+			m.items = []models.Item{{
+				ID: "composer-border", Channel: models.ChannelInbox,
+				Status: models.StatusActive, Title: "composer border", Body: "body",
+			}}
+			m.allItems = append([]models.Item(nil), m.items...)
+			m.selected = 0
+			m.mode = test.mode
+			m = m.recalcLayout()
+
+			convAreaW := m.width - (m.listWidth() + 1)
+			want := composerBorderStyle.Render(strings.Repeat("─", convAreaW))
+			if !strings.Contains(m.View(), want) {
+				t.Fatalf("%s slot is missing blue top border %q", test.name, want)
+			}
+		})
+	}
+}
+
+func TestModalKeepsConversationPageScrollingAvailable(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.width = 100
+	m.height = 24
+	m.items = []models.Item{{
+		ID:      "scrollable-item",
+		Channel: models.ChannelInbox,
+		Status:  models.StatusActive,
+		Title:   "scrollable item",
+		Body:    strings.Repeat("conversation line\n", 40),
+	}}
+	m.allItems = append([]models.Item(nil), m.items...)
+	m.selected = 0
+	m.mode = modeStatus
+	m = m.recalcLayout()
+	m.conv.GotoTop()
+	before := m.conv.YOffset
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = next.(model)
+	if m.conv.YOffset <= before {
+		t.Fatalf("PgDn in modal moved conversation from %d to %d", before, m.conv.YOffset)
+	}
+}
+
+func TestModalFitsCompactTerminalWithoutPushingFooter(t *testing.T) {
+	for _, height := range []int{12, 16, 20} {
+		t.Run(fmt.Sprintf("height-%d", height), func(t *testing.T) {
+			m := newModel(nil, nil, nil)
+			m.width = 100
+			m.height = height
+			m.items = []models.Item{{
+				ID: "compact-modal", Channel: models.ChannelInbox,
+				Status: models.StatusActive, Title: "compact modal", Body: "body",
+			}}
+			m.allItems = append([]models.Item(nil), m.items...)
+			m.selected = 0
+			m.mode = modeStatus
+			m = m.recalcLayout()
+
+			if got := lipgloss.Height(m.View()); got != height {
+				t.Fatalf("rendered height = %d, want %d", got, height)
+			}
+		})
+	}
+}
+
+func TestBacklogToggleDoesNotForceProposalDecision(t *testing.T) {
+	active := mkItem("active", models.StatusActive)
+	proposed := mkItem("proposed", models.StatusProposed)
+	backlog := mkItem("backlog", models.StatusBacklog)
+	m := newSelectionModel(t, []models.Item{active, proposed, backlog}, 2)
+	m.allItems = []models.Item{active, proposed, backlog}
+	m.items = append([]models.Item(nil), m.allItems...)
+	m.showBacklog = true
+	m.backlogVisibilityInitialized = true
+
+	next, _ := m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m = next.(model)
+	next, _ = m.Update(itemsLoadedMsg{
+		allItems:    m.allItems,
+		view:        m.view,
+		showBacklog: m.showBacklog,
+	})
+	m = next.(model)
+
+	if m.mode != modeNav {
+		t.Fatalf("backlog toggle opened mode %v, want navigation", m.mode)
+	}
+	if got := m.selectedID(); got != proposed.ID {
+		t.Fatalf("selection after hiding backlog = %q, want adjacent proposed item %q", got, proposed.ID)
+	}
+}
+
+func TestProposalNavigationCanMoveWithoutMakingADecision(t *testing.T) {
+	items := []models.Item{
+		mkItem("before", models.StatusActive),
+		mkItem("suggestion", models.StatusProposed),
+		mkItem("after", models.StatusActive),
+	}
+	m := newSelectionModel(t, items, 1)
+	m.allItems = append([]models.Item(nil), items...)
+	m.mode = modeProposal
+
+	next, _ := m.handleProposalKey(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(model)
+	if m.mode != modeNav {
+		t.Fatalf("down from proposal mode = %v, want navigation", m.mode)
+	}
+	if got := m.selectedID(); got != "after" {
+		t.Fatalf("selection after proposal navigation = %q, want after", got)
+	}
+}
+
 func TestSelectionIsRetainedIndependentlyAcrossViews(t *testing.T) {
 	inbox := []models.Item{
 		mkItem("inbox-a", models.StatusPendingUser),

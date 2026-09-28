@@ -116,6 +116,7 @@ var (
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("12")).
 				Padding(0, 1)
+	composerBorderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
 	// The confirmation is the one popup that reports a consequence rather than
 	// offering a choice, so it is drawn heavier than the selectors: a thick
 	// border in the pending amber, and a blank line of padding so the warning
@@ -588,6 +589,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.draftSelected = true
 		}
 		wasComposerVisible := m.composerVisible()
+		wasModalVisible := m.modalVisible()
 		if wasDraftSelected {
 			m.draftSelected = true
 		} else {
@@ -601,14 +603,20 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focus = focusItemList
 			m.convSelection = -1
 		}
-		if m.mode == modeNav && !m.draftSelected && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {
+		// An initial inbox whose first item is an agent suggestion should still
+		// offer the approval flow. A reload of an existing selection must not
+		// reopen it: in particular, toggling the backlog filter can land on an
+		// adjacent proposed row without the user asking for a decision.
+		if m.mode == modeNav && prevID == "" && m.convItemID == "" &&
+			!m.draftSelected && m.selected < len(m.items) &&
+			m.items[m.selected].Status == models.StatusProposed {
 			m.mode = modeProposal
 		}
 		m.refreshPendingDraft()
 		if m.mentionPicker.open {
 			m.refreshMentionPicker()
 		}
-		if wasComposerVisible != m.composerVisible() {
+		if wasComposerVisible != m.composerVisible() || wasModalVisible != m.modalVisible() {
 			m = m.recalcLayout()
 		}
 		m.updateConv()
@@ -689,6 +697,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode != modeSessionModel || msg.provider != m.sessionProvider {
 			return m, nil
 		}
+		oldModalHeight := m.modalPanelHeight()
 		m.sessionModelsLoading = false
 		m.sessionModels = msg.models
 		m.sessionModelsErr = msg.err
@@ -717,6 +726,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
+		}
+		if m.modalPanelHeight() != oldModalHeight {
+			m = m.recalcLayout()
 		}
 		return m, nil
 
@@ -785,27 +797,44 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.copyMode {
 			return m.handleCopyKey(msg)
 		}
+		if m.modalVisible() {
+			switch {
+			case msg.Type == tea.KeyPgUp || msg.String() == "pgup":
+				return m, m.pageConversation(-1)
+			case msg.Type == tea.KeyPgDown || msg.String() == "pgdown":
+				return m, m.pageConversation(1)
+			}
+		}
+		var next tea.Model
+		var cmd tea.Cmd
 		switch m.mode {
 		case modeCompose:
-			return m.handleInputKey(msg)
+			next, cmd = m.handleInputKey(msg)
 		case modeTitle:
-			return m.handleTitleKey(msg)
+			next, cmd = m.handleTitleKey(msg)
 		case modeStatus:
-			return m.handleStatusKey(msg)
+			next, cmd = m.handleStatusKey(msg)
 		case modeSession:
-			return m.handleSessionKey(msg)
+			next, cmd = m.handleSessionKey(msg)
 		case modeSessionModel:
-			return m.handleSessionModelKey(msg)
+			next, cmd = m.handleSessionModelKey(msg)
 		case modeSessionEffort:
-			return m.handleSessionEffortKey(msg)
+			next, cmd = m.handleSessionEffortKey(msg)
 		case modeQuit:
-			return m.handleQuitKey(msg)
+			next, cmd = m.handleQuitKey(msg)
 		case modeProposal:
-			return m.handleProposalKey(msg)
+			next, cmd = m.handleProposalKey(msg)
 		case modeReparent:
-			return m.handleReparentKey(msg)
+			next, cmd = m.handleReparentKey(msg)
+		default:
+			next, cmd = m.handleNavKey(msg)
 		}
-		return m.handleNavKey(msg)
+		nm := next.(model)
+		if m.modalVisible() || nm.modalVisible() ||
+			m.composerVisible() != nm.composerVisible() {
+			nm = nm.recalcLayout()
+		}
+		return nm, cmd
 	}
 
 	// Pass other messages to sub-components.
@@ -1705,6 +1734,14 @@ func (m model) handleProposalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	item := m.items[m.selected]
 	switch msg.String() {
+	case "up", "shift+up":
+		m.mode = modeNav
+		m.moveItemSelectionWithPrompt(-1, false)
+		return m, nil
+	case "j", "down", "shift+down":
+		m.mode = modeNav
+		m.moveItemSelectionWithPrompt(1, false)
+		return m, nil
 	case "esc", "q":
 		m.mode = modeNav
 	case "k":
@@ -2073,7 +2110,7 @@ func (m model) switchView(v listView) (model, tea.Cmd) {
 	m.convSelection = -1
 	m.selected = 0
 	m.items = nil
-	m.showSelected()
+	m.showSelected(false)
 	return m, loadItemsCmd(m.store, v, m.showBacklog)
 }
 
@@ -2160,7 +2197,7 @@ func (m model) View() string {
 	convScrollbar := renderScrollbar(m.conv.Height, m.conv.TotalLineCount(), m.conv.YOffset)
 	convWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, m.renderConv(), convScrollbar)
 	var convPanel string
-	if m.composerVisible() {
+	if m.composerSlotVisible() {
 		// Per-element padding so the separator spans the full column width,
 		// giving │──────── instead of │ ──────── at the corner. Scrollbar
 		// occupies the 1-char right padding slot, mirroring the input below.
@@ -2169,23 +2206,33 @@ func (m model) View() string {
 		// list can leave no room for the conversation pane. Keep the divider
 		// renderable while the terminal is being resized instead of passing a
 		// negative count to strings.Repeat.
-		sep := strings.Repeat("─", max(0, convAreaW))
+		sep := composerBorderStyle.Render(strings.Repeat("─", max(0, convAreaW)))
 
-		// Render textarea first (its View() updates the shared viewport via the
-		// internal *viewport.Model pointer), then read the live TotalLineCount.
-		taView := m.input.View()
-		tvp := textareaViewport(&m.input)
-		// Use the textarea's actual viewport height. In navigation mode a saved
-		// draft is deliberately collapsed to inputMinHeight even when its body
-		// would normally measure several visual rows; using currentInputHeight
-		// here would expand the rendered scrollbar and shift the whole frame.
-		scrollbar := renderScrollbar(m.input.Height(), tvp.TotalLineCount(), tvp.YOffset)
-		// Scrollbar occupies the 1-char right padding slot; overall width = convAreaW.
-		inputBlock := lipgloss.NewStyle().Padding(0, 0, 1, 1).Render(
-			lipgloss.JoinHorizontal(lipgloss.Top, taView, scrollbar),
-		)
-		convPanel = lipgloss.JoinVertical(lipgloss.Left, viewportBlock, sep, inputBlock)
+		var slotBlock string
+		if m.modalVisible() {
+			// A modal takes the place of the turn composer. It follows the exact
+			// same bottom-slot flow as the textarea: the viewport, separator, and
+			// variable-height slot all belong to the reading pane.
+			slotBlock = lipgloss.NewStyle().Padding(0, 0, m.modalBottomPadding(), 1).Render(m.modalBox())
+		} else {
+			// Render textarea first (its View() updates the shared viewport via the
+			// internal *viewport.Model pointer), then read the live TotalLineCount.
+			taView := m.input.View()
+			tvp := textareaViewport(&m.input)
+			// Use the textarea's actual viewport height. In navigation mode a saved
+			// draft is deliberately collapsed to inputMinHeight even when its body
+			// would normally measure several visual rows; using currentInputHeight
+			// here would expand the rendered scrollbar and shift the whole frame.
+			scrollbar := renderScrollbar(m.input.Height(), tvp.TotalLineCount(), tvp.YOffset)
+			// Scrollbar occupies the 1-char right padding slot; overall width = convAreaW.
+			slotBlock = lipgloss.NewStyle().Padding(0, 0, 1, 1).Render(
+				lipgloss.JoinHorizontal(lipgloss.Top, taView, scrollbar),
+			)
+		}
+		convPanel = lipgloss.JoinVertical(lipgloss.Left, viewportBlock, sep, slotBlock)
 		if m.mode == modeCompose && m.mentionPicker.open {
+			// The picker is anchored in the complete composer slot, just as
+			// before modal drawers were introduced.
 			convPanel = m.overlayMentionPickerAtCursor(convPanel)
 		}
 	} else {
@@ -2195,9 +2242,8 @@ func (m model) View() string {
 
 	frame := lipgloss.JoinVertical(lipgloss.Left, header, mainRow, footer)
 	if m.mode == modeQuit {
-		// Over the finished frame, not inside a pane: the question is about the
-		// whole session, and centring it in the reading pane put it off-centre
-		// on the screen, which is where the user is actually looking.
+		// Quit confirmation belongs to the whole session rather than the
+		// selected conversation, so it remains a full-frame overlay.
 		frame = overlayCentered(frame, m.quitConfirmBox(), m.width)
 	}
 	return frame
@@ -2217,26 +2263,31 @@ func (m model) renderConv() string {
 		lines[len(lines)-1] = newBelowStyle.Width(m.conv.Width).Align(lipgloss.Center).
 			Render("↓ new messages below ↓")
 	}
-	// The quit confirmation is not overlaid here: it belongs to the whole
-	// application rather than the conversation, so View places it over the
-	// composed frame instead.
-	if m.mode == modeStatus {
-		lines = m.overlayStatusPopup(lines)
-	} else if m.mode == modeSession {
-		lines = m.overlaySessionPopup(lines)
-	} else if m.mode == modeSessionModel {
-		lines = m.overlaySessionModelPopup(lines)
-	} else if m.mode == modeSessionEffort {
-		lines = m.overlaySessionEffortPopup(lines)
-	} else if m.mode == modeProposal {
-		lines = m.overlayProposalPopup(lines)
-	} else if m.mode == modeReparent {
-		lines = m.overlayReparentPopup(lines)
-	}
 	return strings.Join(lines, "\n")
 }
 
-func (m model) overlaySessionPopup(lines []string) []string {
+func (m model) modalBox() string {
+	switch m.mode {
+	case modeStatus:
+		return m.statusPopup()
+	case modeSession:
+		return m.sessionPopup()
+	case modeSessionModel:
+		return m.sessionModelPopup()
+	case modeSessionEffort:
+		return m.sessionEffortPopup()
+	case modeProposal:
+		return m.proposalPopup()
+	case modeReparent:
+		return m.reparentPopup()
+	case modeQuit:
+		return m.quitConfirmBox()
+	default:
+		return ""
+	}
+}
+
+func (m model) sessionPopup() string {
 	itemID := m.selectedID()
 	current, currentModel, currentEffort, id, updated := m.sup.Session(itemID)
 	rows := make([]string, len(sessionProviders))
@@ -2267,11 +2318,11 @@ func (m model) overlaySessionPopup(lines []string) []string {
 	} else if !updated.IsZero() {
 		active += " (resumes this item; 1h cache window)"
 	}
-	box := popupStyle.Render("agent session · this item " + active + "\n" + strings.Join(rows, "\n"))
-	return overlayBox(lines, box, m.conv.Width)
+	header := ansi.Truncate("agent session · this item "+active, m.modalContentWidth(), "…")
+	return warningHeaderStyle.Render(header) + "\n" + strings.Join(rows, "\n")
 }
 
-func (m model) overlaySessionEffortPopup(lines []string) []string {
+func (m model) sessionEffortPopup() string {
 	rows := make([]string, len(m.sessionEfforts))
 	for i, effort := range m.sessionEfforts {
 		marker, sty := "  ", lipgloss.NewStyle()
@@ -2280,16 +2331,16 @@ func (m model) overlaySessionEffortPopup(lines []string) []string {
 		}
 		rows[i] = sty.Render(marker + effort)
 	}
-	box := popupStyle.Render("effort · new " + string(m.sessionProvider) + " session\n" + strings.Join(rows, "\n"))
-	return overlayBox(lines, box, m.conv.Width)
+	header := "effort · new " + string(m.sessionProvider) + " session"
+	return warningHeaderStyle.Render(header) + "\n" + strings.Join(rows, "\n")
 }
 
-// overlaySessionModelPopup is step two of "S": choose a model for the
+// sessionModelPopup is step two of "S": choose a model for the
 // provider picked in overlaySessionPopup. Its content is asynchronous —
 // AvailableModels can be a subprocess round trip for Codex — so it renders a
 // loading line until modelsLoadedMsg lands, or the fetch error in its place.
-func (m model) overlaySessionModelPopup(lines []string) []string {
-	header := "model · new " + string(m.sessionProvider) + " session"
+func (m model) sessionModelPopup() string {
+	header := ansi.Truncate("model · new "+string(m.sessionProvider)+" session", m.modalContentWidth(), "…")
 	var body string
 	switch {
 	case m.sessionModelsLoading:
@@ -2297,8 +2348,13 @@ func (m model) overlaySessionModelPopup(lines []string) []string {
 	case m.sessionModelsErr != nil:
 		body = dimStyle.Render("  could not list models: " + m.sessionModelsErr.Error())
 	default:
-		rows := make([]string, len(m.sessionModels))
-		for i, opt := range m.sessionModels {
+		start, end := modalListWindow(m.sessionModelIdx, len(m.sessionModels), m.modalOptionRows())
+		rows := make([]string, 0, end-start+2)
+		if start > 0 {
+			rows = append(rows, dimStyle.Render("  ↑ more models"))
+		}
+		for i := start; i < end; i++ {
+			opt := m.sessionModels[i]
 			marker, sty := "  ", lipgloss.NewStyle()
 			if i == m.sessionModelIdx {
 				marker, sty = "› ", lipgloss.NewStyle().Bold(true).Foreground(pendingFg)
@@ -2307,12 +2363,14 @@ func (m model) overlaySessionModelPopup(lines []string) []string {
 			if opt.Default {
 				label += " (default)"
 			}
-			rows[i] = sty.Render(marker + label)
+			rows = append(rows, sty.Render(marker+ansi.Truncate(label, max(1, m.modalContentWidth()-lipgloss.Width(marker)), "…")))
+		}
+		if end < len(m.sessionModels) {
+			rows = append(rows, dimStyle.Render("  ↓ more models"))
 		}
 		body = strings.Join(rows, "\n")
 	}
-	box := popupStyle.Render(header + "\n" + body)
-	return overlayBox(lines, box, m.conv.Width)
+	return warningHeaderStyle.Render(header) + "\n" + body
 }
 
 // overlayBox draws a rendered popup over the top rows of the conversation.
@@ -2563,7 +2621,7 @@ func overlayCentered(frame, box string, width int) string {
 // and again where the frame resumes, so neither bleeds into the other.
 const ansiReset = "\x1b[0m"
 
-func (m model) overlayStatusPopup(lines []string) []string {
+func (m model) statusPopup() string {
 	rows := make([]string, len(userStatuses))
 	for i, s := range userStatuses {
 		marker, sty := "  ", lipgloss.NewStyle()
@@ -2572,27 +2630,27 @@ func (m model) overlayStatusPopup(lines []string) []string {
 		}
 		rows[i] = sty.Render(marker + string(s))
 	}
-	box := popupStyle.Render("set status\n" + strings.Join(rows, "\n"))
-	return overlayBox(lines, box, m.conv.Width)
+	return warningHeaderStyle.Render("set status") + "\n" + strings.Join(rows, "\n")
 }
 
-func (m model) overlayProposalPopup(lines []string) []string {
-	box := popupStyle.Render("agent suggestion\n" +
-		"k keep for later\n" +
-		"s start now\n" +
-		"x reject\n" +
-		"esc cancel")
-	return overlayBox(lines, box, m.conv.Width)
-}
-
-func (m model) overlayReparentPopup(lines []string) []string {
-	source := m.reparentItemID
-	maxTargets := max(1, len(lines)-8)
-	start := 0
-	if m.reparentTargetIdx >= maxTargets {
-		start = m.reparentTargetIdx - maxTargets + 1
+func (m model) proposalPopup() string {
+	item := models.Item{}
+	if m.selected >= 0 && m.selected < len(m.items) {
+		item = m.items[m.selected]
 	}
-	end := min(len(m.reparentTargets), start+maxTargets)
+	title := item.Title
+	if title == "" {
+		title = "(untitled)"
+	}
+	contentWidth := m.modalContentWidth()
+	header := ansi.Truncate("agent suggestion [proposed] · "+title, contentWidth, "…")
+	return warningHeaderStyle.Render(header) + "\n" +
+		"k keep for later   s start now   x reject   esc cancel"
+}
+
+func (m model) reparentPopup() string {
+	source := m.reparentItemID
+	start, end := modalListWindow(m.reparentTargetIdx, len(m.reparentTargets), m.modalOptionRows())
 	rows := make([]string, 0, end-start+2)
 	if start > 0 {
 		rows = append(rows, dimStyle.Render("  ↑ more roots"))
@@ -2603,7 +2661,8 @@ func (m model) overlayReparentPopup(lines []string) []string {
 		if i == m.reparentTargetIdx {
 			marker, style = "› ", lipgloss.NewStyle().Bold(true).Foreground(pendingFg)
 		}
-		rows = append(rows, style.Render(marker+target.Title+"  ["+target.ID+"]"))
+		row := marker + target.Title + "  [" + target.ID + "]"
+		rows = append(rows, style.Render(ansi.Truncate(row, m.modalContentWidth(), "…")))
 	}
 	if end < len(m.reparentTargets) {
 		rows = append(rows, dimStyle.Render("  ↓ more roots"))
@@ -2619,8 +2678,35 @@ func (m model) overlayReparentPopup(lines []string) []string {
 		}
 		help = "f flatten children: " + state + "   " + help
 	}
-	box := popupStyle.Render("move " + source + " under\n" + strings.Join(rows, "\n") + "\n\n" + dimStyle.Render(help))
-	return overlayBox(lines, box, m.conv.Width)
+	header := ansi.Truncate("move "+source+" under", m.modalContentWidth(), "…")
+	help = ansi.Truncate(help, m.modalContentWidth(), "…")
+	return warningHeaderStyle.Render(header) + "\n" + strings.Join(rows, "\n") + "\n\n" + dimStyle.Render(help)
+}
+
+func (m model) modalOptionRows() int {
+	return max(1, (m.height-8)/3)
+}
+
+func (m model) modalContentWidth() int {
+	convAreaW := m.width - (m.listWidth() + 1)
+	convW := convAreaW - 2
+	return max(1, convW-4)
+}
+
+func modalListWindow(selected, total, maxRows int) (start, end int) {
+	maxRows = max(1, maxRows)
+	if selected < 0 {
+		selected = 0
+	}
+	if selected >= total {
+		selected = max(0, total-1)
+	}
+	start = selected - maxRows + 1
+	if start < 0 {
+		start = 0
+	}
+	end = min(total, start+maxRows)
+	return start, end
 }
 
 func (m model) renderHeader() string {
@@ -2686,7 +2772,7 @@ func (m model) renderFooter() string {
 	case modeQuit:
 		text = "y quit and stop the running turn  any other key stay"
 	case modeProposal:
-		text = "k keep for later  s start  x reject  esc cancel"
+		text = "↑/↓ navigate  k keep for later  s start  x reject  esc cancel"
 	case modeReparent:
 		text = "j/k select root  enter move  f flatten children  esc cancel"
 	default:
@@ -3326,19 +3412,20 @@ func splitDisplayWidth(s string, width int) (prefix, rest string) {
 // showSelected renders the current selection and parks the pane at its newest
 // content. Opening an item at the top means scrolling past the entire history
 // to reach the part that changed, which is almost never what the reader wants.
-func (m *model) showSelected() {
+func (m *model) showSelected(promptProposal bool) {
 	m.conversationSelectionMovedAt = time.Time{}
 	m.convSelection = -1
 	if m.draftVisible() && m.draftSelected {
 		m.restoreNewItemDraft()
 		m.draftSelected = true
 	}
-	if m.mode == modeNav && !m.draftSelected && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {
+	wasModalVisible := m.modalVisible()
+	if promptProposal && m.mode == modeNav && !m.draftSelected && m.selected < len(m.items) && m.items[m.selected].Status == models.StatusProposed {
 		m.mode = modeProposal
 	}
 	wasComposerVisible := m.composerVisible()
 	m.refreshPendingDraft()
-	if wasComposerVisible != m.composerVisible() {
+	if wasComposerVisible != m.composerVisible() || wasModalVisible != m.modalVisible() {
 		*m = m.recalcLayout()
 	}
 	m.updateConv()
@@ -3381,6 +3468,23 @@ func (m model) composerVisible() bool {
 	return m.mode == modeCompose ||
 		(m.draftVisible() && m.draftSelected && m.draftBodyStarted) ||
 		(m.pendingDraftItemID != "" && m.pendingDraftItemID == m.selectedID())
+}
+
+// modalVisible reports the picker modes that occupy the turn-composer slot at
+// the bottom of the reading pane. The quit confirmation is deliberately not a
+// drawer: it concerns the whole session and remains a full-frame prompt.
+func (m model) modalVisible() bool {
+	switch m.mode {
+	case modeStatus, modeSession, modeSessionModel, modeSessionEffort,
+		modeProposal, modeReparent:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m model) composerSlotVisible() bool {
+	return m.modalVisible() || m.composerVisible()
 }
 
 // syncNewBelow retires the "new messages below" marker once the reader has
@@ -4224,12 +4328,20 @@ func (m model) recalcLayout() model {
 	if m.copyMode {
 		mainH = m.height
 	}
+	slotH := 0
+	if m.modalVisible() {
+		slotH = m.modalPanelHeight()
+	} else if m.composerVisible() {
+		// The rendered input block includes its one-row bottom padding.
+		slotH = inputH + 1
+	}
 	var convH int
 	if m.copyMode {
 		convH = mainH
-	} else if m.composerVisible() {
-		// per-element padding: 1(top) + convH + 1(sep) + inputH + 1(bottom) = mainH
-		convH = mainH - inputH - 3
+	} else if m.composerSlotVisible() {
+		// Both the textarea and modal use the same right-pane flow:
+		// viewport top padding + conversation + separator + slot block.
+		convH = mainH - slotH - 2
 	} else {
 		// Padding(1) all sides: 1 + convH + 1 = mainH
 		convH = mainH - 2
@@ -4243,6 +4355,32 @@ func (m model) recalcLayout() model {
 	m.updateConv()
 	m.setConvHeight(convH)
 	return m
+}
+
+// modalPanelHeight is the number of rows the drawer consumes after the
+// conversation viewport, including the same bottom padding as the textarea
+// composer slot.
+func (m model) modalPanelHeight() int {
+	if !m.modalVisible() {
+		return 0
+	}
+	return lipgloss.Height(m.modalBox()) + m.modalBottomPadding()
+}
+
+func (m model) modalBottomPadding() int {
+	if !m.modalVisible() {
+		return 0
+	}
+	// Preserve the composer's bottom breathing room whenever the terminal can
+	// afford it. On a very short terminal, drop only that optional row so the
+	// conversation still retains its one-row minimum and the outer frame does
+	// not grow past the terminal height.
+	mainH := max(0, m.height-2)
+	boxH := lipgloss.Height(m.modalBox())
+	if boxH+1 <= mainH-3 {
+		return 1
+	}
+	return 0
 }
 
 // ── selection helpers ─────────────────────────────────────────────────────────
@@ -4283,6 +4421,10 @@ func (m *model) selectListRow(row int) {
 }
 
 func (m *model) moveItemSelection(delta int) {
+	m.moveItemSelectionWithPrompt(delta, true)
+}
+
+func (m *model) moveItemSelectionWithPrompt(delta int, promptProposal bool) {
 	count := len(m.items)
 	if m.draftVisible() {
 		count++
@@ -4295,7 +4437,7 @@ func (m *model) moveItemSelection(delta int) {
 		return
 	}
 	m.selectListRow(row)
-	m.showSelected()
+	m.showSelected(promptProposal)
 }
 
 func (m model) hasChildren(root string) bool {
