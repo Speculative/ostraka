@@ -855,6 +855,8 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 			if activityErr := s.store.AddActivity(msg.itemID, models.Activity{
 				Type:      store.ActivityAgentSessionStarted,
 				Result:    string(sf.Provider),
+				Model:     sf.Model,
+				Effort:    sf.Effort,
 				Actor:     models.ActorAgent,
 				Timestamp: time.Now().UTC(),
 				Handled:   true,

@@ -403,6 +403,13 @@ func TestFreshDispatchRecordsSessionStartedActivity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := saveItemSession(s.root, item.ID, sessionFile{
+		Provider: ProviderClaude,
+		Model:    "gpt-5.6-luna",
+		Effort:   "xhigh",
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	s.dispatch(enqueueMsg{itemID: item.ID})
 
@@ -424,6 +431,9 @@ func TestFreshDispatchRecordsSessionStartedActivity(t *testing.T) {
 	}
 	if activity.Type != store.ActivityAgentSessionStarted || activity.Result != string(ProviderClaude) {
 		t.Errorf("session activity = %+v", activity)
+	}
+	if activity.Model != "gpt-5.6-luna" || activity.Effort != "xhigh" {
+		t.Errorf("session activity selection = (%q, %q)", activity.Model, activity.Effort)
 	}
 	if activity.Actor != models.ActorAgent || !activity.Handled {
 		t.Errorf("session activity metadata = %+v", activity)

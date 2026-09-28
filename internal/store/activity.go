@@ -101,6 +101,24 @@ func (s *Store) AddActivity(itemID string, activity models.Activity) error {
 	return s.appendActivity(itemID, activity)
 }
 
+// AgentSessionLabel returns the provider and, when recorded, the model and
+// effort selected for a fresh agent session. Older activity records have no
+// model or effort fields, so they naturally retain their provider-only label.
+func AgentSessionLabel(activity models.Activity) string {
+	provider := strings.TrimSpace(activity.Result)
+	if provider == "" {
+		provider = "provider"
+	}
+	parts := []string{provider}
+	if model := strings.TrimSpace(activity.Model); model != "" {
+		parts = append(parts, model)
+	}
+	if effort := strings.TrimSpace(activity.Effort); effort != "" {
+		parts = append(parts, effort)
+	}
+	return strings.Join(parts, " ")
+}
+
 func activityID(now time.Time) string {
 	b := make([]byte, 3)
 	if _, err := rand.Read(b); err != nil {

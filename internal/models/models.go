@@ -108,6 +108,8 @@ type Activity struct {
 	FromRootID string    `json:"from_root_id,omitempty"`
 	ToRootID   string    `json:"to_root_id,omitempty"`
 	Result     string    `json:"result,omitempty"`
+	Model      string    `json:"model,omitempty"`
+	Effort     string    `json:"effort,omitempty"`
 	Actor      Actor     `json:"actor"`
 	Timestamp  time.Time `json:"timestamp"`
 	Handled    bool      `json:"handled"`

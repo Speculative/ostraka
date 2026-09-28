@@ -542,11 +542,7 @@ Examples:
 			fmt.Println("\n── activity ──")
 			for _, activity := range activities {
 				if activity.Type == store.ActivityAgentSessionStarted {
-					provider := activity.Result
-					if provider == "" {
-						provider = "provider"
-					}
-					fmt.Printf("%s new %s session started\n", activity.Timestamp.Format("2006-01-02 15:04:05"), provider)
+					fmt.Printf("%s new %s session started\n", activity.Timestamp.Format("2006-01-02 15:04:05"), store.AgentSessionLabel(activity))
 					continue
 				}
 				detail := activity.ChildID

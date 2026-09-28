@@ -113,6 +113,8 @@ func TestSessionStartedActivityRendersInConversation(t *testing.T) {
 	if err := s.AddActivity(item.ID, models.Activity{
 		Type:      store.ActivityAgentSessionStarted,
 		Result:    "codex",
+		Model:     "gpt-5.6-luna",
+		Effort:    "xhigh",
 		Actor:     models.ActorAgent,
 		Timestamp: time.Now().UTC(),
 		Handled:   true,
@@ -127,7 +129,7 @@ func TestSessionStartedActivityRendersInConversation(t *testing.T) {
 	m.conv.Height = 20
 	m.updateConv()
 	view := ansi.Strip(m.conv.View())
-	if !strings.Contains(view, "activity  ·  new codex session started") {
+	if !strings.Contains(view, "activity  ·  new codex gpt-5.6-luna xhigh session started") {
 		t.Fatalf("conversation omitted session-start activity: %q", view)
 	}
 }

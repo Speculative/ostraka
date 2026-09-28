@@ -3673,12 +3673,8 @@ func (m *model) updateConv() {
 				break
 			}
 			if event.activity.Type == store.ActivityAgentSessionStarted {
-				provider := event.activity.Result
-				if provider == "" {
-					provider = "provider"
-				}
 				sb.WriteString(fmt.Sprintf("\n\n%s\nactivity  ·  new %s session started",
-					turnRule, provider))
+					turnRule, store.AgentSessionLabel(event.activity)))
 				break
 			}
 			status := "pending"
