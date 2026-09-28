@@ -95,6 +95,23 @@ func TestConversationTurnDividersSpanTheReadingPane(t *testing.T) {
 	}
 }
 
+func TestViewDoesNotPanicWhenComposerIsWiderThanTerminal(t *testing.T) {
+	// The list has a 24-column minimum. A narrow terminal can therefore leave
+	// the conversation area negative while a saved turn is still open.
+	m := newModel(nil, nil, nil)
+	m.width = 20
+	m.height = 20
+	m.mode = modeCompose
+	m.items = []models.Item{{
+		ID: "item-1", Channel: models.ChannelInbox, Status: models.StatusActive,
+		Title: "narrow terminal", Body: "body",
+	}}
+	m.selected = 0
+	m = m.recalcLayout()
+
+	_ = m.View()
+}
+
 func TestConversationColorsUserAndAgentNames(t *testing.T) {
 	previousProfile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.ANSI256)

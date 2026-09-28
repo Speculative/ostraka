@@ -2165,7 +2165,11 @@ func (m model) View() string {
 		// giving │──────── instead of │ ──────── at the corner. Scrollbar
 		// occupies the 1-char right padding slot, mirroring the input below.
 		viewportBlock := lipgloss.NewStyle().Padding(1, 0, 0, 1).Render(convWithScrollbar)
-		sep := strings.Repeat("─", convAreaW)
+		// The list keeps its minimum width, so a terminal narrower than the
+		// list can leave no room for the conversation pane. Keep the divider
+		// renderable while the terminal is being resized instead of passing a
+		// negative count to strings.Repeat.
+		sep := strings.Repeat("─", max(0, convAreaW))
 
 		// Render textarea first (its View() updates the shared viewport via the
 		// internal *viewport.Model pointer), then read the live TotalLineCount.
@@ -3268,9 +3272,9 @@ func wrapLine(line string, width int) []string {
 			if cur != "" {
 				flush()
 			}
-			r := []rune(w)
-			lines = append(lines, indent+string(r[:avail]))
-			w = string(r[avail:])
+			prefix, rest := splitDisplayWidth(w, avail)
+			lines = append(lines, indent+prefix)
+			w = rest
 		}
 		switch {
 		case cur == "":
@@ -3289,6 +3293,34 @@ func wrapLine(line string, width int) []string {
 		return []string{line}
 	}
 	return lines
+}
+
+// splitDisplayWidth splits a word at a terminal-cell boundary. A rune is not
+// necessarily one cell wide, so slicing []rune by width can run past the end
+// of a short word made from wide glyphs.
+func splitDisplayWidth(s string, width int) (prefix, rest string) {
+	if s == "" || width <= 0 {
+		return "", s
+	}
+	runes := []rune(s)
+	used, cut := 0, 0
+	for cut < len(runes) {
+		runeWidth := lipgloss.Width(string(runes[cut]))
+		if cut > 0 && used+runeWidth > width {
+			break
+		}
+		used += runeWidth
+		cut++
+		if used >= width {
+			break
+		}
+	}
+	if cut == 0 {
+		// A single glyph wider than the pane is still the smallest progress
+		// possible; leaving it for the next iteration would loop forever.
+		cut = 1
+	}
+	return string(runes[:cut]), string(runes[cut:])
 }
 
 // showSelected renders the current selection and parks the pane at its newest
@@ -4108,6 +4140,9 @@ func textareaScrollUp(ta *textarea.Model, n int) {
 // renderScrollbar returns a visibleH-line string (one char wide) showing a
 // proportional thumb. Returns spaces when all content is visible.
 func renderScrollbar(visibleH, totalH, yOffset int) string {
+	if visibleH <= 0 {
+		return ""
+	}
 	if totalH <= visibleH {
 		return strings.Repeat(" \n", visibleH-1) + " "
 	}

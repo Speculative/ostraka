@@ -82,6 +82,28 @@ func TestWrapTextHardSplitsUnbreakableToken(t *testing.T) {
 	}
 }
 
+func TestWrapTextHardSplitsWideTokenWithoutPanic(t *testing.T) {
+	got := wrapText("界界界", 5)
+	lines := strings.Split(got, "\n")
+	if joined := strings.Join(lines, ""); joined != "界界界" {
+		t.Errorf("split lost characters: %q", joined)
+	}
+	for _, line := range lines {
+		if width := lipgloss.Width(line); width > 5 {
+			t.Errorf("line %q has display width %d, want at most 5", line, width)
+		}
+	}
+}
+
+func TestRenderScrollbarHandlesNonPositiveHeight(t *testing.T) {
+	if got := renderScrollbar(0, 10, 0); got != "" {
+		t.Fatalf("zero-height scrollbar = %q, want empty", got)
+	}
+	if got := renderScrollbar(-1, 10, 0); got != "" {
+		t.Fatalf("negative-height scrollbar = %q, want empty", got)
+	}
+}
+
 func TestWrapTextNeverExceedsWidth(t *testing.T) {
 	body := "A turn body with a mix of prose, an indented block\n\n    code line that is quite long indeed\n\nand a trailing paragraph."
 	for _, w := range []int{1, 2, 5, 13, 40, 200} {
