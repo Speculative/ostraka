@@ -191,6 +191,52 @@ func (s *Store) ReparentItem(itemID, newRootID string, flattenChildren bool) (mo
 	return item, nil
 }
 
+// UnparentItem promotes a direct child to a root item. Its own children, if
+// any, remain attached to it, so the one-level hierarchy is preserved. The
+// old root receives an activity record and a backlog child becomes a new root
+// entry in the explicit backlog order.
+func (s *Store) UnparentItem(itemID string) (models.Item, error) {
+	path, err := s.pathForID(itemID)
+	if err != nil {
+		return models.Item{}, err
+	}
+	item, err := ParseItem(path)
+	if err != nil {
+		return models.Item{}, err
+	}
+	if item.Parent == "" {
+		return models.Item{}, fmt.Errorf("item %q is already a root", item.ID)
+	}
+	oldRootID := item.Parent
+	root, err := s.GetItem(oldRootID)
+	if err != nil {
+		return models.Item{}, fmt.Errorf("root %q: %w", oldRootID, err)
+	}
+	item.Parent = ""
+	item.Group = root.Group
+	if err := WriteItem(item, path); err != nil {
+		return models.Item{}, err
+	}
+	if err := s.appendActivity(root.ID, models.Activity{
+		ID:         activityID(time.Now().UTC()),
+		Type:       ActivitySubthreadUnparented,
+		ChildID:    item.ID,
+		ChildTitle: item.Title,
+		FromRootID: root.ID,
+		Result:     "unparented",
+		Actor:      models.ActorUser,
+		Timestamp:  time.Now().UTC(),
+	}); err != nil {
+		return models.Item{}, err
+	}
+	if item.Status == models.StatusBacklog {
+		if err := s.addBacklogRoot(item.ID); err != nil {
+			return models.Item{}, err
+		}
+	}
+	return item, nil
+}
+
 func movedActivity(child models.Item, fromRootID, toRootID string) models.Activity {
 	now := time.Now().UTC()
 	return models.Activity{

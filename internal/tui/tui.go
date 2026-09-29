@@ -816,6 +816,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, conversationScrollTick(msg.origin, msg.target, msg.startedAt, msg.duration, msg.generation)
 
 	case tea.KeyMsg:
+		// Action failures are recoverable UI state. Clear the banner when the
+		// user presses the next key, then let that key continue through the
+		// normal mode handler so the current view remains usable.
+		if m.err != nil {
+			m.err = nil
+		}
 		// A bracketed paste is content, never a command. In particular, pasted
 		// q, esc, or ctrl+s must not quit or submit the editor. Bubble Tea's
 		// KeyMsg.String protects bindings by wrapping pasted text, but routing it
@@ -1110,13 +1116,116 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) beginGroupEdit() (tea.Model, tea.Cmd) {
+	if m.store == nil || m.selectedID() == "" || m.selected >= len(m.items) {
+		return m, nil
+	}
+	item := m.items[m.selected]
+	m.mode = modeGroup
+	m.groupItemID = item.ID
+	m.groupError = nil
+	m.closeMentionPicker()
+	m.input.Reset()
+	m.input.Placeholder = "group slug or none…"
+	m.input.SetValue(item.Group)
+	m.input.CursorEnd()
+	m.openGroupPicker(item.Group)
+	m = m.recalcLayout()
+	return m, m.input.Focus()
+}
+
+func (m model) handleGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.groupPicker.open {
+		switch msg.String() {
+		case "esc":
+			m.closeGroupPicker()
+			return m, nil
+		case "down":
+			if m.groupPicker.selected < len(m.groupPicker.groups)-1 {
+				m.groupPicker.selected++
+			}
+			return m, nil
+		case "up":
+			if m.groupPicker.selected > 0 {
+				m.groupPicker.selected--
+			}
+			return m, nil
+		case "enter", "tab":
+			if len(m.groupPicker.groups) > 0 {
+				return m.chooseGroup()
+			}
+			if msg.String() == "tab" {
+				m.closeGroupPicker()
+				return m, nil
+			}
+		}
+	}
+	switch msg.String() {
+	case "ctrl+s", "enter":
+		return m.applyGroup()
+	case "esc", "ctrl+c":
+		return m.cancelGroup(), nil
+	case "pgup":
+		return m, m.pageConversation(-1)
+	case "pgdown":
+		return m, m.pageConversation(1)
+	}
+	prevH := m.currentInputHeight()
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	if m.groupError != nil {
+		m.groupError = nil
+	}
+	m.refreshGroupPicker()
+	if nextH := m.currentInputHeight(); nextH != prevH {
+		m = m.recalcLayout()
+	}
+	return m, cmd
+}
+
+func (m model) applyGroup() (tea.Model, tea.Cmd) {
+	group := strings.TrimSpace(m.input.Value())
+	if group == "none" {
+		group = ""
+	}
+	if err := store.ValidateGroup(group); err != nil {
+		m.groupError = err
+		return m, nil
+	}
+	if m.store == nil || m.groupItemID == "" {
+		return m.cancelGroup(), nil
+	}
+	if _, err := m.store.SetGroup(m.groupItemID, group); err != nil {
+		m.groupError = err
+		return m, nil
+	}
+	next := m.closeGroup()
+	return next.requestItemsLoad(next.view, next.showBacklog)
+}
+
+func (m model) cancelGroup() model {
+	return m.closeGroup()
+}
+
+func (m model) closeGroup() model {
+	m.mode = modeNav
+	m.groupItemID = ""
+	m.groupError = nil
+	m.closeGroupPicker()
+	m.input.Reset()
+	m.input.Placeholder = ""
+	m.input.Blur()
+	m.refreshPendingDraft()
+	return m.recalcLayout()
+}
+
 func (m model) toggleBacklogMoveMode() (tea.Model, tea.Cmd) {
 	if m.store == nil || m.view.archive || m.draftSelected || m.selected < 0 || m.selected >= len(m.items) {
 		return m, nil
 	}
 	_, ok := m.selectedBacklogRoot()
 	if !ok {
-		m.err = fmt.Errorf("only parked backlog families can be prioritized")
+		m.err = m.backlogPriorityError()
 		return m, nil
 	}
 	m.backlogMoveMode = true
@@ -1154,11 +1263,38 @@ func (m model) selectedBacklogRoot() (string, bool) {
 	return rootIDValue, m.view.familyRank(rootIDValue, rootItem, nil, all) == rankOf(models.StatusBacklog)
 }
 
+func (m model) backlogPriorityError() error {
+	if m.selected >= 0 && m.selected < len(m.items) && !m.draftSelected {
+		selected := m.items[m.selected]
+		all := m.allItems
+		if len(all) == 0 {
+			all = m.items
+		}
+		// The grouped view clears Parent on a detached child so it renders as a
+		// standalone row. Recover the persisted relationship before explaining
+		// why that row cannot be prioritized.
+		for _, item := range all {
+			if item.ID == selected.ID {
+				selected = item
+				break
+			}
+		}
+		if selected.Parent != "" {
+			for _, item := range all {
+				if item.ID == selected.Parent && item.Parent == "" && models.TerminalStatuses[item.Status] {
+					return fmt.Errorf("cannot prioritize child %q: parent %q is archived; unarchive the parent or reparent the child first", selected.ID, item.ID)
+				}
+			}
+		}
+	}
+	return fmt.Errorf("only parked backlog families can be prioritized")
+}
+
 func (m model) moveBacklogRoot(delta int) (tea.Model, tea.Cmd) {
 	root, ok := m.selectedBacklogRoot()
 	if !ok {
 		m.backlogMoveMode = false
-		m.err = fmt.Errorf("only parked backlog families can be prioritized")
+		m.err = m.backlogPriorityError()
 		return m, nil
 	}
 	selectedID := m.selectedID()
@@ -1716,10 +1852,15 @@ func (m model) handleStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// active and then post a turn you have nothing to say in.
 			if wakesAgent(status) && awaitingAgent(item) {
 				status = models.StatusPendingAgent
-				m.store.SetStatus(item.ID, status) //nolint:errcheck
-				m.sup.Enqueue(item.ID)
+				if _, err := m.store.SetStatus(item.ID, status); err != nil {
+					m.err = err
+				} else {
+					m.sup.Enqueue(item.ID)
+				}
 			} else {
-				m.store.SetStatus(item.ID, status) //nolint:errcheck
+				if _, err := m.store.SetStatus(item.ID, status); err != nil {
+					m.err = err
+				}
 			}
 		}
 		m.mode = modeNav
@@ -2038,7 +2179,15 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if content != "" && m.selected < len(m.items) {
 			m.closeMentionPicker()
 			item := m.items[m.selected]
-			m.store.AddTurn(item.ID, models.ActorUser, content) //nolint:errcheck
+			if _, err := m.store.AddTurn(item.ID, models.ActorUser, content); err != nil {
+				m.err = err
+				// Keep the composer and its contents in place. The rejected turn
+				// may be retryable after the user changes the item's lifecycle or
+				// unparents it, and losing the draft makes the error unnecessarily
+				// destructive.
+				m.checkpointTurnDraft()
+				return m, nil
+			}
 			if err := m.store.ClearDraft(m.draftItemID); err != nil {
 				m.err = err
 			}
@@ -2298,9 +2447,6 @@ func (m *model) showSelectedProjectEntry() {
 func (m model) View() string {
 	if m.width == 0 {
 		return "loading…"
-	}
-	if m.err != nil {
-		return fmt.Sprintf("error: %v\n\nPress q to quit.", m.err)
 	}
 	if m.copyMode {
 		// Bypass renderConv as well as the outer frame: its transient
@@ -2873,6 +3019,11 @@ func (m model) renderHeader() string {
 }
 
 func (m model) renderFooter() string {
+	if m.err != nil {
+		message := "⚠ " + m.err.Error() + "  · press any key to dismiss"
+		message = ansi.Truncate(message, max(1, m.width), "…")
+		return footerStyle.Foreground(pendingFg).Bold(true).Width(m.width).Render(message)
+	}
 	var text string
 	switch m.mode {
 	case modeCompose:

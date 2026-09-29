@@ -2,6 +2,7 @@ package tui
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Speculative/ostraka/internal/models"
@@ -122,6 +123,33 @@ func TestBacklogMoveModeRejectsFamilyPromotedByChildAttention(t *testing.T) {
 	}
 	if got.err == nil {
 		t.Fatal("v did not explain why the promoted family could not be prioritized")
+	}
+}
+
+func TestBacklogMoveModeExplainsChildUnderArchivedRoot(t *testing.T) {
+	root := mkItem("archived-root", models.StatusArchived)
+	child := mkItem("live-child", models.StatusBacklog)
+	child.Parent = root.ID
+	all := []models.Item{root, child}
+
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(s, nil, nil)
+	m.showBacklog = true
+	m.backlogVisibilityInitialized = true
+	m.allItems = all
+	m.items, _ = m.view.prepareGroupedWithOrder(all, true, m.collapsed, nil)
+	m.selected = 0
+
+	next, _ := m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	got := next.(model)
+	if got.backlogMoveMode {
+		t.Fatal("v entered move mode for a child under an archived root")
+	}
+	if got.err == nil || !strings.Contains(got.err.Error(), "parent \"archived-root\" is archived") {
+		t.Fatalf("v error = %v, want archived-parent guidance", got.err)
 	}
 }
 

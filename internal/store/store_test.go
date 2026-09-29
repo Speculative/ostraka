@@ -365,6 +365,71 @@ func TestSetStatusNormalizesLegacyDoneInput(t *testing.T) {
 	}
 }
 
+func TestChildCannotBecomeLiveUnderArchivedRoot(t *testing.T) {
+	s := newTestStore(t)
+	root, _ := s.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusActive, "")
+	child, _ := s.CreateSubthread(root.ID, "child", "body", models.TypeThread, models.StatusActive)
+	if _, err := s.SetStatus(child.ID, models.StatusArchived); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetStatus(root.ID, models.StatusArchived); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.SetStatus(child.ID, models.StatusBacklog); err == nil ||
+		!strings.Contains(err.Error(), "unarchive the parent or reparent the child") {
+		t.Fatalf("reopened child under archived root: %v", err)
+	}
+	got, err := s.GetItem(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != models.StatusArchived {
+		t.Fatalf("rejected status change persisted %q, want archived", got.Status)
+	}
+
+	if _, err := s.SetStatus(root.ID, models.StatusActive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetStatus(child.ID, models.StatusBacklog); err != nil {
+		t.Fatalf("reopened child after reopening root: %v", err)
+	}
+}
+
+func TestAgentTurnCannotReopenChildUnderArchivedRoot(t *testing.T) {
+	s := newTestStore(t)
+	root, _ := s.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusActive, "")
+	child, _ := s.CreateSubthread(root.ID, "child", "body", models.TypeThread, models.StatusActive)
+	if _, err := s.SetStatus(child.ID, models.StatusArchived); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetStatus(root.ID, models.StatusArchived); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a legacy inconsistent file: an archived-root child was manually
+	// made live. An agent turn would normally advance it to pending-user, but
+	// that transition must use the same lifecycle guard as SetStatusBy.
+	child.Status = models.StatusActive
+	if err := os.Remove(filepath.Join(s.Root, "ARCHIVE", child.ID+".md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteItem(child, filepath.Join(s.Root, "INBOX", child.ID+".md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTurn(child.ID, models.ActorAgent, "answer"); err == nil ||
+		!strings.Contains(err.Error(), "unarchive the parent or reparent the child") {
+		t.Fatalf("agent turn reopened child under archived root: %v", err)
+	}
+	got, err := s.GetItem(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != models.StatusActive || len(got.Turns) != 0 {
+		t.Fatalf("rejected agent turn changed child: status=%q turns=%d", got.Status, len(got.Turns))
+	}
+}
+
 func TestDeleteItem(t *testing.T) {
 	s := newTestStore(t)
 	item, _ := s.CreateItem(models.ChannelInbox, "q", "q", models.TypeThread, models.StatusActive, "")

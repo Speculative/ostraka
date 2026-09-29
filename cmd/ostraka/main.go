@@ -31,7 +31,7 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd, preambleCmd)
-	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRenameCmd, itemRmCmd, itemReparentCmd, itemGroupCmd)
+	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRenameCmd, itemRmCmd, itemReparentCmd, itemUnparentCmd, itemGroupCmd)
 	rootCmd.AddCommand(projectCmd)
 	projectCmd.AddCommand(projectInstructionsCmd, projectBriefCmd)
 	projectInstructionsCmd.AddCommand(projectInstructionsShowCmd, projectInstructionsReplaceCmd)
@@ -295,6 +295,20 @@ var itemReparentCmd = &cobra.Command{
 			parent = args[1]
 		}
 		item, err := mustStore().ReparentItem(args[0], parent, reparentFlags.flattenChildren)
+		if err != nil {
+			return err
+		}
+		fmt.Println(item.ID)
+		return nil
+	},
+}
+
+var itemUnparentCmd = &cobra.Command{
+	Use:   "unparent <item-id>",
+	Short: "Promote a child to a top-level item",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		item, err := mustStore().UnparentItem(args[0])
 		if err != nil {
 			return err
 		}

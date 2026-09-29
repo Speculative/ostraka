@@ -180,3 +180,44 @@ func TestReparentArchivedRootKeepsArchivePlacement(t *testing.T) {
 		t.Fatalf("archived source unexpectedly exists in inbox, stat error = %v", err)
 	}
 }
+
+func TestUnparentPromotesChildAndMaintainsBacklogOrder(t *testing.T) {
+	s := newTestStore(t)
+	root, _ := s.CreateItem(models.ChannelInbox, "root", "root body", models.TypeThread, models.StatusActive, "")
+	child, _ := s.CreateSubthread(root.ID, "child", "child body", models.TypeThread, models.StatusBacklog)
+
+	got, err := s.UnparentItem(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Parent != "" {
+		t.Fatalf("returned parent = %q, want empty", got.Parent)
+	}
+	updated, err := s.GetItem(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Parent != "" || updated.Status != models.StatusBacklog {
+		t.Fatalf("unparented item = %+v", updated)
+	}
+	order, err := s.BacklogOrder()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 1 || order[0] != child.ID {
+		t.Fatalf("backlog order = %v, want [%s]", order, child.ID)
+	}
+
+	activities, err := s.ListActivities(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activities) != 2 {
+		t.Fatalf("root activities = %+v, want creation and unparent events", activities)
+	}
+	unparented := activities[1]
+	if unparented.Type != store.ActivitySubthreadUnparented || unparented.ChildID != child.ID ||
+		unparented.FromRootID != root.ID || unparented.ToRootID != "" {
+		t.Fatalf("unparent activity = %+v", unparented)
+	}
+}

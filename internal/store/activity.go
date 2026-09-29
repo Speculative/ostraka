@@ -21,6 +21,7 @@ const (
 	ActivitySubthreadCreated               = "subthread.created"
 	ActivitySubthreadClosed                = "subthread.closed"
 	ActivitySubthreadMoved                 = "subthread.moved"
+	ActivitySubthreadUnparented            = "subthread.unparented"
 	ActivityAgentInterrupted               = "agent.interrupted"
 	ActivityAgentEndedWithoutFinalResponse = "agent.ended_without_final_response"
 	ActivityAgentSessionStarted            = "agent.session_started"

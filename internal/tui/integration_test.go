@@ -395,6 +395,54 @@ func TestProgramBacklogToggleRevealsHiddenItems(t *testing.T) {
 	}
 }
 
+func TestProgramKeepsUsableAfterRejectedTurn(t *testing.T) {
+	tm, _, output := newIntegrationProgram(t, func(s *store.Store) {
+		root := models.Item{
+			ID:      "archived-root",
+			Channel: models.ChannelInbox,
+			Type:    models.TypeThread,
+			Status:  models.StatusArchived,
+			Created: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC),
+			Title:   "Archived root",
+			Body:    "root body",
+		}
+		if err := store.WriteItem(root, filepath.Join(s.Root, "ARCHIVE", root.ID+".md")); err != nil {
+			t.Fatal(err)
+		}
+		child := root
+		child.ID = "inconsistent-child"
+		child.Parent = root.ID
+		child.Status = models.StatusBacklog
+		child.Title = "Inconsistent child"
+		child.Body = "child body"
+		if err := store.WriteItem(child, filepath.Join(s.Root, "INBOX", child.ID+".md")); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	output.waitFor(t, tm, func(got []byte) bool {
+		return bytes.Contains(got, []byte("Inconsistent child"))
+	})
+	tm.Type("t")
+	tm.Type("keep this reply")
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlS})
+	output.waitFor(t, tm, func(got []byte) bool {
+		return bytes.Contains(got, []byte("cannot set child")) &&
+			bytes.Contains(got, []byte("keep this reply"))
+	})
+
+	// The rejected action leaves the composer and draft intact. Escape closes
+	// it, proving the process is still running and the error was not a quit.
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	output.settle(t, tm)
+	output.finish(t, tm)
+
+	grid := terminalGrid(t, output.all)
+	if !strings.Contains(grid, "Inconsistent child") {
+		t.Fatalf("TUI lost the current view after rejected turn:\n%s", grid)
+	}
+}
+
 // Set OSTRAKA_VISUAL_SMOKE=1 to run this path. It drives the same deterministic
 // scenario as the assertion tests, parses captured ANSI output through a
 // virtual terminal, and logs the final character-cell grid for direct agent

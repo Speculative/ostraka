@@ -618,6 +618,9 @@ func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.I
 	if err != nil {
 		return models.Item{}, err
 	}
+	if err := s.validateChildStatusTransition(item, item.Status); err != nil {
+		return models.Item{}, err
+	}
 	before := item
 	item.Turns = append(item.Turns, models.Turn{
 		Actor:     actor,
@@ -627,6 +630,9 @@ func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.I
 	item.Mentions = itemMentionIDs(item.Body, item.Turns)
 	if actor == models.ActorAgent {
 		if next, ok := StatusAfterAgentTurn(item.Status); ok {
+			if err := s.validateChildStatusTransition(item, next); err != nil {
+				return models.Item{}, err
+			}
 			item.Status = next
 		}
 	}
@@ -683,6 +689,9 @@ func (s *Store) SetStatusBy(id string, status models.Status, actor models.Actor)
 	if err != nil {
 		return models.Item{}, err
 	}
+	if err := s.validateChildStatusTransition(item, status); err != nil {
+		return models.Item{}, err
+	}
 	if models.TerminalStatuses[status] && item.Parent == "" {
 		children, err := s.ListItems(ListOpts{})
 		if err != nil {
@@ -729,6 +738,25 @@ func (s *Store) SetStatusBy(id string, status models.Status, actor models.Actor)
 		return models.Item{}, err
 	}
 	return item, nil
+}
+
+// validateChildStatusTransition preserves the one-level family lifecycle:
+// once a root is archived, every child must remain archived as well. A child
+// can become live again only after its parent is reopened or the child is
+// moved to a different root. Keeping this check in the store covers CLI,
+// TUI, and supervisor status transitions alike.
+func (s *Store) validateChildStatusTransition(item models.Item, status models.Status) error {
+	if item.Parent == "" || models.TerminalStatuses[status] {
+		return nil
+	}
+	parent, err := s.GetItem(item.Parent)
+	if err != nil {
+		return fmt.Errorf("parent %q for child %q: %w", item.Parent, item.ID, err)
+	}
+	if models.TerminalStatuses[parent.Status] {
+		return fmt.Errorf("cannot set child %q to %q while parent %q is archived; unarchive the parent or reparent the child first", item.ID, status, parent.ID)
+	}
+	return nil
 }
 
 func (s *Store) DeleteItem(id string) error {
