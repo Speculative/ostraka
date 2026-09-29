@@ -73,6 +73,7 @@ func (s *Store) ReparentItem(itemID, newRootID string, flattenChildren bool) (mo
 			}
 		}
 	}
+	itemBefore := item
 
 	type change struct {
 		before  models.Item
@@ -176,6 +177,13 @@ func (s *Store) ReparentItem(itemID, newRootID string, flattenChildren bool) (mo
 				}
 			}
 			return models.Item{}, fmt.Errorf("record reparenting activity: %w", err)
+		}
+	}
+	if itemBefore.Parent == "" {
+		// Reparenting turns a root into a child. Its family can no longer be
+		// addressed by the root-level backlog order, regardless of status.
+		if err := s.removeBacklogRoot(itemBefore.ID); err != nil {
+			return models.Item{}, err
 		}
 	}
 	return item, nil

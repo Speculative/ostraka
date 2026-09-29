@@ -313,6 +313,11 @@ func (s *Store) CreateItem(channel models.Channel, title, body string, itemType 
 		}
 		break
 	}
+	if parent == "" && item.Status == models.StatusBacklog {
+		if err := s.addBacklogRoot(item.ID); err != nil {
+			return models.Item{}, err
+		}
+	}
 	if parent != "" {
 		if err := s.addSubthreadActivity(parentItem, item, ActivitySubthreadCreated, ""); err != nil {
 			return models.Item{}, err
@@ -513,6 +518,7 @@ func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.I
 	if err != nil {
 		return models.Item{}, err
 	}
+	before := item
 	item.Turns = append(item.Turns, models.Turn{
 		Actor:     actor,
 		Timestamp: time.Now().UTC(),
@@ -522,25 +528,29 @@ func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.I
 	if actor == models.ActorAgent {
 		if next, ok := StatusAfterAgentTurn(item.Status); ok {
 			item.Status = next
-			// A status change can move the file between channel and archive
-			// directories, so re-derive the path rather than writing to the
-			// one the item was read from.
-			newPath := s.itemPath(item)
-			if newPath != path {
-				// Write the new location before dropping the old one. The
-				// reverse order leaves a window where the item exists nowhere,
-				// and a concurrent reload would show it as deleted.
-				if err := WriteItem(item, newPath); err != nil {
-					return models.Item{}, err
-				}
-				if err := os.Remove(path); err != nil {
-					return models.Item{}, err
-				}
-				return item, nil
-			}
 		}
 	}
-	return item, WriteItem(item, path)
+	// A status change can move the file between channel and archive
+	// directories, so re-derive the path rather than writing to the one the
+	// item was read from.
+	newPath := s.itemPath(item)
+	if err := WriteItem(item, newPath); err != nil {
+		return models.Item{}, err
+	}
+	if newPath != path {
+		// Write the new location before dropping the old one. The reverse order
+		// leaves a window where the item exists nowhere, and a concurrent reload
+		// would show it as deleted.
+		if err := os.Remove(path); err != nil {
+			return models.Item{}, err
+		}
+	}
+	if before.Status != item.Status {
+		if err := s.reconcileBacklogMembership(before, item); err != nil {
+			return models.Item{}, err
+		}
+	}
+	return item, nil
 }
 
 // StatusAfterAgentTurn gives the status an item moves to once the agent has
@@ -615,11 +625,18 @@ func (s *Store) SetStatusBy(id string, status models.Status, actor models.Actor)
 			return models.Item{}, err
 		}
 	}
+	if err := s.reconcileBacklogMembership(models.Item{ID: item.ID, Parent: item.Parent, Status: oldStatus}, item); err != nil {
+		return models.Item{}, err
+	}
 	return item, nil
 }
 
 func (s *Store) DeleteItem(id string) error {
 	path, err := s.pathForID(id)
+	if err != nil {
+		return err
+	}
+	deleted, err := ParseItem(path)
 	if err != nil {
 		return err
 	}
@@ -637,6 +654,11 @@ func (s *Store) DeleteItem(id string) error {
 	}
 	if err := s.deletePartialTraces(id); err != nil {
 		return err
+	}
+	if deleted.Parent == "" {
+		if err := s.removeBacklogRoot(deleted.ID); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -31,6 +31,7 @@ import (
 type itemsLoadedMsg struct {
 	items         []models.Item
 	allItems      []models.Item
+	backlogOrder  []string
 	hiddenBacklog int
 	view          listView
 	showBacklog   bool
@@ -197,10 +198,15 @@ func loadItemsCmd(s *store.Store, v listView, showBacklog bool) tea.Cmd {
 		if err != nil {
 			return errMsg(err)
 		}
+		backlogOrder, err := s.BacklogOrder()
+		if err != nil {
+			return errMsg(err)
+		}
 		shown, hidden := v.prepare(items, showBacklog)
 		return itemsLoadedMsg{
 			items:         shown,
 			allItems:      items,
+			backlogOrder:  backlogOrder,
 			hiddenBacklog: hidden,
 			view:          v,
 			showBacklog:   showBacklog,
@@ -244,6 +250,10 @@ type model struct {
 	items         []models.Item
 	allItems      []models.Item
 	selected      int
+	// backlogMoveMode turns j/k into explicit priority changes for the
+	// selected backlog family. It is transient UI state; the order itself lives
+	// in the store.
+	backlogMoveMode bool
 	// selectedByView remembers the item cursor independently for each list
 	// view. Switching views clears items while the next asynchronous load is
 	// pending, so the row index alone cannot restore the prior selection.
@@ -578,9 +588,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.backlogVisibilityInitialized && msg.allItems != nil && m.view == channelView(models.ChannelInbox) && m.listBaseAvailRows() > 0 {
 			m.showBacklog = m.initialBacklogFits(msg.allItems)
 			m.backlogVisibilityInitialized = true
-			m.items, m.hiddenBacklog = m.view.prepareGrouped(msg.allItems, m.showBacklog, m.collapsed)
+			m.items, m.hiddenBacklog = m.view.prepareGroupedWithOrder(msg.allItems, m.showBacklog, m.collapsed, msg.backlogOrder)
 		} else if msg.allItems != nil {
-			m.items, m.hiddenBacklog = m.view.prepareGrouped(msg.allItems, m.showBacklog, m.collapsed)
+			m.items, m.hiddenBacklog = m.view.prepareGroupedWithOrder(msg.allItems, m.showBacklog, m.collapsed, msg.backlogOrder)
 		} else {
 			m.items = msg.items
 			m.hiddenBacklog = msg.hiddenBacklog
@@ -869,6 +879,19 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.backlogMoveMode {
+		switch {
+		case msg.String() == "v" || msg.String() == "enter" || msg.String() == "esc":
+			m.backlogMoveMode = false
+			return m, nil
+		case msg.Type == tea.KeyUp || msg.Type == tea.KeyShiftUp || msg.String() == "k":
+			return m.moveBacklogRoot(-1)
+		case msg.Type == tea.KeyDown || msg.Type == tea.KeyShiftDown || msg.String() == "j":
+			return m.moveBacklogRoot(1)
+		default:
+			return m, nil
+		}
+	}
 	switch {
 	case msg.Type == tea.KeyLeft || msg.Type == tea.KeyShiftLeft || msg.String() == "h":
 		m.focus = focusItemList
@@ -1002,6 +1025,8 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// item parked there — it must stay reachable, not just tidy.
 		m.showBacklog = !m.showBacklog
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+	case "v":
+		return m.toggleBacklogMoveMode()
 	case "r":
 		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
 	case "t", "enter":
@@ -1049,6 +1074,69 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.beginReparent()
 		}
 	}
+	return m, nil
+}
+
+func (m model) toggleBacklogMoveMode() (tea.Model, tea.Cmd) {
+	if m.store == nil || m.view.archive || m.draftSelected || m.selected < 0 || m.selected >= len(m.items) {
+		return m, nil
+	}
+	_, ok := m.selectedBacklogRoot()
+	if !ok {
+		m.err = fmt.Errorf("only parked backlog families can be prioritized")
+		return m, nil
+	}
+	m.backlogMoveMode = true
+	m.focus = focusItemList
+	m.convSelection = -1
+	m.err = nil
+	return m, nil
+}
+
+func (m model) selectedBacklogRoot() (string, bool) {
+	if m.draftSelected || m.selected < 0 || m.selected >= len(m.items) {
+		return "", false
+	}
+	selected := m.items[m.selected]
+	rootIDValue := rootID(selected)
+	if rootIDValue == "" {
+		return "", false
+	}
+	all := m.allItems
+	if len(all) == 0 {
+		all = m.items
+	}
+	var rootItem models.Item
+	found := false
+	for _, item := range all {
+		if item.ID == rootIDValue {
+			rootItem = item
+			found = true
+			break
+		}
+	}
+	if !found || rootItem.Parent != "" || rootItem.Status != models.StatusBacklog {
+		return "", false
+	}
+	return rootIDValue, m.view.familyRank(rootIDValue, rootItem, nil, all) == rankOf(models.StatusBacklog)
+}
+
+func (m model) moveBacklogRoot(delta int) (tea.Model, tea.Cmd) {
+	root, ok := m.selectedBacklogRoot()
+	if !ok {
+		m.backlogMoveMode = false
+		m.err = fmt.Errorf("only parked backlog families can be prioritized")
+		return m, nil
+	}
+	selectedID := m.selectedID()
+	if _, err := m.store.MoveBacklogRoot(root, delta); err != nil {
+		m.err = err
+		return m, nil
+	}
+	m.err = nil
+	m.reload()
+	m.restoreSelection(selectedID)
+	m.updateConv()
 	return m, nil
 }
 
@@ -1811,8 +1899,13 @@ func (m *model) reload() {
 		m.err = err
 		return
 	}
+	backlogOrder, err := m.store.BacklogOrder()
+	if err != nil {
+		m.err = err
+		return
+	}
 	m.allItems = items
-	m.items, m.hiddenBacklog = m.view.prepareGrouped(items, m.showBacklog, m.collapsed)
+	m.items, m.hiddenBacklog = m.view.prepareGroupedWithOrder(items, m.showBacklog, m.collapsed, backlogOrder)
 }
 
 // chooseMention replaces the complete token around the cursor with a
@@ -2780,14 +2873,18 @@ func (m model) renderFooter() string {
 			text = "←/→/h/l pane  j/k versions  f copy view  tab switch document  e edit  esc/ctrl+c interrupt  1-3 view  q quit"
 			break
 		}
-		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
+		if m.backlogMoveMode {
+			text = "j/k move backlog  v/enter/esc finish"
+			break
+		}
+		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  b backlog  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
 		}
 		if m.showBacklog {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  space fold  pgup/pgdn scroll  r refresh"
+				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
 			}
 		}
 	}
@@ -2800,7 +2897,7 @@ func (m model) renderFooter() string {
 
 	// The hint text grows with the keymap; drop it rather than overflow the row.
 	if len(text)+len(right) > m.width {
-		text = "←/→/h/l focus  f copy view"
+		text = "←/→/h/l focus  f copy view  1-3 view"
 		if len(text)+len(right) > m.width {
 			text = ""
 		}

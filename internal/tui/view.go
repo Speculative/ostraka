@@ -125,6 +125,13 @@ func rootID(item models.Item) string {
 // still a flat selection model, which keeps keyboard navigation and existing
 // conversation code simple while rendering a one-level tree.
 func (v listView) prepareGrouped(all []models.Item, showBacklog bool, collapsed map[string]bool) ([]models.Item, int) {
+	return v.prepareGroupedWithOrder(all, showBacklog, collapsed, nil)
+}
+
+// prepareGroupedWithOrder is the family sorter used by the live TUI. Explicit
+// backlog positions only break ties between families whose effective attention
+// rank is backlog; an urgent child still promotes its family above parked work.
+func (v listView) prepareGroupedWithOrder(all []models.Item, showBacklog bool, collapsed map[string]bool, backlogOrder []string) ([]models.Item, int) {
 	// Unit-level view tests and a partially written legacy file may have no
 	// stable ID. Grouping such rows would merge unrelated roots under the empty
 	// map key, so retain the old flat behavior until IDs are available.
@@ -177,10 +184,24 @@ func (v listView) prepareGrouped(all []models.Item, showBacklog bool, collapsed 
 			key: id, root: root, members: family, rootVisible: rootVisible, ghost: ghost,
 		})
 	}
+	backlogPositions := make(map[string]int, len(backlogOrder))
+	for i, id := range backlogOrder {
+		backlogPositions[id] = i
+	}
 	sort.SliceStable(families, func(i, j int) bool {
 		ri, rj := v.familyRank(families[i].key, families[i].root, families[i].members, all), v.familyRank(families[j].key, families[j].root, families[j].members, all)
 		if ri != rj {
 			return ri < rj
+		}
+		if ri == rankOf(models.StatusBacklog) {
+			pi, iok := backlogPositions[families[i].key]
+			pj, jok := backlogPositions[families[j].key]
+			switch {
+			case iok && jok && pi != pj:
+				return pi < pj
+			case iok != jok:
+				return iok
+			}
 		}
 		ai, aj := v.familyActivity(families[i].key, families[i].root, families[i].members, all), v.familyActivity(families[j].key, families[j].root, families[j].members, all)
 		if !ai.Equal(aj) {

@@ -3,7 +3,9 @@ package store_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -364,6 +366,166 @@ func TestAddTurnLeavesUserTurnsAlone(t *testing.T) {
 	}
 	if got.Status != models.StatusBacklog {
 		t.Errorf("got %q want %q", got.Status, models.StatusBacklog)
+	}
+}
+
+func TestBacklogOrderFollowsExplicitMovesAndLifecycle(t *testing.T) {
+	s := newTestStore(t)
+	a, err := s.CreateItem(models.ChannelInbox, "a", "a", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.CreateItem(models.ChannelInbox, "b", "b", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.CreateItem(models.ChannelInbox, "c", "c", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertBacklogOrder(t, s, []string{a.ID, b.ID, c.ID})
+	if _, err := s.MoveBacklogRoot(b.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	assertBacklogOrder(t, s, []string{a.ID, c.ID, b.ID})
+
+	// Turns are conversation activity, not a reprioritization of parked work.
+	if _, err := s.AddTurn(a.ID, models.ActorUser, "note"); err != nil {
+		t.Fatal(err)
+	}
+	assertBacklogOrder(t, s, []string{a.ID, c.ID, b.ID})
+
+	if _, err := s.SetStatus(c.ID, models.StatusActive); err != nil {
+		t.Fatal(err)
+	}
+	assertBacklogOrder(t, s, []string{a.ID, b.ID})
+	if _, err := s.SetStatus(c.ID, models.StatusBacklog); err != nil {
+		t.Fatal(err)
+	}
+	assertBacklogOrder(t, s, []string{a.ID, b.ID, c.ID})
+}
+
+func TestBacklogOrderSeedsMissingFileFromActivity(t *testing.T) {
+	s := newTestStore(t)
+	old, err := s.CreateItem(models.ChannelInbox, "old", "old", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := s.CreateItem(models.ChannelInbox, "newer", "newer", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTurn(newer.ID, models.ActorUser, "recent activity"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(s.Root, "BACKLOG_ORDER")); err != nil {
+		t.Fatal(err)
+	}
+
+	order, err := s.BacklogOrder()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(order, []string{newer.ID, old.ID}) {
+		t.Fatalf("migration order = %v, want newer before old", order)
+	}
+	if _, err := os.Stat(filepath.Join(s.Root, "BACKLOG_ORDER")); !os.IsNotExist(err) {
+		t.Fatalf("reading a missing order file created it: stat error = %v", err)
+	}
+
+	if _, err := s.MoveBacklogRoot(old.ID, -1); err != nil {
+		t.Fatal(err)
+	}
+	assertBacklogOrder(t, s, []string{old.ID, newer.ID})
+}
+
+func TestBacklogOrderUsesRootMembershipForChildrenAndCleanup(t *testing.T) {
+	s := newTestStore(t)
+	first, err := s.CreateItem(models.ChannelInbox, "first", "first", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.CreateItem(models.ChannelInbox, "second", "second", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.CreateSubthread(first.ID, "child", "child", models.TypeThread, models.StatusPendingAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetStatus(child.ID, models.StatusPendingUser); err != nil {
+		t.Fatal(err)
+	}
+	assertBacklogOrder(t, s, []string{first.ID, second.ID})
+
+	if _, err := s.MoveBacklogRoot(child.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	assertBacklogOrder(t, s, []string{second.ID, first.ID})
+
+	if _, err := s.SetStatus(first.ID, models.StatusActive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetStatus(first.ID, models.StatusBacklog); err != nil {
+		t.Fatal(err)
+	}
+	assertBacklogOrder(t, s, []string{second.ID, first.ID})
+
+	if _, err := s.SetStatus(child.ID, models.StatusArchived); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetStatus(first.ID, models.StatusArchived); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteItem(second.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertBacklogOrder(t, s, []string{})
+}
+
+func TestBacklogOrderRemovesReparentedRoot(t *testing.T) {
+	s := newTestStore(t)
+	source, err := s.CreateItem(models.ChannelInbox, "source", "source", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := s.CreateItem(models.ChannelInbox, "target", "target", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReparentItem(source.ID, target.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	assertBacklogOrder(t, s, []string{})
+}
+
+func assertBacklogOrder(t *testing.T, s *store.Store, want []string) {
+	t.Helper()
+	got, err := s.BacklogOrder()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("backlog order = %v, want %v", got, want)
+	}
+	data, err := os.ReadFile(filepath.Join(s.Root, "BACKLOG_ORDER"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) != "" {
+			persisted = append(persisted, strings.TrimSpace(line))
+		}
+	}
+	if len(persisted) != len(want) {
+		t.Fatalf("persisted backlog order = %v, want %v", persisted, want)
+	}
+	for i := range want {
+		if persisted[i] != want[i] {
+			t.Fatalf("persisted backlog order = %v, want %v", persisted, want)
+		}
 	}
 }
 
