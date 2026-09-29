@@ -28,6 +28,8 @@ import (
 
 // itemsLoadedMsg carries the rows for a view plus the count it is suppressing,
 // so the list can report the hidden ones instead of dropping them silently.
+// generation prevents an older asynchronous snapshot from repainting over a
+// newer refresh.
 type itemsLoadedMsg struct {
 	items         []models.Item
 	allItems      []models.Item
@@ -35,6 +37,7 @@ type itemsLoadedMsg struct {
 	hiddenBacklog int
 	view          listView
 	showBacklog   bool
+	generation    uint64
 }
 type watchEventMsg struct{}
 type errMsg error
@@ -192,7 +195,7 @@ func waitForWatch(ch <-chan struct{}) tea.Cmd {
 // the whole store and filters in memory: a view is a question about status as
 // well as channel, and the store's one-status filter cannot express "every
 // live status" or "the terminal status".
-func loadItemsCmd(s *store.Store, v listView, showBacklog bool) tea.Cmd {
+func loadItemsCmd(s *store.Store, v listView, showBacklog bool, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		items, err := s.ListItems(store.ListOpts{})
 		if err != nil {
@@ -210,8 +213,17 @@ func loadItemsCmd(s *store.Store, v listView, showBacklog bool) tea.Cmd {
 			hiddenBacklog: hidden,
 			view:          v,
 			showBacklog:   showBacklog,
+			generation:    generation,
 		}
 	}
+}
+
+// requestItemsLoad advances the generation before launching an asynchronous
+// load. The returned model carries that generation into Update, where any
+// older result can be discarded without touching the visible list.
+func (m model) requestItemsLoad(v listView, showBacklog bool) (model, tea.Cmd) {
+	m.itemsLoadGeneration++
+	return m, loadItemsCmd(m.store, v, showBacklog, m.itemsLoadGeneration)
 }
 
 // modelDiscoveryTimeout bounds one AvailableModels call. Codex's is a
@@ -250,6 +262,10 @@ type model struct {
 	items         []models.Item
 	allItems      []models.Item
 	selected      int
+	// itemsLoadGeneration identifies the newest asynchronous list load. A
+	// filesystem event can start a second load before the first one returns;
+	// older results must not repaint over a newer synchronous or async refresh.
+	itemsLoadGeneration uint64
 	// backlogMoveMode turns j/k into explicit priority changes for the
 	// selected backlog family. It is transient UI state; the order itself lives
 	// in the store.
@@ -514,7 +530,7 @@ func (m model) Init() tea.Cmd {
 		// one KeyMsg marked Paste instead of dribbling its bytes through the
 		// global key bindings.
 		tea.EnableBracketedPaste,
-		loadItemsCmd(m.store, m.view, m.showBacklog),
+		loadItemsCmd(m.store, m.view, m.showBacklog, m.itemsLoadGeneration),
 		waitForWatch(m.watchCh),
 	}
 	if m.editingNewItemDraft() {
@@ -548,11 +564,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// terminal size. Reload once dimensions are known so the initial inbox
 		// can make its one-time backlog choice from the real list capacity.
 		if !m.backlogVisibilityInitialized && m.view == channelView(models.ChannelInbox) {
-			return m, loadItemsCmd(m.store, m.view, false)
+			return m.requestItemsLoad(m.view, false)
 		}
 		return m, nil
 
 	case itemsLoadedMsg:
+		if msg.generation != m.itemsLoadGeneration {
+			return m, nil
+		}
 		// Project documents deliberately do not load the item list into the
 		// reading pane. A watcher event can have queued a list load just before
 		// the user opened Project Context, so guard here as well as at the
@@ -695,7 +714,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, waitForWatch(m.watchCh)
 		}
-		return m, tea.Batch(waitForWatch(m.watchCh), loadItemsCmd(m.store, m.view, m.showBacklog))
+		m, load := m.requestItemsLoad(m.view, m.showBacklog)
+		return m, tea.Batch(waitForWatch(m.watchCh), load)
 
 	case errMsg:
 		m.err = msg
@@ -1024,11 +1044,11 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Backlog is hidden by default, so this is also the only way back to an
 		// item parked there — it must stay reachable, not just tidy.
 		m.showBacklog = !m.showBacklog
-		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+		return m.requestItemsLoad(m.view, m.showBacklog)
 	case "v":
 		return m.toggleBacklogMoveMode()
 	case "r":
-		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+		return m.requestItemsLoad(m.view, m.showBacklog)
 	case "t", "enter":
 		if m.draftVisible() && m.draftSelected {
 			return m.activateNewItemDraft()
@@ -1223,7 +1243,7 @@ func (m model) handleReparentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.reload()
 		m.restoreSelection(sourceID)
 		m.updateConv()
-		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+		return m.requestItemsLoad(m.view, m.showBacklog)
 	}
 	return m, nil
 }
@@ -1690,7 +1710,7 @@ func (m model) handleStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.mode = modeNav
-		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+		return m.requestItemsLoad(m.view, m.showBacklog)
 	}
 	return m, nil
 }
@@ -1837,7 +1857,7 @@ func (m model) handleProposalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = err
 		}
 		m.mode = modeNav
-		return m, loadItemsCmd(m.store, m.view, true)
+		return m.requestItemsLoad(m.view, true)
 	case "s":
 		if _, err := m.store.SetStatus(item.ID, models.StatusPendingAgent); err != nil {
 			m.err = err
@@ -1845,13 +1865,13 @@ func (m model) handleProposalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sup.Enqueue(item.ID)
 		}
 		m.mode = modeNav
-		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+		return m.requestItemsLoad(m.view, m.showBacklog)
 	case "x":
 		if err := m.store.DeleteItem(item.ID); err != nil {
 			m.err = err
 		}
 		m.mode = modeNav
-		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+		return m.requestItemsLoad(m.view, m.showBacklog)
 	}
 	return m, nil
 }
@@ -1894,6 +1914,10 @@ func awaitingAgent(item models.Item) bool {
 // reload refreshes items in place. The async loadItemsCmd is still the normal
 // path; this exists for the few spots that must see the new list immediately.
 func (m *model) reload() {
+	// A synchronous refresh supersedes every asynchronous load already in
+	// flight. Increment before reading so even an early error invalidates the
+	// older result.
+	m.itemsLoadGeneration++
 	items, err := m.store.ListItems(store.ListOpts{})
 	if err != nil {
 		m.err = err
@@ -1991,12 +2015,12 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			branching := m.relatedDraftFrom != ""
 			m = m.commitDraft(content)
 			if branching {
-				return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+				return m.requestItemsLoad(m.view, m.showBacklog)
 			}
 			m.mode = modeNav
 			m.input.Blur()
 			m = m.recalcLayout()
-			return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+			return m.requestItemsLoad(m.view, m.showBacklog)
 		}
 		if content != "" && m.selected < len(m.items) {
 			m.closeMentionPicker()
@@ -2022,7 +2046,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Your own turn is never "new messages below" — go to the bottom now so
 		// the reload that follows sees AtBottom and auto-follows onto it.
 		m.conv.GotoBottom()
-		return m, loadItemsCmd(m.store, m.view, m.showBacklog)
+		return m.requestItemsLoad(m.view, m.showBacklog)
 	case "esc":
 		m.closeMentionPicker()
 		if m.editingProject {
@@ -2204,7 +2228,7 @@ func (m model) switchView(v listView) (model, tea.Cmd) {
 	m.selected = 0
 	m.items = nil
 	m.showSelected(false)
-	return m, loadItemsCmd(m.store, v, m.showBacklog)
+	return m.requestItemsLoad(v, m.showBacklog)
 }
 
 func (m *model) showProjectContext() {

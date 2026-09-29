@@ -1185,7 +1185,12 @@ func mkItem(id string, st models.Status) models.Item {
 // re-established after any reload.
 func loadInto(t *testing.T, m model, items []models.Item) model {
 	t.Helper()
-	out, _ := m.Update(itemsLoadedMsg{items: items, view: m.view, showBacklog: m.showBacklog})
+	out, _ := m.Update(itemsLoadedMsg{
+		items:       items,
+		view:        m.view,
+		showBacklog: m.showBacklog,
+		generation:  m.itemsLoadGeneration,
+	})
 	return out.(model)
 }
 
@@ -1430,6 +1435,7 @@ func TestBacklogToggleDoesNotForceProposalDecision(t *testing.T) {
 		allItems:    m.allItems,
 		view:        m.view,
 		showBacklog: m.showBacklog,
+		generation:  m.itemsLoadGeneration,
 	})
 	m = next.(model)
 
