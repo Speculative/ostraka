@@ -184,6 +184,26 @@ func TestUserSettableStatus(t *testing.T) {
 	}
 }
 
+func TestGroupAssignmentAndFilterValues(t *testing.T) {
+	for _, value := range []string{"v1", "post-v1"} {
+		group, err := groupAssignment(value)
+		if err != nil || group != value {
+			t.Errorf("groupAssignment(%q) = %q, %v", value, group, err)
+		}
+	}
+	group, err := groupAssignment("none")
+	if err != nil || group != "" {
+		t.Fatalf("groupAssignment(none) = %q, %v", group, err)
+	}
+	if _, err := groupAssignment("Post V1"); err == nil {
+		t.Fatal("groupAssignment accepted invalid slug")
+	}
+	filtered, err := groupFilter("none")
+	if err != nil || filtered == nil || *filtered != "" {
+		t.Fatalf("groupFilter(none) = %v, %v", filtered, err)
+	}
+}
+
 func TestItemJSONWithPartialTracesIncludesProviderOutput(t *testing.T) {
 	item := models.Item{ID: "item-1", Title: "trace"}
 	started := time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC)
@@ -204,6 +224,13 @@ func TestItemJSONWithPartialTracesIncludesProviderOutput(t *testing.T) {
 	}
 	if _, ok := itemToJSON(item)["partial_traces"]; ok {
 		t.Fatal("default item JSON unexpectedly includes partial_traces")
+	}
+}
+
+func TestItemJSONIncludesGroup(t *testing.T) {
+	got := itemToJSON(models.Item{ID: "item-1", Group: "v1"})
+	if got["group"] != "v1" {
+		t.Fatalf("group JSON = %#v, want v1", got["group"])
 	}
 }
 

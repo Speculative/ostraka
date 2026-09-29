@@ -122,6 +122,9 @@ type Item struct {
 	Status  Status
 	Created time.Time
 	Parent  string // empty if none
+	// Group is an optional planning classification. Roots persist it in
+	// frontmatter; stores populate it on children from their root.
+	Group string
 	// Related is the legacy frontmatter relation field. New relations are
 	// stored as @mentions in item text; it remains here so old items and API
 	// callers can be read without a migration.

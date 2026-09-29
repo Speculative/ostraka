@@ -195,6 +195,90 @@ func TestListItems(t *testing.T) {
 	}
 }
 
+func TestGroupsPersistOnRootsAndInheritThroughFamilies(t *testing.T) {
+	s := newTestStore(t)
+	root, err := s.CreateItemWithGroup(models.ChannelInbox, "grouped root", "body", models.TypeThread, models.StatusActive, "", "post-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.CreateSubthread(root.ID, "child", "body", models.TypeThread, models.StatusPendingUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ungrouped, err := s.CreateItem(models.ChannelInbox, "ungrouped", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if child.Group != root.Group {
+		t.Fatalf("created child group = %q, want %q", child.Group, root.Group)
+	}
+	childPath := filepath.Join(s.Root, "INBOX", child.ID+".md")
+	childData, err := os.ReadFile(childPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(childData), "group:") {
+		t.Fatalf("child persisted its derived group:\n%s", childData)
+	}
+
+	items, err := s.ListItems(store.ListOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.ID == root.ID || item.ID == child.ID {
+			if item.Group != "post-v1" {
+				t.Errorf("item %q group = %q, want post-v1", item.ID, item.Group)
+			}
+		}
+	}
+	group := "post-v1"
+	grouped, err := s.ListItems(store.ListOpts{Group: &group})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grouped) != 2 || grouped[0].ID != root.ID || grouped[1].ID != child.ID {
+		t.Fatalf("grouped items = %+v, want root and child", grouped)
+	}
+	ungroupedGroup := ""
+	withoutGroup, err := s.ListItems(store.ListOpts{Group: &ungroupedGroup})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withoutGroup) != 1 || withoutGroup[0].ID != ungrouped.ID {
+		t.Fatalf("ungrouped items = %+v, want %s", withoutGroup, ungrouped.ID)
+	}
+
+	if _, err := s.SetGroup(child.ID, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	updatedRoot, err := s.GetItem(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedChild, err := s.GetItem(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedRoot.Group != "v1" || updatedChild.Group != "v1" {
+		t.Fatalf("after child assignment root=%q child=%q, want v1", updatedRoot.Group, updatedChild.Group)
+	}
+}
+
+func TestValidateGroup(t *testing.T) {
+	for _, group := range []string{"v1", "post-v1", "provider-work"} {
+		if err := store.ValidateGroup(group); err != nil {
+			t.Errorf("ValidateGroup(%q) = %v", group, err)
+		}
+	}
+	for _, group := range []string{"V1", "post_v1", "post v1", "-v1", "v1-", "none"} {
+		if err := store.ValidateGroup(group); err == nil {
+			t.Errorf("ValidateGroup(%q) = nil, want error", group)
+		}
+	}
+}
+
 func TestListSortedByCreated(t *testing.T) {
 	s := newTestStore(t)
 	for _, body := range []string{"first", "second", "third"} {

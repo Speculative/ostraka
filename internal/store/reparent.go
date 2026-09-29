@@ -88,6 +88,7 @@ func (s *Store) ReparentItem(itemID, newRootID string, flattenChildren bool) (mo
 		oldRootID = item.ID
 	}
 	item.Parent = newRoot.ID
+	item.Group = newRoot.Group
 	changes = append(changes, change{
 		before:  byID[item.ID],
 		after:   item,
@@ -101,6 +102,7 @@ func (s *Store) ReparentItem(itemID, newRootID string, flattenChildren bool) (mo
 			oldChildRootID = before.ID
 		}
 		children[i].Parent = newRoot.ID
+		children[i].Group = newRoot.Group
 		changes = append(changes, change{
 			before:  before,
 			after:   children[i],

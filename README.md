@@ -23,6 +23,14 @@ flag for an item without children is rejected.
 Use `ostraka item rename <item-id> <new-title>` to change an item's label
 without changing its body or conversation.
 
+Roots can be assigned one optional lowercase group slug. Use
+`ostraka item add --group <group>`, `ostraka item group <item-id> <group|none>`,
+and `ostraka item list --group <group|none>` to organize and filter complete
+item families. In the TUI, select an item and press `g` to edit its group in
+the bottom composer; existing group names appear in a floating autocomplete
+and typing filters them. Press Enter to select a suggestion, `ctrl+s` to apply,
+or use `none`/an empty value to clear it.
+
 Run `ostraka preamble` when an agent needs the static orientation and final
 reply guidance. Normal dispatched sessions receive the same guidance directly
 in their initial prompt.

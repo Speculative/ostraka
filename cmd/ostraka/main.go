@@ -31,7 +31,7 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd, preambleCmd)
-	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRenameCmd, itemRmCmd, itemReparentCmd)
+	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRenameCmd, itemRmCmd, itemReparentCmd, itemGroupCmd)
 	rootCmd.AddCommand(projectCmd)
 	projectCmd.AddCommand(projectInstructionsCmd, projectBriefCmd)
 	projectInstructionsCmd.AddCommand(projectInstructionsShowCmd, projectInstructionsReplaceCmd)
@@ -318,6 +318,7 @@ var addFlags struct {
 	itype   string
 	status  string
 	parent  string
+	group   string
 	related []string
 }
 
@@ -329,6 +330,7 @@ func addItemAddFlags() {
 	f.StringVarP(&addFlags.itype, "type", "t", "thread", "thread|doc")
 	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|archived")
 	f.StringVarP(&addFlags.parent, "parent", "p", "", "parent item ID")
+	f.StringVar(&addFlags.group, "group", "", "lowercase group slug for a new root (or none)")
 	f.StringSliceVar(&addFlags.related, "related", nil, "item IDs to mention (legacy flag name)")
 	itemAddCmd.MarkFlagRequired("channel")
 	itemAddCmd.MarkFlagRequired("title")
@@ -348,6 +350,10 @@ var itemAddCmd = &cobra.Command{
 			return err
 		}
 		s := mustStore()
+		group, err := groupAssignment(addFlags.group)
+		if err != nil {
+			return err
+		}
 		for _, related := range addFlags.related {
 			if _, err := s.GetItem(related); err != nil {
 				return err
@@ -357,7 +363,7 @@ var itemAddCmd = &cobra.Command{
 		if addFlags.parent != "" {
 			item, err = s.CreateSubthread(addFlags.parent, addFlags.title, addFlags.body, models.ItemType(addFlags.itype), status)
 		} else {
-			item, err = s.CreateItem(models.Channel(addFlags.channel), addFlags.title, addFlags.body, models.ItemType(addFlags.itype), status, "")
+			item, err = s.CreateItemWithGroup(models.Channel(addFlags.channel), addFlags.title, addFlags.body, models.ItemType(addFlags.itype), status, "", group)
 		}
 		if err != nil {
 			return err
@@ -416,6 +422,7 @@ func init() {
 var listFlags struct {
 	channel string
 	status  string
+	group   string
 	asJSON  bool
 }
 
@@ -423,6 +430,7 @@ func addItemListFlags() {
 	f := itemListCmd.Flags()
 	f.StringVarP(&listFlags.channel, "channel", "c", "", "filter by channel")
 	f.StringVarP(&listFlags.status, "status", "s", "", "filter by status")
+	f.StringVar(&listFlags.group, "group", "", "filter by group slug or none")
 	f.BoolVar(&listFlags.asJSON, "json", false, "output as JSON")
 }
 
@@ -440,6 +448,13 @@ var itemListCmd = &cobra.Command{
 			st := models.Status(listFlags.status)
 			opts.Status = &st
 		}
+		if listFlags.group != "" {
+			group, err := groupFilter(listFlags.group)
+			if err != nil {
+				return err
+			}
+			opts.Group = group
+		}
 		items, err := s.ListItems(opts)
 		if err != nil {
 			return err
@@ -448,15 +463,15 @@ var itemListCmd = &cobra.Command{
 			return json.NewEncoder(os.Stdout).Encode(itemsToJSON(items))
 		}
 		// Plain table
-		fmt.Printf("%-22s  %-8s  %-15s  %s  %5s  %s\n", "ID", "Ch", "Status", "T", "Turns", "Preview")
-		fmt.Println(strings.Repeat("─", 90))
+		fmt.Printf("%-22s  %-8s  %-15s  %-16s  %s  %5s  %s\n", "ID", "Ch", "Status", "Group", "T", "Turns", "Preview")
+		fmt.Println(strings.Repeat("─", 112))
 		for _, item := range items {
 			title := item.Title
 			if r := []rune(title); len(r) > 60 {
 				title = string(r[:60]) + "…"
 			}
-			fmt.Printf("%-22s  %-8s  %-15s  %s  %5d  %s\n",
-				item.ID, item.Channel, item.Status, string(item.Type[0]), len(item.Turns), title)
+			fmt.Printf("%-22s  %-8s  %-15s  %-16s  %s  %5d  %s\n",
+				item.ID, item.Channel, item.Status, item.Group, string(item.Type[0]), len(item.Turns), title)
 		}
 		return nil
 	},
@@ -523,6 +538,9 @@ Examples:
 		fmt.Println(item.Title)
 		fmt.Printf("channel: %s  type: %s  status: %s  created: %s\n",
 			item.Channel, item.Type, item.Status, item.Created.Format(time.RFC3339))
+		if item.Group != "" {
+			fmt.Println("group:", item.Group)
+		}
 		if item.Parent != "" {
 			fmt.Println("parent:", item.Parent)
 		}
@@ -648,6 +666,42 @@ var itemStatusCmd = &cobra.Command{
 	},
 }
 
+var itemGroupCmd = &cobra.Command{
+	Use:   "group <item-id> <group|none>",
+	Short: "Assign or clear the root group for an item family",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		group, err := groupAssignment(args[1])
+		if err != nil {
+			return err
+		}
+		item, err := mustStore().SetGroup(args[0], group)
+		if err != nil {
+			return err
+		}
+		fmt.Println(item.ID)
+		return nil
+	},
+}
+
+func groupAssignment(value string) (string, error) {
+	if value == "none" {
+		return "", nil
+	}
+	if err := store.ValidateGroup(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func groupFilter(value string) (*string, error) {
+	group, err := groupAssignment(value)
+	if err != nil {
+		return nil, err
+	}
+	return &group, nil
+}
+
 func userSettableStatus(value string) (models.Status, error) {
 	status := models.Status(value)
 	if !models.UserSettableStatus(status) {
@@ -709,6 +763,7 @@ func itemToJSON(item models.Item) map[string]any {
 		"status":    item.Status,
 		"created":   item.Created.Format(time.RFC3339Nano),
 		"parent":    item.Parent,
+		"group":     item.Group,
 		"related":   item.Related,
 		"mentions":  item.Mentions,
 		"backlinks": item.Backlinks,

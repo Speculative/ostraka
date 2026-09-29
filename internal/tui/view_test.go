@@ -39,6 +39,120 @@ func TestChannelViewExcludesTerminalItems(t *testing.T) {
 	}
 }
 
+func TestRenderListShowsGroupInItemMetadata(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.width = 100
+	m.height = 30
+	m.view = channelView(models.ChannelInbox)
+	m.showBacklog = true
+	m.items = []models.Item{{
+		ID: "the-id", Channel: models.ChannelInbox, Status: models.StatusBacklog,
+		Created: t0, Title: "grouped item", Group: "post-v1",
+	}}
+	m.allItems = append([]models.Item(nil), m.items...)
+	content, _ := m.renderList(20)
+	if got := ansi.Strip(content); !strings.Contains(got, "the-id (post-v1) [backlog]") {
+		t.Fatalf("rendered group metadata = %q", got)
+	}
+}
+
+func TestGroupShortcutOpensTheComposerWithCurrentGroup(t *testing.T) {
+	st, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := st.CreateItemWithGroup(models.ChannelInbox, "grouped item", "body", models.TypeThread, models.StatusActive, "", "post-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(st, nil, nil)
+	m.width, m.height = 100, 30
+	m.items = []models.Item{item}
+	m.allItems = append([]models.Item(nil), m.items...)
+	m.selected = 0
+	m = m.recalcLayout()
+
+	next, _ := m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	got := next.(model)
+	if got.mode != modeGroup {
+		t.Fatalf("group shortcut mode = %v, want group editor", got.mode)
+	}
+	if got.modalVisible() || !got.composerVisible() {
+		t.Fatal("group editor did not use the composer slot")
+	}
+	if got.groupItemID != item.ID || got.input.Value() != "post-v1" {
+		t.Fatalf("group editor target/value = %q/%q, want %q/post-v1", got.groupItemID, got.input.Value(), item.ID)
+	}
+	if plain := ansi.Strip(got.View()); !strings.Contains(plain, "ctrl+s apply") {
+		t.Fatalf("group editor footer missing from composer flow: %q", plain)
+	}
+}
+
+func TestGroupComposerUpdatesRootWhenChildIsSelected(t *testing.T) {
+	st, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := st.CreateItemWithGroup(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusActive, "", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := st.CreateItem(models.ChannelInbox, "child", "body", models.TypeThread, models.StatusActive, root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(st, nil, nil)
+	m.width, m.height = 100, 30
+	m.items = []models.Item{root, child}
+	m.allItems = append([]models.Item(nil), m.items...)
+	m.selected = 1
+	m = m.recalcLayout()
+
+	next, _ := m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	got := next.(model)
+	got.input.SetValue("  post-v1  ")
+	next, _ = got.handleGroupKey(tea.KeyMsg{Type: tea.KeyCtrlS})
+	got = next.(model)
+	if got.mode != modeNav {
+		t.Fatalf("mode after applying group = %v, want navigation", got.mode)
+	}
+	updated, err := st.GetItem(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Group != "post-v1" {
+		t.Fatalf("root group after child edit = %q, want post-v1", updated.Group)
+	}
+}
+
+func TestGroupComposerAcceptsNoneToClearGroup(t *testing.T) {
+	st, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := st.CreateItemWithGroup(models.ChannelInbox, "grouped item", "body", models.TypeThread, models.StatusActive, "", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(st, nil, nil)
+	m.width, m.height = 100, 30
+	m.items = []models.Item{item}
+	m.selected = 0
+	m = m.recalcLayout()
+	next, _ := m.beginGroupEdit()
+	got := next.(model)
+	got.input.SetValue("none")
+	next, _ = got.handleGroupKey(tea.KeyMsg{Type: tea.KeyCtrlS})
+	got = next.(model)
+	updated, err := st.GetItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Group != "" {
+		t.Fatalf("group after none = %q, want empty", updated.Group)
+	}
+}
+
 func TestConversationShowsPersistedDispatchFailure(t *testing.T) {
 	st, err := store.NewStore(filepath.Join(t.TempDir(), ".ostraka"))
 	if err != nil {

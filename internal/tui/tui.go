@@ -252,6 +252,12 @@ type model struct {
 
 	view  listView
 	views []listView
+	// Group editing is transient UI state. The store applies the assignment to
+	// the root owning groupItemID, so selecting a child still updates its full
+	// family.
+	groupItemID string
+	groupError  error
+	groupPicker groupPickerState
 	// showBacklog reveals parked items in the channel views. At startup the
 	// inbox includes them when all its rows fit; after that, b is an explicit
 	// user choice that reloads preserve.
@@ -430,6 +436,7 @@ const (
 	modeQuit
 	modeProposal
 	modeReparent
+	modeGroup
 )
 
 type paneFocus uint8
@@ -817,6 +824,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.mode {
 			case modeCompose:
 				return m.handleInputKey(msg)
+			case modeGroup:
+				return m.handleGroupKey(msg)
 			case modeTitle:
 				var cmd tea.Cmd
 				m.title, cmd = m.title.Update(msg)
@@ -856,6 +865,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next, cmd = m.handleProposalKey(msg)
 		case modeReparent:
 			next, cmd = m.handleReparentKey(msg)
+		case modeGroup:
+			next, cmd = m.handleGroupKey(msg)
 		default:
 			next, cmd = m.handleNavKey(msg)
 		}
@@ -869,7 +880,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Pass other messages to sub-components.
 	switch m.mode {
-	case modeCompose:
+	case modeCompose, modeGroup:
 		prevLines := m.currentInputHeight()
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -1045,6 +1056,8 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// item parked there — it must stay reachable, not just tidy.
 		m.showBacklog = !m.showBacklog
 		return m.requestItemsLoad(m.view, m.showBacklog)
+	case "g":
+		return m.beginGroupEdit()
 	case "v":
 		return m.toggleBacklogMoveMode()
 	case "r":
@@ -2351,6 +2364,8 @@ func (m model) View() string {
 			// The picker is anchored in the complete composer slot, just as
 			// before modal drawers were introduced.
 			convPanel = m.overlayMentionPickerAtCursor(convPanel)
+		} else if m.mode == modeGroup && m.groupPicker.open {
+			convPanel = m.overlayGroupPickerAtCursor(convPanel)
 		}
 	} else {
 		convPanel = lipgloss.NewStyle().Padding(1, 0, 1, 1).Render(convWithScrollbar)
@@ -2892,6 +2907,15 @@ func (m model) renderFooter() string {
 		text = "↑/↓ navigate  k keep for later  s start  x reject  esc cancel"
 	case modeReparent:
 		text = "j/k select root  enter move  f flatten children  esc cancel"
+	case modeGroup:
+		if m.groupPicker.open {
+			text = "↑/↓ select group  enter/tab insert  ctrl+s apply  esc close"
+		} else {
+			text = "ctrl+s/enter apply group  esc cancel"
+		}
+		if m.groupError != nil {
+			text = "invalid group: " + m.groupError.Error() + "  ctrl+s retry  esc cancel"
+		}
 	default:
 		if m.projectPane != 0 {
 			text = "←/→/h/l pane  j/k versions  f copy view  tab switch document  e edit  esc/ctrl+c interrupt  1-3 view  q quit"
@@ -2901,14 +2925,14 @@ func (m model) renderFooter() string {
 			text = "j/k move backlog  v/enter/esc finish"
 			break
 		}
-		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
+		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
 		}
 		if m.showBacklog {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
+				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
 			}
 		}
 	}
@@ -3020,7 +3044,11 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 			}
 			preview = fmt.Sprintf("%s %s (%d open, %d done)", chevron, preview, open, done)
 		}
-		meta := fmt.Sprintf("%s [%s]", item.ID, item.Status)
+		meta := item.ID
+		if item.Group != "" {
+			meta += " (" + item.Group + ")"
+		}
+		meta += fmt.Sprintf(" [%s]", item.Status)
 
 		// Word-wrap the preview manually so we control each line's prefix and
 		// background independently — JoinHorizontal pads shorter columns with
@@ -3586,7 +3614,7 @@ func (m *model) refreshPendingDraft() {
 }
 
 func (m model) composerVisible() bool {
-	return m.mode == modeCompose ||
+	return m.mode == modeCompose || m.mode == modeGroup ||
 		(m.draftVisible() && m.draftSelected && m.draftBodyStarted) ||
 		(m.pendingDraftItemID != "" && m.pendingDraftItemID == m.selectedID())
 }

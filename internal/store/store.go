@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -26,6 +27,22 @@ var itemIDEncoding = base32.NewEncoding(itemIDAlphabet).WithPadding(base32.NoPad
 type ListOpts struct {
 	Channel *models.Channel
 	Status  *models.Status
+	Group   *string
+}
+
+var groupRe = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+// ValidateGroup accepts the small, stable identifier vocabulary used by the
+// item grouping feature. An empty group means ungrouped and is valid when
+// clearing an existing assignment.
+func ValidateGroup(group string) error {
+	if group == "" {
+		return nil
+	}
+	if group == "none" || len(group) > 64 || !groupRe.MatchString(group) {
+		return fmt.Errorf("group %q must be a lowercase slug (for example v1 or post-v1)", group)
+	}
+	return nil
 }
 
 type Store struct {
@@ -159,6 +176,7 @@ func (s *Store) listOnce(opts ListOpts) (items []models.Item, unstable bool, err
 		if seen[item.ID] {
 			continue
 		}
+		item = s.inheritGroup(item)
 		seen[item.ID] = true
 		parsed = append(parsed, item)
 	}
@@ -177,6 +195,9 @@ func (s *Store) listOnce(opts ListOpts) (items []models.Item, unstable bool, err
 	}
 
 	for _, item := range parsed {
+		if opts.Group != nil && item.Group != *opts.Group {
+			continue
+		}
 
 		if opts.Channel != nil && item.Channel != *opts.Channel {
 			continue
@@ -222,7 +243,39 @@ func (s *Store) GetItem(id string) (models.Item, error) {
 	if err != nil {
 		return models.Item{}, err
 	}
-	return ParseItem(path)
+	item, err := ParseItem(path)
+	if err != nil {
+		return models.Item{}, err
+	}
+	return s.inheritGroup(item), nil
+}
+
+func (s *Store) inheritGroup(item models.Item) models.Item {
+	if item.Parent == "" {
+		return item
+	}
+	rootID := item.Parent
+	seen := map[string]bool{item.ID: true}
+	for rootID != "" && !seen[rootID] {
+		seen[rootID] = true
+		path, err := s.pathForID(rootID)
+		if err != nil {
+			item.Group = ""
+			return item
+		}
+		parent, err := ParseItem(path)
+		if err != nil {
+			item.Group = ""
+			return item
+		}
+		if parent.Parent == "" {
+			item.Group = parent.Group
+			return item
+		}
+		rootID = parent.Parent
+	}
+	item.Group = ""
+	return item
 }
 
 // RenameItem changes an item's single-line title without changing its body,
@@ -247,9 +300,22 @@ func (s *Store) RenameItem(id, title string) (models.Item, error) {
 }
 
 func (s *Store) CreateItem(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent string) (models.Item, error) {
+	return s.CreateItemWithGroup(channel, title, body, itemType, status, parent, "")
+}
+
+// CreateItemWithGroup creates an item and assigns a group to a new root. A
+// child always inherits its root's group and cannot create a second grouping
+// axis of its own.
+func (s *Store) CreateItemWithGroup(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent, group string) (models.Item, error) {
 	status = models.NormalizeStatus(status)
 	if err := ValidateChannel(channel); err != nil {
 		return models.Item{}, err
+	}
+	if err := ValidateGroup(group); err != nil {
+		return models.Item{}, err
+	}
+	if parent != "" && group != "" {
+		return models.Item{}, fmt.Errorf("group can only be assigned to a root item")
 	}
 	if err := ValidateTitle(title); err != nil {
 		return models.Item{}, err
@@ -286,6 +352,7 @@ func (s *Store) CreateItem(channel models.Channel, title, body string, itemType 
 		Status:  status,
 		Created: now,
 		Parent:  parent,
+		Group:   group,
 		Title:   strings.TrimSpace(title),
 		Body:    body,
 	}
@@ -324,6 +391,34 @@ func (s *Store) CreateItem(channel models.Channel, title, body string, itemType 
 		}
 	}
 	return item, nil
+}
+
+// SetGroup assigns group to the root owning id. Passing an empty group clears
+// the assignment. The returned item is the root whose frontmatter changed.
+func (s *Store) SetGroup(id, group string) (models.Item, error) {
+	if err := ValidateGroup(group); err != nil {
+		return models.Item{}, err
+	}
+	item, err := s.GetItem(id)
+	if err != nil {
+		return models.Item{}, err
+	}
+	rootID := item.ID
+	if item.Parent != "" {
+		rootID = item.Parent
+	}
+	root, err := s.GetItem(rootID)
+	if err != nil {
+		return models.Item{}, fmt.Errorf("root %q: %w", rootID, err)
+	}
+	if root.Parent != "" {
+		return models.Item{}, fmt.Errorf("item %q has an invalid nested parent", id)
+	}
+	root.Group = group
+	if err := WriteItem(root, s.itemPath(root)); err != nil {
+		return models.Item{}, err
+	}
+	return root, nil
 }
 
 func newItemID() (string, error) {
@@ -368,7 +463,12 @@ func (s *Store) CreateSubthread(contextID string, title, body string, itemType m
 	if context.Parent != "" {
 		rootID = context.Parent
 	}
-	return s.CreateItem(context.Channel, title, body, itemType, status, rootID)
+	item, err := s.CreateItem(context.Channel, title, body, itemType, status, rootID)
+	if err != nil {
+		return models.Item{}, err
+	}
+	item.Group = context.Group
+	return item, nil
 }
 
 // AddMention creates a directed mention from firstID to secondID by

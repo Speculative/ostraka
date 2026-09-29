@@ -29,6 +29,7 @@ type frontmatter struct {
 	Status  string   `yaml:"status"`
 	Created string   `yaml:"created"`
 	Parent  string   `yaml:"parent,omitempty"`
+	Group   string   `yaml:"group,omitempty"`
 	Related []string `yaml:"related,omitempty"`
 	Title   string   `yaml:"title,omitempty"`
 }
@@ -188,6 +189,7 @@ func ParseItem(path string) (models.Item, error) {
 		Status:  status,
 		Created: created,
 		Parent:  fm.Parent,
+		Group:   fm.Group,
 		Related: append([]string(nil), fm.Related...),
 		Title:   title,
 		Body:    itemBody,
@@ -201,6 +203,11 @@ func WriteItem(item models.Item, path string) error {
 	if err := ValidateChannel(item.Channel); err != nil {
 		return err
 	}
+	if item.Parent == "" {
+		if err := ValidateGroup(item.Group); err != nil {
+			return err
+		}
+	}
 	item.Status = models.NormalizeStatus(item.Status)
 	fm := frontmatter{
 		ID:      item.ID,
@@ -211,6 +218,9 @@ func WriteItem(item models.Item, path string) error {
 		Parent:  item.Parent,
 		Related: append([]string(nil), item.Related...),
 		Title:   item.Title,
+	}
+	if item.Parent == "" {
+		fm.Group = item.Group
 	}
 
 	yamlBytes, err := yaml.Marshal(fm)
