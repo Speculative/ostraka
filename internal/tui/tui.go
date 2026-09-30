@@ -267,6 +267,8 @@ type model struct {
 	hiddenBacklog int
 	items         []models.Item
 	allItems      []models.Item
+	backlogOrder  []string
+	searchIndex   map[string]string
 	selected      int
 	// itemsLoadGeneration identifies the newest asynchronous list load. A
 	// filesystem event can start a second load before the first one returns;
@@ -296,10 +298,14 @@ type model struct {
 	// otherwise leave it. See ensureListOffsetVisible.
 	listOffset int
 
-	conv  viewport.Model
-	input textarea.Model
-	title textinput.Model
-	mode  uiMode
+	conv                   viewport.Model
+	input                  textarea.Model
+	title                  textinput.Model
+	filterInput            textinput.Model
+	filterQuery            string
+	filterBefore           string
+	filterBeforeSelectedID string
+	mode                   uiMode
 	// draftItemID is the item whose body is currently being composed. It is
 	// separate from selected so switching views cannot make a checkpoint land
 	// on the wrong item.
@@ -427,6 +433,7 @@ type uiMode int
 
 const (
 	modeNav uiMode = iota
+	modeFilter
 	modeCompose
 	modeTitle
 	modeStatus
@@ -507,6 +514,12 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) mod
 	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(dimFg)
 	ti.KeyMap.DeleteWordBackward.SetKeys("alt+backspace", "ctrl+w")
 	ti.KeyMap.Paste.SetEnabled(false)
+	fi := textinput.New()
+	fi.Prompt = "/ "
+	fi.Placeholder = "filter items…"
+	fi.PlaceholderStyle = lipgloss.NewStyle().Foreground(dimFg)
+	fi.KeyMap.DeleteWordBackward.SetKeys("alt+backspace", "ctrl+w")
+	fi.KeyMap.Paste.SetEnabled(false)
 	m := model{
 		store:   s,
 		watchCh: watchCh,
@@ -519,6 +532,7 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) mod
 		},
 		input:          ta,
 		title:          ti,
+		filterInput:    fi,
 		collapsed:      make(map[string]bool),
 		selectedByView: make(map[listView]string),
 		convSelection:  -1,
@@ -610,15 +624,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if msg.allItems != nil {
 			m.allItems = msg.allItems
+			m.backlogOrder = msg.backlogOrder
+			m.searchIndex = buildItemSearchIndex(msg.allItems)
 		}
 		if !m.backlogVisibilityInitialized && msg.allItems != nil && m.view == channelView(models.ChannelInbox) && m.listBaseAvailRows() > 0 {
 			m.showBacklog = m.initialBacklogFits(msg.allItems)
 			m.backlogVisibilityInitialized = true
-			m.items, m.hiddenBacklog = m.view.prepareGroupedWithOrder(msg.allItems, m.showBacklog, m.collapsed, msg.backlogOrder)
+			m.items, m.hiddenBacklog = m.prepareVisibleItems(msg.allItems)
 		} else if msg.allItems != nil {
-			m.items, m.hiddenBacklog = m.view.prepareGroupedWithOrder(msg.allItems, m.showBacklog, m.collapsed, msg.backlogOrder)
+			m.items, m.hiddenBacklog = m.prepareVisibleItems(msg.allItems)
 		} else {
-			m.items = msg.items
+			m.items = filterItems(msg.items, m.filterQuery)
 			m.hiddenBacklog = msg.hiddenBacklog
 		}
 		if m.draftVisible() && len(m.items) == 0 {
@@ -828,6 +844,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// directly keeps that guarantee local to Ostraka as well.
 		if msg.Paste {
 			switch m.mode {
+			case modeFilter:
+				return m.handleFilterKey(msg)
 			case modeCompose:
 				return m.handleInputKey(msg)
 			case modeGroup:
@@ -853,6 +871,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var next tea.Model
 		var cmd tea.Cmd
 		switch m.mode {
+		case modeFilter:
+			next, cmd = m.handleFilterKey(msg)
 		case modeCompose:
 			next, cmd = m.handleInputKey(msg)
 		case modeTitle:
@@ -886,6 +906,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Pass other messages to sub-components.
 	switch m.mode {
+	case modeFilter:
+		var cmd tea.Cmd
+		m.filterInput, cmd = m.filterInput.Update(msg)
+		cmds = append(cmds, cmd)
 	case modeCompose, modeGroup:
 		prevLines := m.currentInputHeight()
 		var cmd tea.Cmd
@@ -904,6 +928,49 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 	return m, tea.Batch(cmds...)
+}
+
+func (m model) beginFilter() (tea.Model, tea.Cmd) {
+	if m.projectPane != 0 {
+		return m, nil
+	}
+	m.filterBefore = m.filterQuery
+	m.filterBeforeSelectedID = m.selectedID()
+	m.filterInput.Width = max(1, m.listWidth()-2-lipgloss.Width(m.filterInput.Prompt))
+	m.filterInput.SetValue(m.filterQuery)
+	m.filterInput.CursorEnd()
+	m.mode = modeFilter
+	return m, m.filterInput.Focus()
+}
+
+func (m model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.filterQuery = m.filterBefore
+		m.applyListFilter()
+		if m.filterBeforeSelectedID != "" {
+			m.restoreSelection(m.filterBeforeSelectedID)
+			m.showSelected(false)
+		}
+		m.mode = modeNav
+		m.filterInput.Blur()
+		return m, nil
+	case "enter":
+		m.filterQuery = strings.TrimSpace(m.filterInput.Value())
+		m.applyListFilter()
+		m.mode = modeNav
+		m.filterInput.Blur()
+		m.filterBefore = ""
+		return m, nil
+	}
+	old := m.filterInput.Value()
+	var cmd tea.Cmd
+	m.filterInput, cmd = m.filterInput.Update(msg)
+	if current := m.filterInput.Value(); current != old {
+		m.filterQuery = current
+		m.applyListFilter()
+	}
+	return m, cmd
 }
 
 func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1030,6 +1097,8 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch msg.String() {
+	case "/":
+		return m.beginFilter()
 	case "q", "ctrl+c":
 		// Quitting now kills the running turn rather than leaving it to die
 		// whenever it next writes to a stdout nobody is reading, so the agent's
@@ -2083,7 +2152,9 @@ func (m *model) reload() {
 		return
 	}
 	m.allItems = items
-	m.items, m.hiddenBacklog = m.view.prepareGroupedWithOrder(items, m.showBacklog, m.collapsed, backlogOrder)
+	m.backlogOrder = backlogOrder
+	m.searchIndex = buildItemSearchIndex(items)
+	m.items, m.hiddenBacklog = m.prepareVisibleItems(items)
 }
 
 // chooseMention replaces the complete token around the cursor with a
@@ -2442,6 +2513,41 @@ func (m *model) showSelectedProjectEntry() {
 	m.newBelow = false
 }
 
+func (m model) filterVisible() bool {
+	return m.projectPane == 0 && (m.mode == modeFilter || strings.TrimSpace(m.filterQuery) != "")
+}
+
+func (m model) prepareVisibleItems(all []models.Item) ([]models.Item, int) {
+	return m.view.prepareGroupedWithOrder(filterItemsIndexed(all, m.filterQuery, m.searchIndex), m.showBacklog, m.collapsed, m.backlogOrder)
+}
+
+// applyListFilter reapplies the current query synchronously. Search changes
+// are local to the already-loaded item snapshot, so typing never waits for a
+// filesystem scan or races an asynchronous watcher reload.
+func (m *model) applyListFilter() {
+	if m.allItems == nil && m.items != nil {
+		// Unit-level and pre-load models may only have a visible slice. Keep a
+		// copy as the source so clearing a query can restore it.
+		m.allItems = append([]models.Item(nil), m.items...)
+	}
+	if m.searchIndex == nil {
+		m.searchIndex = buildItemSearchIndex(m.allItems)
+	}
+	previousID := m.selectedID()
+	m.items, m.hiddenBacklog = m.prepareVisibleItems(m.allItems)
+	m.listOffset = 0
+	selectionChanged := false
+	if m.draftVisible() && len(m.items) == 0 {
+		m.draftSelected = true
+	} else {
+		m.restoreSelection(previousID)
+		selectionChanged = previousID != m.selectedID()
+	}
+	if selectionChanged {
+		m.showSelected(false)
+	}
+}
+
 // ── view ─────────────────────────────────────────────────────────────────────
 
 func (m model) View() string {
@@ -2459,7 +2565,16 @@ func (m model) View() string {
 
 	listW := m.listWidth()
 	mainH := m.height - 2 // subtract header and footer
-	listContent, listScrollbarStr := m.renderList(mainH - 2)
+	listAvailH := mainH - 2
+	if m.filterVisible() {
+		listAvailH--
+	}
+	listContent, listScrollbarStr := m.renderList(listAvailH)
+	if m.filterVisible() {
+		filterRow := m.renderFilterRow(listW - 2)
+		listContent = lipgloss.JoinVertical(lipgloss.Left, filterRow, listContent)
+		listScrollbarStr = lipgloss.JoinVertical(lipgloss.Top, " ", listScrollbarStr)
+	}
 	listWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, listContent, listScrollbarStr)
 	listPanelStyle := lipgloss.NewStyle().
 		// No right padding: the scrollbar occupies that column instead,
@@ -3018,6 +3133,12 @@ func (m model) renderHeader() string {
 	return row
 }
 
+func (m model) renderFilterRow(width int) string {
+	width = max(1, width)
+	m.filterInput.Width = max(1, width-lipgloss.Width(m.filterInput.Prompt))
+	return lipgloss.NewStyle().Width(width).Render(m.filterInput.View())
+}
+
 func (m model) renderFooter() string {
 	if m.err != nil {
 		message := "⚠ " + m.err.Error() + "  · press any key to dismiss"
@@ -3026,6 +3147,8 @@ func (m model) renderFooter() string {
 	}
 	var text string
 	switch m.mode {
+	case modeFilter:
+		text = "enter apply  esc cancel"
 	case modeCompose:
 		if m.mentionPicker.open {
 			text = "↑/↓ select  enter/tab insert  esc close"
@@ -3436,7 +3559,11 @@ func (m model) listRowHeight(item models.Item) int {
 // marker. That is the relevant capacity when deciding whether to show every
 // inbox row at startup.
 func (m model) listBaseAvailRows() int {
-	return m.height - 2 - 2 // header+footer, then the panel's top+bottom padding
+	rows := m.height - 2 - 2 // header+footer, then the panel's top+bottom padding
+	if m.filterVisible() {
+		rows--
+	}
+	return rows
 }
 
 // initialBacklogFits reports whether showing all live inbox items, including
@@ -4629,6 +4756,7 @@ func (m model) recalcLayout() model {
 	// Width(n) includes padding, so Padding(1) on the list panel leaves listW-2 for
 	// content and makes the total rendered width listW+1 (content+padding+border).
 	listPanelTotal := m.listWidth() + 1 // +1 for border-right
+	m.filterInput.Width = max(1, m.listWidth()-2-lipgloss.Width(m.filterInput.Prompt))
 	convAreaW := m.width - listPanelTotal
 	convW := convAreaW - 2 // 1-unit padding each side
 	if m.copyMode {
