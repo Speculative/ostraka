@@ -292,8 +292,30 @@ func (s *Store) RenameItem(id, title string) (models.Item, error) {
 	if err != nil {
 		return models.Item{}, err
 	}
+	oldTitle := item.Title
 	item.Title = strings.TrimSpace(title)
+	if item.Title == oldTitle {
+		return item, nil
+	}
 	if err := WriteItem(item, path); err != nil {
+		return models.Item{}, err
+	}
+	rootID := item.ID
+	if item.Parent != "" {
+		rootID = item.Parent
+	}
+	if err := s.appendActivity(rootID, models.Activity{
+		ID:            activityID(time.Now().UTC()),
+		Type:          ActivityItemRenamed,
+		ItemID:        item.ID,
+		ItemTitle:     item.Title,
+		PreviousTitle: oldTitle,
+		ChildID:       childActivityID(item),
+		ChildTitle:    childActivityTitle(item),
+		Result:        "renamed",
+		Actor:         models.ActorUser,
+		Timestamp:     time.Now().UTC(),
+	}); err != nil {
 		return models.Item{}, err
 	}
 	return item, nil
@@ -414,8 +436,33 @@ func (s *Store) SetGroup(id, group string) (models.Item, error) {
 	if root.Parent != "" {
 		return models.Item{}, fmt.Errorf("item %q has an invalid nested parent", id)
 	}
+	oldGroup := root.Group
+	if oldGroup == group {
+		return root, nil
+	}
 	root.Group = group
 	if err := WriteItem(root, s.itemPath(root)); err != nil {
+		return models.Item{}, err
+	}
+	result := group
+	if result == "" {
+		result = "none"
+	}
+	previous := oldGroup
+	if previous == "" {
+		previous = "none"
+	}
+	if err := s.appendActivity(root.ID, models.Activity{
+		ID:            activityID(time.Now().UTC()),
+		Type:          ActivityItemGroupChanged,
+		ItemID:        root.ID,
+		ItemTitle:     root.Title,
+		Group:         group,
+		PreviousGroup: oldGroup,
+		Result:        previous + " → " + result,
+		Actor:         models.ActorUser,
+		Timestamp:     time.Now().UTC(),
+	}); err != nil {
 		return models.Item{}, err
 	}
 	return root, nil
@@ -787,6 +834,32 @@ func (s *Store) DeleteItem(id string) error {
 		if err := s.removeBacklogRoot(deleted.ID); err != nil {
 			return err
 		}
+	} else {
+		if err := s.appendActivity(deleted.Parent, models.Activity{
+			ID:         activityID(time.Now().UTC()),
+			Type:       ActivitySubthreadDeleted,
+			ChildID:    deleted.ID,
+			ChildTitle: deleted.Title,
+			Result:     "deleted",
+			Actor:      models.ActorUser,
+			Timestamp:  time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func childActivityID(item models.Item) string {
+	if item.Parent == "" {
+		return ""
+	}
+	return item.ID
+}
+
+func childActivityTitle(item models.Item) string {
+	if item.Parent == "" {
+		return ""
+	}
+	return item.Title
 }

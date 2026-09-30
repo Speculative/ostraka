@@ -101,18 +101,23 @@ type PartialTrace struct {
 // are persisted separately from turns so lifecycle notifications do not
 // masquerade as something a user or agent said.
 type Activity struct {
-	ID         string    `json:"id"`
-	Type       string    `json:"type"`
-	ChildID    string    `json:"child_id,omitempty"`
-	ChildTitle string    `json:"child_title,omitempty"`
-	FromRootID string    `json:"from_root_id,omitempty"`
-	ToRootID   string    `json:"to_root_id,omitempty"`
-	Result     string    `json:"result,omitempty"`
-	Model      string    `json:"model,omitempty"`
-	Effort     string    `json:"effort,omitempty"`
-	Actor      Actor     `json:"actor"`
-	Timestamp  time.Time `json:"timestamp"`
-	Handled    bool      `json:"handled"`
+	ID            string    `json:"id"`
+	Type          string    `json:"type"`
+	ChildID       string    `json:"child_id,omitempty"`
+	ChildTitle    string    `json:"child_title,omitempty"`
+	ItemID        string    `json:"item_id,omitempty"`
+	ItemTitle     string    `json:"item_title,omitempty"`
+	PreviousTitle string    `json:"previous_title,omitempty"`
+	Group         string    `json:"group,omitempty"`
+	PreviousGroup string    `json:"previous_group,omitempty"`
+	FromRootID    string    `json:"from_root_id,omitempty"`
+	ToRootID      string    `json:"to_root_id,omitempty"`
+	Result        string    `json:"result,omitempty"`
+	Model         string    `json:"model,omitempty"`
+	Effort        string    `json:"effort,omitempty"`
+	Actor         Actor     `json:"actor"`
+	Timestamp     time.Time `json:"timestamp"`
+	Handled       bool      `json:"handled"`
 }
 
 type Item struct {

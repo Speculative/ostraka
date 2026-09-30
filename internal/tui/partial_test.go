@@ -134,6 +134,44 @@ func TestSessionStartedActivityRendersInConversation(t *testing.T) {
 	}
 }
 
+func TestMutationActivitiesRenderTheirSubjectsAndChanges(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC()
+	for _, activity := range []models.Activity{
+		{Type: store.ActivityItemRenamed, ItemID: item.ID, ItemTitle: "new root", PreviousTitle: "root", Actor: models.ActorUser, Timestamp: at},
+		{Type: store.ActivityItemGroupChanged, ItemID: item.ID, ItemTitle: "new root", Result: "none → v1", Actor: models.ActorUser, Timestamp: at.Add(time.Second)},
+		{Type: store.ActivityProjectBriefChanged, Actor: models.ActorAgent, Timestamp: at.Add(2 * time.Second), Handled: true},
+	} {
+		if err := s.AddActivity(item.ID, activity); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := newModel(s, nil, nil)
+	m.items = []models.Item{item}
+	m.selected = 0
+	m.conv.Width = 100
+	m.conv.Height = 30
+	m.updateConv()
+	view := ansi.Strip(m.conv.View())
+	for _, want := range []string{
+		"activity  ·  item.renamed  root → new root  ·  new root",
+		"activity  ·  item.group_changed  none → v1  ·  new root",
+		"activity  ·  project.brief_changed  ·  this item [handled]",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("conversation omitted %q: %q", want, view)
+		}
+	}
+}
+
 func containsTurnWithBody(view, header, body string) bool {
 	lines := strings.Split(view, "\n")
 	for i := 0; i+2 < len(lines); i++ {

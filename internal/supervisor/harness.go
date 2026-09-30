@@ -80,6 +80,28 @@ type Harness interface {
 	AvailableModels(ctx context.Context) ([]ModelOption, error)
 }
 
+type agentItemIDContextKey struct{}
+
+func withAgentItemID(ctx context.Context, itemID string) context.Context {
+	return context.WithValue(ctx, agentItemIDContextKey{}, itemID)
+}
+
+func agentCommandEnv(ctx context.Context) []string {
+	itemID, _ := ctx.Value(agentItemIDContextKey{}).(string)
+	env := os.Environ()
+	filtered := env[:0]
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "OSTRAKA_AGENT_ITEM_ID=") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if strings.TrimSpace(itemID) != "" {
+		filtered = append(filtered, "OSTRAKA_AGENT_ITEM_ID="+itemID)
+	}
+	return filtered
+}
+
 // interruptibleHarness adds provider-native cancellation to Harness. The
 // supervisor falls back to the per-turn context when a provider cannot accept
 // an interrupt, so third-party test harnesses do not need to implement it.
@@ -199,6 +221,7 @@ func (h *claudeHarness) RunTurn(ctx context.Context, prompt, sessionID, model, e
 	args := claudeRunArgs(prompt, sessionID, model, effort)
 
 	cmd := exec.CommandContext(ctx, h.bin, args...)
+	cmd.Env = agentCommandEnv(ctx)
 	detachProcessGroup(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -342,6 +365,7 @@ type appServerConn struct {
 
 func startAppServerConn(ctx context.Context, bin string) (*appServerConn, error) {
 	cmd := exec.CommandContext(ctx, bin, "app-server", "--stdio")
+	cmd.Env = agentCommandEnv(ctx)
 	detachProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

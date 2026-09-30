@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Speculative/ostraka/internal/models"
 )
 
 const ProjectBriefMaxChars = 6000
@@ -32,7 +34,36 @@ func (s *Store) ProjectInstructions() (string, error) {
 }
 
 func (s *Store) ReplaceProjectInstructions(content string) error {
-	return writeFileAtomic(s.projectPath(projectInstructionsFile), []byte(strings.TrimSpace(content)+"\n"))
+	return s.replaceProjectInstructions(content, "")
+}
+
+// ReplaceProjectInstructionsForItem is the agent-scoped variant of project
+// instruction replacement. User-owned edits use ReplaceProjectInstructions
+// and intentionally do not create an item activity: there is no single
+// conversation that owns a global user edit.
+func (s *Store) ReplaceProjectInstructionsForItem(itemID, content string) error {
+	if err := s.validateActivityItem(itemID); err != nil {
+		return err
+	}
+	return s.replaceProjectInstructions(content, itemID)
+}
+
+func (s *Store) replaceProjectInstructions(content, activityItemID string) error {
+	content = strings.TrimSpace(content)
+	old, err := s.ProjectInstructions()
+	if err != nil {
+		return err
+	}
+	if old == content {
+		return nil
+	}
+	if err := writeFileAtomic(s.projectPath(projectInstructionsFile), []byte(content+"\n")); err != nil {
+		return err
+	}
+	if activityItemID != "" {
+		return s.recordProjectActivity(activityItemID, ActivityProjectInstructionsChanged)
+	}
+	return nil
 }
 
 func (s *Store) ProjectBrief() (string, error) {
@@ -43,6 +74,21 @@ func (s *Store) ProjectBrief() (string, error) {
 // when it materially changes. The explicit API is the only supported agent
 // write path, so the size limit is never bypassed by an append.
 func (s *Store) ReplaceProjectBrief(content string) error {
+	return s.replaceProjectBrief(content, "")
+}
+
+// ReplaceProjectBriefForItem is the agent-scoped variant of brief
+// replacement. The activity is attached only to the dispatching item and is
+// marked handled because the agent that made the change already knows about
+// it; it should remain visible without scheduling a self-follow-up.
+func (s *Store) ReplaceProjectBriefForItem(itemID, content string) error {
+	if err := s.validateActivityItem(itemID); err != nil {
+		return err
+	}
+	return s.replaceProjectBrief(content, itemID)
+}
+
+func (s *Store) replaceProjectBrief(content, activityItemID string) error {
 	content = strings.TrimSpace(content)
 	if len([]rune(content)) > ProjectBriefMaxChars {
 		return fmt.Errorf("project brief exceeds %d characters", ProjectBriefMaxChars)
@@ -67,7 +113,39 @@ func (s *Store) ReplaceProjectBrief(content string) error {
 			return err
 		}
 	}
-	return writeFileAtomic(s.projectPath(projectBriefFile), []byte(content+"\n"))
+	if err := writeFileAtomic(s.projectPath(projectBriefFile), []byte(content+"\n")); err != nil {
+		return err
+	}
+	if activityItemID != "" {
+		return s.recordProjectActivity(activityItemID, ActivityProjectBriefChanged)
+	}
+	return nil
+}
+
+func (s *Store) validateActivityItem(itemID string) error {
+	if strings.TrimSpace(itemID) == "" {
+		return fmt.Errorf("activity item ID must not be blank")
+	}
+	if _, err := s.GetItem(itemID); err != nil {
+		return fmt.Errorf("activity item %q: %w", itemID, err)
+	}
+	return nil
+}
+
+func (s *Store) recordProjectActivity(itemID, activityType string) error {
+	item, err := s.GetItem(itemID)
+	if err != nil {
+		return err
+	}
+	return s.AddActivity(itemID, models.Activity{
+		Type:      activityType,
+		ItemID:    item.ID,
+		ItemTitle: item.Title,
+		Result:    "changed",
+		Actor:     models.ActorAgent,
+		Timestamp: time.Now().UTC(),
+		Handled:   true,
+	})
 }
 
 func (s *Store) ProjectBriefHistory() ([]ProjectBriefVersion, error) {

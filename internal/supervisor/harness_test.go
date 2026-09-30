@@ -10,6 +10,24 @@ import (
 	"testing"
 )
 
+func TestAgentCommandEnvCarriesDispatchingItemOnlyForProviderCommands(t *testing.T) {
+	env := agentCommandEnv(withAgentItemID(context.Background(), "item-1"))
+	var matches []string
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "OSTRAKA_AGENT_ITEM_ID=") {
+			matches = append(matches, entry)
+		}
+	}
+	if want := []string{"OSTRAKA_AGENT_ITEM_ID=item-1"}; !reflect.DeepEqual(matches, want) {
+		t.Fatalf("agent item environment = %v, want %v", matches, want)
+	}
+	for _, entry := range agentCommandEnv(context.Background()) {
+		if strings.HasPrefix(entry, "OSTRAKA_AGENT_ITEM_ID=") {
+			t.Fatalf("bare command environment inherited agent item: %q", entry)
+		}
+	}
+}
+
 type closeBuffer struct{ bytes.Buffer }
 
 func (*closeBuffer) Close() error { return nil }

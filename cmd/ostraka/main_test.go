@@ -97,6 +97,49 @@ func TestItemRenameCommandRequiresIDAndTitle(t *testing.T) {
 	}
 }
 
+func TestAgentProjectReplacementUsesDispatchItemForActivity(t *testing.T) {
+	project := t.TempDir()
+	s, err := store.NewStore(filepath.Join(project, ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "thread", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OSTRAKA_AGENT_ITEM_ID", item.ID)
+	if err := replaceProjectBrief(s, "agent brief"); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceProjectInstructions(s, "agent instructions"); err != nil {
+		t.Fatal(err)
+	}
+	activities, err := s.ListActivities(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activities) != 2 || activities[0].Type != store.ActivityProjectBriefChanged || activities[1].Type != store.ActivityProjectInstructionsChanged {
+		t.Fatalf("agent project activities = %+v", activities)
+	}
+	for _, activity := range activities {
+		if activity.ItemID != item.ID || activity.ItemTitle != item.Title || activity.Actor != models.ActorAgent || !activity.Handled {
+			t.Errorf("agent project activity attribution = %+v", activity)
+		}
+	}
+
+	t.Setenv("OSTRAKA_AGENT_ITEM_ID", "")
+	if err := replaceProjectBrief(s, "user brief"); err != nil {
+		t.Fatal(err)
+	}
+	activities, err = s.ListActivities(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activities) != 2 {
+		t.Fatalf("user project edit created activity = %+v", activities)
+	}
+}
+
 func TestItemReparentCommandMovesItemAndHonorsFlattenFlag(t *testing.T) {
 	project := t.TempDir()
 	rootDir := filepath.Join(project, ".ostraka")

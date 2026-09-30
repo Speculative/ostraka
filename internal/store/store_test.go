@@ -104,6 +104,61 @@ func TestRenameItemPreservesConversationAndUpdatesTitle(t *testing.T) {
 	if got.Title != "new title" {
 		t.Errorf("persisted title = %q, want %q", got.Title, "new title")
 	}
+	activities, err := s.ListActivities(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activities) != 1 || activities[0].Type != store.ActivityItemRenamed ||
+		activities[0].ItemID != item.ID || activities[0].PreviousTitle != "old title" ||
+		activities[0].ItemTitle != "new title" || activities[0].Actor != models.ActorUser {
+		t.Fatalf("rename activity = %+v", activities)
+	}
+	if _, err := s.RenameItem(item.ID, "new title"); err != nil {
+		t.Fatal(err)
+	}
+	if activities, err := s.ListActivities(item.ID); err != nil || len(activities) != 1 {
+		t.Fatalf("no-op rename created activity = %+v, err=%v", activities, err)
+	}
+}
+
+func TestChildRenameAndGroupChangesUseRootActivityJournal(t *testing.T) {
+	s := newTestStore(t)
+	root, err := s.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.CreateSubthread(root.ID, "child", "body", models.TypeThread, models.StatusActive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RenameItem(child.ID, "renamed child"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetGroup(child.ID, "provider-work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetGroup(root.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	activities, err := s.ListActivities(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activities) != 4 {
+		t.Fatalf("root activities = %+v, want creation, rename, group, clear", activities)
+	}
+	rename := activities[1]
+	if rename.Type != store.ActivityItemRenamed || rename.ChildID != child.ID || rename.ItemTitle != "renamed child" || rename.PreviousTitle != "child" {
+		t.Errorf("child rename activity = %+v", rename)
+	}
+	group := activities[2]
+	if group.Type != store.ActivityItemGroupChanged || group.Group != "provider-work" || group.PreviousGroup != "" {
+		t.Errorf("group activity = %+v", group)
+	}
+	cleared := activities[3]
+	if cleared.Type != store.ActivityItemGroupChanged || cleared.Group != "" || cleared.PreviousGroup != "provider-work" {
+		t.Errorf("group clear activity = %+v", cleared)
+	}
 }
 
 func TestRenameItemRejectsInvalidTitleWithoutChangingItem(t *testing.T) {
@@ -439,6 +494,26 @@ func TestDeleteItem(t *testing.T) {
 	}
 	if _, err := s.GetItem(item.ID); err == nil {
 		t.Error("expected error after deletion")
+	}
+}
+
+func TestDeleteSubthreadRecordsActivityOnRoot(t *testing.T) {
+	s := newTestStore(t)
+	root, _ := s.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusActive, "")
+	child, _ := s.CreateSubthread(root.ID, "child", "body", models.TypeThread, models.StatusActive)
+	if err := s.DeleteItem(child.ID); err != nil {
+		t.Fatal(err)
+	}
+	activities, err := s.ListActivities(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activities) != 2 {
+		t.Fatalf("root activities = %+v, want creation and deletion", activities)
+	}
+	deleted := activities[1]
+	if deleted.Type != store.ActivitySubthreadDeleted || deleted.ChildID != child.ID || deleted.ChildTitle != "child" || deleted.Result != "deleted" {
+		t.Fatalf("delete activity = %+v", deleted)
 	}
 }
 

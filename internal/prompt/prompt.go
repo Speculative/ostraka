@@ -75,12 +75,13 @@ Ostraka turn does not by itself require revalidation. Run checks only when the
 outstanding work, a prior incomplete or failed check, or changed inputs warrant
 them. Then send one substantive Ostraka item reply; it ends this dispatch.`
 
-const activitySectionText = `--- unhandled subthread activity ---
-{{range .Activities}}{{.Type}}: {{.Title}} ({{.ChildID}}{{if .FromRootID}}, from={{.FromRootID}}{{end}}{{if .ToRootID}}, to={{.ToRootID}}{{end}}, result={{.Result}}, actor={{.Actor}})
+const activitySectionText = `--- unhandled activity ---
+{{range .Activities}}{{.Type}}: {{.Title}} ({{.SubjectID}}{{if .FromRootID}}, from={{.FromRootID}}{{end}}{{if .ToRootID}}, to={{.ToRootID}}{{end}}{{if .PreviousTitle}}, previous-title={{.PreviousTitle}}{{end}}, result={{.Result}}, actor={{.Actor}})
 {{end}}Review each distinct affected subthread once with
 "ostraka item show <child-id> --json" unless a later event requires another
 read. Reconcile its decision with the root item and include the consequences in
-your final root reply.`
+your final root reply. For item metadata activity, use the subject ID shown in
+the activity line and account for the change in your reply when relevant.`
 
 const agentOrientationText = `Ostraka is the threaded work interface around this coding-agent conversation.
 Treat an item as a durable work card, roughly like a Kanban card, whose turns
@@ -197,13 +198,14 @@ type activitySectionData struct {
 }
 
 type activityData struct {
-	Type       string
-	Title      string
-	ChildID    string
-	FromRootID string
-	ToRootID   string
-	Result     string
-	Actor      models.Actor
+	Type          string
+	Title         string
+	SubjectID     string
+	PreviousTitle string
+	FromRootID    string
+	ToRootID      string
+	Result        string
+	Actor         models.Actor
 }
 
 type agentOrientationData struct {
@@ -262,18 +264,29 @@ func activitySection(activities []models.Activity) string {
 	}
 	data := activitySectionData{Activities: make([]activityData, 0, len(activities))}
 	for _, activity := range activities {
-		title := activity.ChildTitle
+		title := activity.ItemTitle
+		if title == "" {
+			title = activity.ChildTitle
+		}
+		if title == "" {
+			title = activity.ItemID
+		}
 		if title == "" {
 			title = activity.ChildID
 		}
+		subjectID := activity.ItemID
+		if subjectID == "" {
+			subjectID = activity.ChildID
+		}
 		data.Activities = append(data.Activities, activityData{
-			Type:       activity.Type,
-			Title:      title,
-			ChildID:    activity.ChildID,
-			FromRootID: activity.FromRootID,
-			ToRootID:   activity.ToRootID,
-			Result:     activity.Result,
-			Actor:      activity.Actor,
+			Type:          activity.Type,
+			Title:         title,
+			SubjectID:     subjectID,
+			PreviousTitle: activity.PreviousTitle,
+			FromRootID:    activity.FromRootID,
+			ToRootID:      activity.ToRootID,
+			Result:        activity.Result,
+			Actor:         activity.Actor,
 		})
 	}
 	return "\n\n" + renderPrompt(activitySectionTemplate, data)

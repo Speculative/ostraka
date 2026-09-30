@@ -4117,13 +4117,28 @@ func (m *model) updateConv() {
 			if event.activity.Handled {
 				status = "handled"
 			}
-			title := event.activity.ChildTitle
+			title := event.activity.ItemTitle
+			if title == "" {
+				title = event.activity.ChildTitle
+			}
+			if title == "" {
+				title = event.activity.ItemID
+			}
 			if title == "" {
 				title = event.activity.ChildID
+			}
+			if title == "" && strings.HasPrefix(event.activity.Type, "project.") {
+				title = "this item"
 			}
 			activityType := event.activity.Type
 			if event.activity.Type == store.ActivitySubthreadMoved && event.activity.FromRootID != "" && event.activity.ToRootID != "" {
 				activityType += "  " + event.activity.FromRootID + " → " + event.activity.ToRootID
+			}
+			if event.activity.Type == store.ActivityItemRenamed && event.activity.PreviousTitle != "" && event.activity.ItemTitle != "" {
+				activityType += "  " + event.activity.PreviousTitle + " → " + event.activity.ItemTitle
+			}
+			if event.activity.Type == store.ActivityItemGroupChanged && event.activity.Result != "" {
+				activityType += "  " + event.activity.Result
 			}
 			sb.WriteString(fmt.Sprintf("\n\n%s\nactivity  ·  %s  ·  %s [%s]",
 				turnRule, activityType, title, status))

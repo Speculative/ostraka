@@ -601,7 +601,7 @@ func (s *Supervisor) EnqueuePendingActivityRoots() {
 		}
 		shouldWake := false
 		for _, activity := range activities {
-			if activity.Type == store.ActivitySubthreadClosed {
+			if activity.Type == store.ActivitySubthreadClosed || activity.Type == store.ActivitySubthreadDeleted {
 				shouldWake = true
 				break
 			}
@@ -902,6 +902,7 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	}
 	harness := s.harnessFor(sf.Provider)
 	turnCtx, turnCancel := context.WithCancel(s.runContext())
+	turnCtx = withAgentItemID(turnCtx, msg.itemID)
 	active := &activeTurn{itemID: msg.itemID, cancel: turnCancel}
 	if interruptible, ok := harness.(interruptibleHarness); ok {
 		active.interrupt = interruptible.Interrupt

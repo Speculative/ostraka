@@ -104,7 +104,7 @@ var projectInstructionsReplaceCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return mustStore().ReplaceProjectInstructions(content)
+		return replaceProjectInstructions(mustStore(), content)
 	},
 }
 var projectBriefShowCmd = &cobra.Command{
@@ -125,9 +125,24 @@ var projectBriefReplaceCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return mustStore().ReplaceProjectBrief(content)
+		return replaceProjectBrief(mustStore(), content)
 	},
 }
+
+func replaceProjectInstructions(s *store.Store, content string) error {
+	if itemID := strings.TrimSpace(os.Getenv("OSTRAKA_AGENT_ITEM_ID")); itemID != "" {
+		return s.ReplaceProjectInstructionsForItem(itemID, content)
+	}
+	return s.ReplaceProjectInstructions(content)
+}
+
+func replaceProjectBrief(s *store.Store, content string) error {
+	if itemID := strings.TrimSpace(os.Getenv("OSTRAKA_AGENT_ITEM_ID")); itemID != "" {
+		return s.ReplaceProjectBriefForItem(itemID, content)
+	}
+	return s.ReplaceProjectBrief(content)
+}
+
 var projectBriefHistoryCmd = &cobra.Command{
 	Use: "history", Short: "List previous complete brief versions",
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -593,8 +608,20 @@ Examples:
 					continue
 				}
 				detail := activity.ChildID
+				if activity.ItemID != "" {
+					detail = activity.ItemID
+				}
+				if activity.ItemTitle != "" {
+					detail += " · " + activity.ItemTitle
+				}
+				if detail == "" && strings.HasPrefix(activity.Type, "project.") {
+					detail = "this item"
+				}
 				if activity.Type == store.ActivitySubthreadMoved && activity.FromRootID != "" && activity.ToRootID != "" {
 					detail += " (" + activity.FromRootID + " → " + activity.ToRootID + ")"
+				}
+				if activity.Type == store.ActivityItemRenamed && activity.PreviousTitle != "" && activity.ItemTitle != "" {
+					detail += " (" + activity.PreviousTitle + " → " + activity.ItemTitle + ")"
 				}
 				fmt.Printf("%s %s %s [%s]\n", activity.Timestamp.Format("2006-01-02 15:04:05"), activity.Type, detail, activity.Result)
 			}
