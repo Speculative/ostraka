@@ -77,11 +77,33 @@ them. Then send one substantive Ostraka item reply; it ends this dispatch.`
 
 const activitySectionText = `--- unhandled activity ---
 {{range .Activities}}{{.Type}}: {{.Title}} ({{.SubjectID}}{{if .FromRootID}}, from={{.FromRootID}}{{end}}{{if .ToRootID}}, to={{.ToRootID}}{{end}}{{if .PreviousTitle}}, previous-title={{.PreviousTitle}}{{end}}, result={{.Result}}, actor={{.Actor}})
-{{end}}Review each distinct affected subthread once with
-"ostraka item show <child-id> --json" unless a later event requires another
-read. Reconcile its decision with the root item and include the consequences in
-your final root reply. For item metadata activity, use the subject ID shown in
-the activity line and account for the change in your reply when relevant.`
+{{end}}`
+
+const activityReviewGuidance = `Consider the activity lines as one batch. Read
+every distinct affected child before consolidating: inspect its status and
+last few turns with "ostraka item show <child-id> --json" (pipe long items
+through jq). An archived child may have finished or been abandoned. If a
+deleted child cannot be opened, use the activity line and available root
+context to decide whether its work is still needed elsewhere. Ask the user to
+clarify an outcome you cannot determine. Then assess the batch against the root
+goal and remaining open children. For item metadata activity, use its subject
+ID and mention it only if relevant.`
+
+const mixedActivityGuidance = `Reconcile the child outcomes with the unseen
+user turns in their given order. Address those turns fully, including requested
+implementation or details about children. Point out a conflict between a child
+outcome and a user request instead of silently choosing one.`
+
+const activityFollowupGuidance = `Check open siblings' titles and bodies when a
+child decision might change their work. Post a concise turn to an affected
+sibling only when its work changes, citing the source child by ID. Create
+needed in-scope subthreads or suggest related items for out-of-scope work. Do
+not begin implementation solely because of activity. In the final root reply,
+report the batch's combined effect on root completion, next work, and items
+created or proposed. Recommend archiving only when the root goal is met and
+every remaining child is archived. When reporting activity, mention child
+content only where it justifies a conclusion, citing its ID instead of
+recapping it. If the batch changes nothing, say so in one sentence.`
 
 const agentOrientationText = `Ostraka is the threaded work interface around this coding-agent conversation.
 Treat an item as a durable work card, roughly like a Kanban card, whose turns
@@ -223,7 +245,7 @@ func Bootstrap(itemID, instructions, brief, itemContext, replyCommand string, ac
 		Instructions: emptyContext(instructions),
 		Brief:        emptyContext(brief),
 		ItemContext:  itemContext,
-	}) + activitySection(activities)
+	}) + activitySection(activities, false)
 }
 
 // Nudge builds the shorter prompt used for later turns in an existing item
@@ -247,7 +269,7 @@ func Nudge(itemID string, userTurns []string, activities []models.Activity) stri
 			ItemID: itemID,
 		})
 	}
-	return base + dispatchLengthGuidance + activitySection(activities)
+	return base + dispatchLengthGuidance + activitySection(activities, len(userTurns) > 0)
 }
 
 const dispatchLengthGuidance = `
@@ -258,7 +280,7 @@ and make the next dispatch easy to resume from the item and working tree. Do
 not invent self-scheduling commands or fake user turns; use a self-scheduling
 or loop facility only when the prompt explicitly provides one.`
 
-func activitySection(activities []models.Activity) string {
+func activitySection(activities []models.Activity, hasUserTurns bool) string {
 	if len(activities) == 0 {
 		return ""
 	}
@@ -289,7 +311,11 @@ func activitySection(activities []models.Activity) string {
 			Actor:         activity.Actor,
 		})
 	}
-	return "\n\n" + renderPrompt(activitySectionTemplate, data)
+	section := "\n\n" + renderPrompt(activitySectionTemplate, data) + activityReviewGuidance
+	if hasUserTurns {
+		section += "\n\n" + mixedActivityGuidance
+	}
+	return section + "\n\n" + activityFollowupGuidance
 }
 
 func emptyContext(s string) string {

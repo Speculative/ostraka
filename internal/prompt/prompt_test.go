@@ -122,15 +122,65 @@ func TestPromptIncludesActivityContext(t *testing.T) {
 		Actor:      models.ActorUser,
 	}
 	for name, got := range map[string]string{
-		"bootstrap": Bootstrap("item-1", "", "", "context", "reply", []models.Activity{activity}),
-		"nudge":     Nudge("item-1", []string{"continue"}, []models.Activity{activity}),
+		"bootstrap":     Bootstrap("item-1", "", "", "context", "reply", []models.Activity{activity}),
+		"activity-only": Nudge("item-1", nil, []models.Activity{activity}),
+		"mixed nudge":   Nudge("item-1", []string{"continue"}, []models.Activity{activity}),
 	} {
+		normalized := normalizeWhitespace(got)
+		lower := strings.ToLower(normalized)
 		if !strings.Contains(got, "subthread.closed: Decision (child-1, result=archived, actor=user)") {
 			t.Errorf("%s prompt omitted activity context: %q", name, got)
 		}
-		if !strings.Contains(got, "Review each distinct affected subthread once") {
-			t.Errorf("%s prompt omitted activity guidance: %q", name, got)
+		read := strings.Index(lower, "read every distinct affected child")
+		conclusion := -1
+		for _, marker := range []string{"then assess", "then consolidate", "reconcile the batch"} {
+			if i := strings.Index(lower, marker); i >= 0 {
+				conclusion = i
+				break
+			}
 		}
+		if !strings.Contains(normalized, "ostraka item show <child-id> --json") ||
+			read < 0 || conclusion < 0 || read >= conclusion {
+			t.Errorf("%s prompt must read affected children before consolidation: %q", name, got)
+		}
+		if !strings.Contains(got, activityReviewGuidance) || !strings.Contains(got, activityFollowupGuidance) {
+			t.Errorf("%s prompt does not include the shared guidance verbatim: %q", name, got)
+		}
+		if name != "mixed nudge" && strings.Contains(got, mixedActivityGuidance) {
+			t.Errorf("%s prompt refers to unseen user turns: %q", name, got)
+		}
+	}
+}
+
+func TestActivityGuidanceSeparatesDispatchPaths(t *testing.T) {
+	activity := models.Activity{Type: "subthread.deleted", ChildID: "child-1"}
+	bootstrap := normalizeWhitespace(Bootstrap("root-1", "", "", "context", "reply", []models.Activity{activity}))
+	only := normalizeWhitespace(Nudge("root-1", nil, []models.Activity{activity}))
+	mixed := normalizeWhitespace(Nudge("root-1", []string{"Implement the change."}, []models.Activity{activity}))
+
+	for name, got := range map[string]string{"bootstrap": bootstrap, "activity-only": only, "mixed": mixed} {
+		if !strings.Contains(got, "whether its work is still needed elsewhere") ||
+			!strings.Contains(got, "clarif") {
+			t.Errorf("%s prompt omits uncertainty about a deleted child: %q", name, got)
+		}
+	}
+	if !strings.Contains(only, "Do not begin implementation solely because of activity") {
+		t.Errorf("activity-only prompt allows unrequested implementation: %q", only)
+	}
+	for _, want := range []string{"Reconcile the child outcomes with the unseen user turns", "details about children", "Point out a conflict"} {
+		if !strings.Contains(mixed, want) {
+			t.Errorf("mixed prompt omitted %q: %q", want, mixed)
+		}
+	}
+	if strings.Contains(bootstrap, "Reconcile the child outcomes with the unseen user turns") ||
+		strings.Contains(only, "Reconcile the child outcomes with the unseen user turns") {
+		t.Errorf("non-mixed activity guidance includes mixed-turn instruction")
+	}
+	review := strings.Index(mixed, normalizeWhitespace(activityReviewGuidance))
+	reconcile := strings.Index(mixed, normalizeWhitespace(mixedActivityGuidance))
+	followup := strings.Index(mixed, normalizeWhitespace(activityFollowupGuidance))
+	if review < 0 || reconcile <= review || followup <= reconcile {
+		t.Errorf("mixed prompt should review children, reconcile user turns, then act: %q", mixed)
 	}
 }
 
