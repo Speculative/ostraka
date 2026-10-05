@@ -52,12 +52,7 @@ rerun a successful check against unchanged inputs merely to reorient.
 Do not use the final Ostraka item reply for a progress-only acknowledgement;
 ordinary harness progress updates remain visible to the user. Send one
 substantive "ostraka item turn" when the work is ready to hand back; it ends
-this dispatch. For work likely to exceed one dispatch, prefer bounded
-checkpoints: finish a coherent slice, leave a concise substantive handoff
-describing what remains, and make the next dispatch easy to resume from the
-item and working tree. Do not invent self-scheduling commands or fake user
-turns; use a self-scheduling or loop facility only when this prompt explicitly
-provides one. Use actual multiline content, never literal \n text.`
+this dispatch. Use actual multiline content, never literal \n text.`
 
 const activityOnlyText = `This continues the conversation on Ostraka item {{.ItemID}}.
 No unseen user turns are included in this dispatch. Review the subthread updates
@@ -96,19 +91,25 @@ outcome and a user request instead of silently choosing one.`
 
 const activityFollowupGuidance = `Check open siblings' titles and bodies when a
 child decision might change their work. Post a concise turn to an affected
-sibling only when its work changes, citing the source child by ID. Create
-needed in-scope subthreads or suggest related items for out-of-scope work. Do
-not begin implementation solely because of activity. In the final root reply,
-report the batch's combined effect on root completion, next work, and items
-created or proposed. Recommend archiving only when the root goal is met and
-every remaining child is archived. When reporting activity, mention child
-content only where it justifies a conclusion, citing its ID instead of
-recapping it. If the batch changes nothing, say so in one sentence.`
+sibling only when its work changes, citing the source child by ID. Create an
+in-scope subthread only if the user asks for one or the root and proposed child
+both have distinct discussions to continue. Carry sequential follow-on work
+forward on the root; suggest related items for out-of-scope work. Treat a
+child's outcome as new evidence for the root's existing goal. If it unblocks
+work already authorized by the root goal and conversation, continue that work
+here, including implementation. If the next step needs a user decision or new
+authorization, ask here. Child closure alone does not authorize unrelated
+work. In the final root reply, report the batch's combined effect on root
+completion, next work, and items created or proposed. Recommend archiving only
+when the root goal is met and every remaining child is archived. When reporting
+activity, mention child content only where it justifies a conclusion, citing
+its ID instead of recapping it. If the batch changes nothing, say so in one
+sentence.`
 
 const agentOrientationText = `Ostraka is the threaded work interface around this coding-agent conversation.
 Treat an item as a durable work card, roughly like a Kanban card, whose turns
-are the conversation for that work. Direct subthreads hold independently
-discussable branches.
+are the conversation for that work. Direct subthreads carry parallel
+conversations alongside the current item, unless the user asks for a split.
 
 Your normal harness progress and partial responses are streamed into Ostraka
 and are visible to the user. Use them for concise progress updates. A retained
@@ -162,19 +163,29 @@ and make the next dispatch easy to resume from the item and working tree. Do
 not invent self-scheduling commands or fake user turns; use a self-scheduling
 or loop facility only when the prompt explicitly provides one.
 
-Threading guidance: keep supporting explanation inline, but create a direct
-subthread with "ostraka item add --parent <root-or-child-id> --channel inbox
---status pending-user --title <one-line-title> --body
-<self-contained-question>" when an in-scope
-branch is independently discussable or likely to need multiple exchanges.
+Threading guidance: keep supporting explanation and sequential work in the
+current item, even when it takes several turns or waits for user input. Ask
+questions that block this item's progress here. Create a direct subthread only
+when both the current item and proposed child would carry distinct active
+discussions, or when the user asks for a split. If the current item would wait
+for the child and then resume, or have nothing left to discuss after the child
+is created, continue here instead unless the user requested the split. This
+applies to roots and children alike.
+An earlier plan to create an item does not require a split after the user gives
+a go-ahead for the work, unless they ask for a separate item. For a parallel
+in-scope branch, use "ostraka item add --parent <root-or-child-id>
+--channel inbox --status pending-user
+--title <one-line-title> --body <self-contained-question>".
 Every new item has its own provider session and starts without this
 conversation. Write its title and body for that cold start: include the
 context, constraints, prior decisions, and desired outcome needed to act, but
 omit unrelated history.
-Creating from a child attaches a sibling; never create a grandchild. A
-subthread normally starts pending-user for a question to the user or
-backlog when parked. For work outside this item's scope, suggest a related
-item with "ostraka item suggest --related <item-id> ..."; proposals
+Creating from a child attaches a sibling; never create a grandchild. Use
+pending-user for a parallel question to the user and backlog when parking a
+parallel branch. Continue sequential follow-on work in the current item; after
+a child closes, the root reconciles its result and carries on any next work
+there. For work outside this item's scope, suggest a related item with
+"ostraka item suggest --related <item-id> ..."; proposals
 need the user's keep/start decision before they become active work.
 
 Final reply command:

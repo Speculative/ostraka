@@ -40,6 +40,9 @@ func TestBootstrapIntroducesItemWithoutReinitializingHarness(t *testing.T) {
 func TestNudgeExplicitlyContinuesTheConversation(t *testing.T) {
 	got := Nudge("20260808-054612", []string{"Please implement this."}, nil)
 	normalized := normalizeWhitespace(got)
+	if count := strings.Count(got, "For work likely to exceed one dispatch"); count != 1 {
+		t.Errorf("checkpoint guidance appears %d times, want once", count)
+	}
 	for _, want := range []string{
 		"continues the conversation on Ostraka item 20260808-054612",
 		"Please implement this.",
@@ -164,8 +167,13 @@ func TestActivityGuidanceSeparatesDispatchPaths(t *testing.T) {
 			t.Errorf("%s prompt omits uncertainty about a deleted child: %q", name, got)
 		}
 	}
-	if !strings.Contains(only, "Do not begin implementation solely because of activity") {
-		t.Errorf("activity-only prompt allows unrequested implementation: %q", only)
+	for _, want := range []string{
+		"If it unblocks work already authorized by the root goal and conversation, continue that work here, including implementation",
+		"If the next step needs a user decision or new authorization, ask here",
+	} {
+		if !strings.Contains(only, want) {
+			t.Errorf("activity-only prompt omitted root continuation guidance %q", want)
+		}
 	}
 	for _, want := range []string{"Reconcile the child outcomes with the unseen user turns", "details about children", "Point out a conflict"} {
 		if !strings.Contains(mixed, want) {
@@ -257,6 +265,33 @@ func TestAgentOrientationIncludesExactReplyCommand(t *testing.T) {
 		if strings.Contains(normalized, unwanted) {
 			t.Fatalf("orientation unexpectedly contains %q: %q", unwanted, got)
 		}
+	}
+}
+
+func TestThreadingGuidanceKeepsSequentialConversationInOneItem(t *testing.T) {
+	got := normalizeWhitespace(AgentOrientation("reply"))
+	for _, want := range []string{
+		"current item and proposed child",
+		"questions that block this item's progress",
+		"when the user asks for a split",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("threading guidance missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{
+		"likely to need multiple exchanges",
+		"independently discussable",
+		"two or more distinct conversations need to exist in the root family",
+	} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("threading guidance still contains %q", unwanted)
+		}
+	}
+
+	activityPrompt := normalizeWhitespace(Nudge("root-1", nil, []models.Activity{{Type: "subthread.closed", ChildID: "child-1"}}))
+	if !strings.Contains(activityPrompt, "the root and proposed child both have distinct discussions") {
+		t.Error("activity follow-up guidance does not compare the root with the proposed child")
 	}
 }
 
