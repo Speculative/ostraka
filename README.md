@@ -35,6 +35,13 @@ Run `ostraka preamble` when an agent needs the static orientation and final
 reply guidance. Normal dispatched sessions receive the same guidance directly
 in their initial prompt.
 
+Optional project workflows can be adopted through user-owned project
+instructions. The [numbered plan workflow
+pack](internal/instructionpacks/numbered-plan.md) is a
+paste-ready example for projects that use numbered execution items. Merge it
+with existing instructions rather than replacing them; it does not change
+Ostraka's default prompt.
+
 ## Installation
 
 Once a release is published, install the CLI with
