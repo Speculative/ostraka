@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,51 +249,281 @@ func TestGroupAssignmentAndFilterValues(t *testing.T) {
 	}
 }
 
-func TestItemJSONWithPartialTracesIncludesProviderOutput(t *testing.T) {
-	item := models.Item{ID: "item-1", Title: "trace"}
+func TestItemJSONConversationIncludesActivitiesAndTraces(t *testing.T) {
 	started := time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC)
-	got := itemToJSONWithPartialTraces(item, []models.PartialTrace{{
-		ID:            "trace-1",
-		Timestamp:     started,
-		TurnTimestamp: started.Add(time.Minute),
-		Status:        "failed",
-		Content:       "provider output",
-	}})
-
-	traces, ok := got["partial_traces"].([]map[string]any)
-	if !ok || len(traces) != 1 {
-		t.Fatalf("partial_traces = %#v, want one trace", got["partial_traces"])
+	item := models.Item{
+		ID: "item-1", Title: "trace", Mentions: []string{"item-2", "missing"},
+		Backlinks: []string{"item-3"},
+		Turns: []models.Turn{
+			{Actor: models.ActorUser, Timestamp: started.Add(time.Minute), Content: "question"},
+			{Actor: models.ActorAgent, Timestamp: started.Add(3 * time.Minute), Content: "answer"},
+		},
 	}
-	if traces[0]["id"] != "trace-1" || traces[0]["status"] != "failed" || traces[0]["content"] != "provider output" {
-		t.Fatalf("partial trace JSON = %#v", traces[0])
+	activities := []models.Activity{
+		{ID: "activity-1", Type: store.ActivityAgentSessionStarted, Actor: models.ActorAgent,
+			Timestamp: started, Result: "codex", Model: "test-model"},
+		{ID: "activity-2", Type: store.ActivityAgentEndedWithoutFinalResponse, Actor: models.ActorAgent,
+			Timestamp: started.Add(5 * time.Minute), Result: "failed"},
 	}
-	if _, ok := itemToJSON(item)["partial_traces"]; ok {
-		t.Fatal("default item JSON unexpectedly includes partial_traces")
+	partials := []models.PartialTrace{
+		{ID: "trace-1", Timestamp: started.Add(2 * time.Minute), TurnTimestamp: started.Add(3 * time.Minute), Status: "completed", Content: "provider output"},
+		{ID: "trace-2", Timestamp: started.Add(4 * time.Minute), Status: "failed", Content: "unfinished work"},
+	}
+	got, err := itemToJSONWithConversation(item, activities, partials, map[string]string{"item-2": "Target", "item-3": "Source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := got["conversation"].([]map[string]any)
+	if len(conversation) != 5 {
+		t.Fatalf("conversation = %#v", conversation)
+	}
+	if conversation[0]["activity"].(map[string]any)["provider"] != "codex" {
+		t.Fatalf("session start = %#v", conversation[0])
+	}
+	if conversation[1]["user_message"] != "question" {
+		t.Fatalf("user entry = %#v", conversation[1])
+	}
+	if conversation[2]["agent_reply"] != "answer" || conversation[2]["partial_trace"].(map[string]any)["output"] != "provider output" {
+		t.Fatalf("agent entry = %#v", conversation[2])
+	}
+	if _, posted := conversation[3]["agent_reply"]; posted {
+		t.Fatalf("standalone trace has reply: %#v", conversation[3])
+	}
+	if conversation[3]["partial_trace"].(map[string]any)["output"] != "unfinished work" {
+		t.Fatalf("standalone trace = %#v", conversation[3])
+	}
+	if conversation[4]["activity"].(map[string]any)["type"] != store.ActivityAgentEndedWithoutFinalResponse {
+		t.Fatalf("no-output activity = %#v", conversation[4])
+	}
+	mentions := got["mentioned_items"].([]map[string]any)
+	if len(mentions) != 2 || mentions[0]["title"] != "Target" || mentions[1]["title"] != nil {
+		t.Fatalf("mentions = %#v", mentions)
+	}
+	if got["backlinks"].([]map[string]any)[0]["title"] != "Source" {
+		t.Fatalf("backlinks = %#v", got["backlinks"])
+	}
+	if _, present := got["related"]; present {
+		t.Fatal("legacy related key remains")
+	}
+	if _, present := got["turns"]; present {
+		t.Fatal("turns key remains")
 	}
 }
 
-func TestItemJSONIncludesGroup(t *testing.T) {
-	got := itemToJSON(models.Item{ID: "item-1", Group: "v1"})
+func TestItemJSONDefaultOmitsTracesAndUsesEmptyArrays(t *testing.T) {
+	item := models.Item{ID: "item-1", Group: "v1"}
+	got, err := itemToJSONWithConversation(item, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got["group"] != "v1" {
-		t.Fatalf("group JSON = %#v, want v1", got["group"])
+		t.Fatalf("group = %#v", got["group"])
+	}
+	if len(got["conversation"].([]map[string]any)) != 0 {
+		t.Fatalf("conversation = %#v", got["conversation"])
+	}
+	if got["mentioned_items"] == nil || got["backlinks"] == nil {
+		t.Fatalf("empty links = %#v", got)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := wire["mentioned_items"].([]any); !ok {
+		t.Fatalf("mentioned_items is not an array: %s", encoded)
+	}
+	if _, ok := wire["backlinks"].([]any); !ok {
+		t.Fatalf("backlinks is not an array: %s", encoded)
 	}
 }
 
-func TestItemShowHelpDocumentsLongItemQueries(t *testing.T) {
+func TestItemJSONRejectsTraceLinkedToMissingTurn(t *testing.T) {
+	_, err := itemToJSONWithConversation(models.Item{ID: "item-1"}, nil, []models.PartialTrace{{
+		ID: "trace-1", TurnTimestamp: time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC), Content: "work",
+	}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "missing agent turn") {
+		t.Fatalf("missing turn error = %v", err)
+	}
+}
+
+func TestItemShowHelpDocumentsConversation(t *testing.T) {
 	for _, want := range []string{
-		"jq '.turns[-20:]'",
-		"select(.actor == \"user\")",
-		"--argjson turn 42",
-		"--include-partial",
-		"turn indexes are zero-based",
-		"provider progress",
-		"not a posted conversation turn",
-		"zero",
-		"no final agent turn was posted",
+		"conversation array", "user_message", "agent_reply", "activity",
+		"agent session starts", "--include-partial", "partial_trace",
+		"jq '.conversation[-20:]'",
 	} {
 		if !strings.Contains(itemShowCmd.Long, want) {
-			t.Errorf("item show help missing %q: %s", want, itemShowCmd.Long)
+			t.Errorf("item show help missing %q", want)
 		}
+	}
+}
+
+func captureCommandOutput(t *testing.T, run func() error) []byte {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = writer
+	t.Cleanup(func() { os.Stdout = original })
+	err = run()
+	os.Stdout = original
+	if closeErr := writer.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func captureJSONCommand(t *testing.T, run func() error) map[string]any {
+	t.Helper()
+	data := captureCommandOutput(t, run)
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("invalid command JSON: %v: %s", err, data)
+	}
+	return result
+}
+
+func TestItemShowJSONLoadsActivitiesAndOptInTraces(t *testing.T) {
+	project := t.TempDir()
+	s, err := store.NewStore(filepath.Join(project, ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := s.CreateItem(models.ChannelInbox, "Target title", "target", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "Source title", "See @"+target.ID, models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = s.AddTurn(item.ID, models.ActorAgent, "reply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddActivity(item.ID, models.Activity{
+		Type: store.ActivityAgentSessionStarted, Actor: models.ActorAgent,
+		Timestamp: item.Turns[0].Timestamp.Add(-time.Minute), Result: "codex",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendPartialTrace(item.ID, models.PartialTrace{
+		Timestamp:     item.Turns[0].Timestamp.Add(-time.Second),
+		TurnTimestamp: item.Turns[0].Timestamp, Status: "completed", Content: "working",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	previous := showFlags
+	t.Cleanup(func() { showFlags = previous })
+	showFlags.asJSON = true
+	showFlags.includePartial = false
+	plain := captureJSONCommand(t, func() error { return itemShowCmd.RunE(itemShowCmd, []string{item.ID}) })
+	conversation := plain["conversation"].([]any)
+	if len(conversation) != 2 || conversation[0].(map[string]any)["activity"] == nil || conversation[1].(map[string]any)["partial_trace"] != nil {
+		t.Fatalf("default conversation = %#v", conversation)
+	}
+	mentioned := plain["mentioned_items"].([]any)
+	if len(mentioned) != 1 || mentioned[0].(map[string]any)["title"] != "Target title" {
+		t.Fatalf("mentioned items = %#v", mentioned)
+	}
+	showFlags.includePartial = true
+	withTrace := captureJSONCommand(t, func() error { return itemShowCmd.RunE(itemShowCmd, []string{item.ID}) })
+	entries := withTrace["conversation"].([]any)
+	if len(entries) != 2 || entries[1].(map[string]any)["partial_trace"] == nil {
+		t.Fatalf("opt-in conversation = %#v", entries)
+	}
+}
+
+func TestItemJSONListIncludesActivitiesAndMentionFlags(t *testing.T) {
+	if itemAddCmd.Flags().Lookup("mentions") == nil || itemSuggestCmd.Flags().Lookup("mentions") == nil {
+		t.Fatal("item add and suggest must register --mentions")
+	}
+	if itemAddCmd.Flags().Lookup("related") != nil || itemSuggestCmd.Flags().Lookup("related") != nil {
+		t.Fatal("legacy --related flag remains")
+	}
+	project := t.TempDir()
+	s, err := store.NewStore(filepath.Join(project, ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "Source", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddActivity(item.ID, models.Activity{Type: store.ActivityAgentSessionStarted, Result: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	previous := listFlags
+	t.Cleanup(func() { listFlags = previous })
+	listFlags.asJSON = true
+	listFlags.channel, listFlags.status, listFlags.group = "", "", ""
+	data := captureCommandOutput(t, func() error { return itemListCmd.RunE(itemListCmd, nil) })
+	var out []map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("invalid list JSON: %v: %s", err, data)
+	}
+	if len(out) != 1 {
+		t.Fatalf("list = %#v", out)
+	}
+	conversation := out[0]["conversation"].([]any)
+	if len(conversation) != 1 || conversation[0].(map[string]any)["activity"].(map[string]any)["provider"] != "codex" {
+		t.Fatalf("list conversation = %#v", conversation)
+	}
+}
+
+func TestMentionFlagsCreateTextMentions(t *testing.T) {
+	project := t.TempDir()
+	s, err := store.NewStore(filepath.Join(project, ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := s.CreateItem(models.ChannelInbox, "Target", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	previousAdd, previousSuggest := addFlags, suggestFlags
+	t.Cleanup(func() { addFlags, suggestFlags = previousAdd, previousSuggest })
+	addFlags.channel = string(models.ChannelInbox)
+	addFlags.title, addFlags.body = "Source", "body"
+	addFlags.itype, addFlags.status = string(models.TypeThread), string(models.StatusActive)
+	addFlags.parent, addFlags.group = "", ""
+	addFlags.mentions = []string{target.ID}
+	id := strings.TrimSpace(string(captureCommandOutput(t, func() error { return itemAddCmd.RunE(itemAddCmd, nil) })))
+	added, err := s.GetItem(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(added.Mentions) != 1 || added.Mentions[0] != target.ID || !strings.Contains(added.Body, "@"+target.ID) {
+		t.Fatalf("item add mention = %+v", added)
+	}
+	suggestFlags.channel = string(models.ChannelInbox)
+	suggestFlags.title, suggestFlags.body, suggestFlags.mentions = "Proposal", "body", target.ID
+	id = strings.TrimSpace(string(captureCommandOutput(t, func() error { return itemSuggestCmd.RunE(itemSuggestCmd, nil) })))
+	suggested, err := s.GetItem(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(suggested.Mentions) != 1 || suggested.Mentions[0] != target.ID || !strings.Contains(suggested.Body, "@"+target.ID) {
+		t.Fatalf("item suggest mention = %+v", suggested)
 	}
 }
 

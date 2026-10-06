@@ -30,9 +30,6 @@ func itemContext(item models.Item) string {
 	if len(item.Mentions) > 0 {
 		sb.WriteString("mentions: " + strings.Join(item.Mentions, ", ") + "\n\n")
 	}
-	if len(item.Related) > 0 {
-		sb.WriteString("related (legacy): " + strings.Join(item.Related, ", ") + "\n\n")
-	}
 	sb.WriteString(item.Body)
 	for _, turn := range item.Turns {
 		sb.WriteString(fmt.Sprintf("\n\n--- %s · %s ---\n%s", turn.Actor, turn.Timestamp.Format(time.RFC3339), turn.Content))

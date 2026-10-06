@@ -341,14 +341,14 @@ func addItemReparentFlags() {
 // ── item add ─────────────────────────────────────────────────────────────────
 
 var addFlags struct {
-	channel string
-	title   string
-	body    string
-	itype   string
-	status  string
-	parent  string
-	group   string
-	related []string
+	channel  string
+	title    string
+	body     string
+	itype    string
+	status   string
+	parent   string
+	group    string
+	mentions []string
 }
 
 func addItemAddFlags() {
@@ -360,7 +360,7 @@ func addItemAddFlags() {
 	f.StringVarP(&addFlags.status, "status", "s", "active", "backlog|active|pending-user|archived")
 	f.StringVarP(&addFlags.parent, "parent", "p", "", "parent item ID")
 	f.StringVar(&addFlags.group, "group", "", "lowercase group slug for a new root (or none)")
-	f.StringSliceVar(&addFlags.related, "related", nil, "item IDs to mention (legacy flag name)")
+	f.StringSliceVar(&addFlags.mentions, "mentions", nil, "item IDs to mention")
 	itemAddCmd.MarkFlagRequired("channel")
 	itemAddCmd.MarkFlagRequired("title")
 	itemAddCmd.MarkFlagRequired("body")
@@ -383,8 +383,8 @@ var itemAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		for _, related := range addFlags.related {
-			if _, err := s.GetItem(related); err != nil {
+		for _, mentioned := range addFlags.mentions {
+			if _, err := s.GetItem(mentioned); err != nil {
 				return err
 			}
 		}
@@ -397,8 +397,8 @@ var itemAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		for _, related := range addFlags.related {
-			if _, err := s.AddMention(item.ID, related); err != nil {
+		for _, mentioned := range addFlags.mentions {
+			if _, err := s.AddMention(item.ID, mentioned); err != nil {
 				return err
 			}
 		}
@@ -408,26 +408,26 @@ var itemAddCmd = &cobra.Command{
 }
 
 var suggestFlags struct {
-	channel string
-	title   string
-	body    string
-	related string
+	channel  string
+	title    string
+	body     string
+	mentions string
 }
 
 var itemSuggestCmd = &cobra.Command{
-	Use:   "suggest --title <title> --body <body> --related <id>",
+	Use:   "suggest --title <title> --body <body> --mentions <id>",
 	Short: "Create a proposed item related to existing work",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s := mustStore()
-		if _, err := s.GetItem(suggestFlags.related); err != nil {
+		if _, err := s.GetItem(suggestFlags.mentions); err != nil {
 			return err
 		}
 		item, err := s.CreateItem(models.Channel(suggestFlags.channel), suggestFlags.title, suggestFlags.body, models.TypeThread, models.StatusProposed, "")
 		if err != nil {
 			return err
 		}
-		if _, err := s.AddMention(item.ID, suggestFlags.related); err != nil {
+		if _, err := s.AddMention(item.ID, suggestFlags.mentions); err != nil {
 			return err
 		}
 		fmt.Println(item.ID)
@@ -440,10 +440,10 @@ func init() {
 	f.StringVarP(&suggestFlags.channel, "channel", "c", string(models.ChannelInbox), "inbox")
 	f.StringVar(&suggestFlags.title, "title", "", "single-line label for list views (required)")
 	f.StringVar(&suggestFlags.body, "body", "", "opening description (required)")
-	f.StringVar(&suggestFlags.related, "related", "", "existing item ID to mention (required)")
+	f.StringVar(&suggestFlags.mentions, "mentions", "", "existing item ID to mention (required)")
 	itemSuggestCmd.MarkFlagRequired("title")
 	itemSuggestCmd.MarkFlagRequired("body")
-	itemSuggestCmd.MarkFlagRequired("related")
+	itemSuggestCmd.MarkFlagRequired("mentions")
 }
 
 // ── item list ────────────────────────────────────────────────────────────────
@@ -489,7 +489,22 @@ var itemListCmd = &cobra.Command{
 			return err
 		}
 		if listFlags.asJSON {
-			return json.NewEncoder(os.Stdout).Encode(itemsToJSON(items))
+			all, err := s.ListItems(store.ListOpts{})
+			if err != nil {
+				return err
+			}
+			activities := make(map[string][]models.Activity, len(items))
+			for _, item := range items {
+				activities[item.ID], err = s.ListActivities(item.ID)
+				if err != nil {
+					return err
+				}
+			}
+			out, err := itemsToJSON(items, itemTitles(all), activities)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(os.Stdout).Encode(out)
 		}
 		// Plain table
 		fmt.Printf("%-22s  %-8s  %-15s  %-16s  %s  %5s  %s\n", "ID", "Ch", "Status", "Group", "T", "Turns", "Preview")
@@ -521,21 +536,14 @@ func addItemShowFlags() {
 var itemShowCmd = &cobra.Command{
 	Use:   "show <id>",
 	Short: "Show an item and its conversation",
-	Long: `Show an item and its complete conversation. JSON output includes the full
-turns array. Retained provider partial traces are excluded unless
---include-partial is supplied. For long items, use jq to select only the
-context you need; turn indexes are zero-based. A retained provider trace
-(called a partial trace in the partial_traces JSON field) is provider progress
-output captured during a dispatch, such as reasoning or tool activity; it is
-not a posted conversation turn. It may be linked to a posted agent turn or be
-standalone when a run ends before a final response.
-In JSON, a non-zero turn_timestamp identifies the linked turn; a zero
-turn_timestamp means the trace is standalone and no final agent turn was posted.
+	Long: `Show an item and its complete conversation. JSON output has one
+chronological conversation array containing user_message, agent_reply, and
+activity entries. Activity includes agent session starts. --include-partial
+adds retained provider output as partial_trace: attached to an agent reply
+when one was posted, or as its own entry when the run had no reply.
 
-Examples:
-  ostraka item show <item-id> --json | jq '.turns[-20:]'
-  ostraka item show <item-id> --json | jq '[.turns[] | select(.actor == "user")]'
-  ostraka item show <item-id> --include-partial --json | jq --argjson turn 42 '. as $item | ($item.turns[$turn].timestamp) as $ts | $item | .partial_traces = [.partial_traces[] | select(.turn_timestamp == $ts)]'`,
+For a long conversation, select only what you need, for example:
+  ostraka item show <item-id> --json | jq '.conversation[-20:]'`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s := mustStore()
@@ -558,10 +566,19 @@ Examples:
 			if partialErr != nil {
 				return partialErr
 			}
-			if showFlags.includePartial {
-				return json.NewEncoder(os.Stdout).Encode(itemToJSONWithPartialTraces(item, partials))
+			activities, err := s.ListActivities(item.ID)
+			if err != nil {
+				return err
 			}
-			return json.NewEncoder(os.Stdout).Encode(itemToJSON(item))
+			all, err := s.ListItems(store.ListOpts{})
+			if err != nil {
+				return err
+			}
+			out, err := itemToJSONWithConversation(item, activities, partials, itemTitles(all))
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(os.Stdout).Encode(out)
 		}
 		fmt.Printf("── %s ──\n", item.ID)
 		fmt.Println(item.Title)
@@ -572,9 +589,6 @@ Examples:
 		}
 		if item.Parent != "" {
 			fmt.Println("parent:", item.Parent)
-		}
-		if len(item.Related) > 0 {
-			fmt.Println("related (legacy):", strings.Join(item.Related, ", "))
 		}
 		if len(item.Mentions) > 0 {
 			fmt.Println("mentions:", strings.Join(item.Mentions, ", "))
@@ -784,56 +798,4 @@ var itemRmCmd = &cobra.Command{
 		}
 		return s.DeleteItem(args[0])
 	},
-}
-
-// ── JSON helpers ─────────────────────────────────────────────────────────────
-
-func itemToJSON(item models.Item) map[string]any {
-	turns := make([]map[string]any, len(item.Turns))
-	for i, t := range item.Turns {
-		turns[i] = map[string]any{
-			"actor":     t.Actor,
-			"timestamp": t.Timestamp.Format(time.RFC3339Nano),
-			"content":   t.Content,
-		}
-	}
-	return map[string]any{
-		"id":        item.ID,
-		"channel":   item.Channel,
-		"type":      item.Type,
-		"status":    item.Status,
-		"created":   item.Created.Format(time.RFC3339Nano),
-		"parent":    item.Parent,
-		"group":     item.Group,
-		"related":   item.Related,
-		"mentions":  item.Mentions,
-		"backlinks": item.Backlinks,
-		"title":     item.Title,
-		"body":      item.Body,
-		"turns":     turns,
-	}
-}
-
-func itemToJSONWithPartialTraces(item models.Item, partials []models.PartialTrace) map[string]any {
-	out := itemToJSON(item)
-	traces := make([]map[string]any, len(partials))
-	for i, partial := range partials {
-		traces[i] = map[string]any{
-			"id":             partial.ID,
-			"timestamp":      partial.Timestamp.Format(time.RFC3339Nano),
-			"turn_timestamp": partial.TurnTimestamp.Format(time.RFC3339Nano),
-			"status":         partial.Status,
-			"content":        partial.Content,
-		}
-	}
-	out["partial_traces"] = traces
-	return out
-}
-
-func itemsToJSON(items []models.Item) []map[string]any {
-	out := make([]map[string]any, len(items))
-	for i, item := range items {
-		out[i] = itemToJSON(item)
-	}
-	return out
 }

@@ -13,8 +13,7 @@ import (
 )
 
 const bootstrapText = `Begin work on Ostraka item {{.ItemID}}.
-This is Ostraka's initial prompt for this item. The item context available to
-this dispatch is included below.
+The item context is below.
 
 {{.Orientation}}
 
@@ -106,87 +105,46 @@ activity, mention child content only where it justifies a conclusion, citing
 its ID instead of recapping it. If the batch changes nothing, say so in one
 sentence.`
 
-const agentOrientationText = `Ostraka is the threaded work interface around this coding-agent conversation.
-Treat an item as a durable work card, roughly like a Kanban card, whose turns
-are the conversation for that work. Direct subthreads carry parallel
-conversations alongside the current item, unless the user asks for a split.
+const agentOrientationText = `Ostraka items are durable work cards. Turns are their conversations; direct
+subthreads carry parallel work. Your normal harness progress is visible to the
+user, so use it for concise updates. A retained provider trace is captured
+progress from a dispatch, not a posted reply. Earlier traces are included in
+fresh-session context when available. Read the complete conversation,
+including traces, with:
+  ostraka item show <item-id> --include-partial --json
+A standalone partial_trace entry means the run ended without an agent reply.
+For long items, select only the needed conversation entries with jq.
 
-Your normal harness progress and partial responses are streamed into Ostraka
-and are visible to the user. Use them for concise progress updates. A retained
-provider trace, also called a partial trace in the JSON field "partial_traces",
-is provider progress output captured during an agent dispatch, such as
-reasoning or tool activity; it is not a posted conversation turn. It may be
-linked to a posted agent turn or stand alone when a run ends before a final
-response. Retained traces from earlier runs are included in fresh-session item
-context when available; the complete journal is queryable with "ostraka item
-show <item-id> --include-partial --json". Reserve the final Ostraka item reply
-for the substantive handoff that ends the dispatch.
+Use normal harness turns and tools while working. The item context below is
+available now; starting a new Ostraka turn alone does not require
+revalidation. Run checks when changed code, a failed or incomplete check, or
+the request warrants them. Do not repeat successful checks against unchanged
+inputs just to reorient.
 
-A standalone retained trace is a conversation hole: provider progress was
-emitted, but no final agent turn was posted for that dispatch. In JSON, a
-non-zero "turn_timestamp" links a trace to its posted agent turn; a zero
-"turn_timestamp" means the trace is standalone and has no posted response.
+Update the agent-curated project brief only for long-lived facts relevant to
+most items, using:
+  ostraka project brief replace --content-stdin
+Replace it
+completely, preserve useful existing facts, and keep it within 6000
+characters. Keep current work, decisions, plans, and item-specific findings on
+items. Link dependent items when narrower knowledge must persist.
 
-For long items, pipe the JSON through jq so only the needed portion enters
-context. Turn indexes are zero-based. Common queries:
-  ostraka item show <item-id> --json | jq '.turns[-20:]'
-  ostraka item show <item-id> --json | jq '[.turns[] | select(.actor == "user")]'
-  ostraka item show <item-id> --include-partial --json | jq --argjson turn 42 '. as $item | ($item.turns[$turn].timestamp) as $ts | $item | .partial_traces = [.partial_traces[] | select(.turn_timestamp == $ts)]'
+When finished, send one substantive final reply with the exact command below.
+It hands the item back and ends this dispatch. Pass real multiline content
+through stdin, never literal \\n text. For work spanning dispatches, finish a
+coherent slice and leave a handoff that makes the next dispatch easy to
+resume. Do not invent self-scheduling commands or fake user turns.
 
-Use your normal harness turns and tools while working. The initial prompt
-contains the item context available to this dispatch. Starting a new Ostraka
-turn does not by itself require revalidation. Run tests or linters when
-warranted by code or configuration changes made during this item, by a prior
-incomplete or failed check, or by the current request. Do not rerun a successful
-check against unchanged inputs merely to reorient. If this work establishes
-information that is both long-lived and broadly relevant to most items, update
-the agent-curated project brief with a complete replacement
-using ostraka project brief replace --content-stdin. The supervisor includes the
-brief when initiating every item, so it is for global project context such as
-the project description, goals, and norms—not a log of recent changes. Do not
-add medium-duration state (for example, current work or a recently fixed
-decision), item-specific findings, temporary state, implementation plans, or
-recommendations. If knowledge should outlive this item but only matters to a
-subset of work, preserve its provenance by linking dependent items to the item
-that established it where the item model supports that; do not duplicate it in
-the brief. Preserve useful existing facts, keep the brief concise and factual,
-and keep it within the 6000-character limit.
-
-When finished, send one final Ostraka item reply using the exact command below.
-Do not send that reply as a progress acknowledgement: it hands the item back to
-the user and ends this dispatch. Pass real multiline content through stdin;
-never put literal \n text in the reply.
-
-For work likely to exceed one dispatch, prefer bounded checkpoints: finish a
-coherent slice, leave a concise substantive handoff describing what remains,
-and make the next dispatch easy to resume from the item and working tree. Do
-not invent self-scheduling commands or fake user turns; use a self-scheduling
-or loop facility only when the prompt explicitly provides one.
-
-Threading guidance: keep supporting explanation and sequential work in the
-current item, even when it takes several turns or waits for user input. Ask
-questions that block this item's progress here. Create a direct subthread only
-when both the current item and proposed child would carry distinct active
-discussions, or when the user asks for a split. If the current item would wait
-for the child and then resume, or have nothing left to discuss after the child
-is created, continue here instead unless the user requested the split. This
-applies to roots and children alike.
-An earlier plan to create an item does not require a split after the user gives
-a go-ahead for the work, unless they ask for a separate item. For a parallel
-in-scope branch, use "ostraka item add --parent <root-or-child-id>
---channel inbox --status pending-user
---title <one-line-title> --body <self-contained-question>".
-Every new item has its own provider session and starts without this
-conversation. Write its title and body for that cold start: include the
-context, constraints, prior decisions, and desired outcome needed to act, but
-omit unrelated history.
-Creating from a child attaches a sibling; never create a grandchild. Use
-pending-user for a parallel question to the user and backlog when parking a
-parallel branch. Continue sequential follow-on work in the current item; after
-a child closes, the root reconciles its result and carries on any next work
-there. For work outside this item's scope, suggest a related item with
-"ostraka item suggest --related <item-id> ..."; proposals
-need the user's keep/start decision before they become active work.
+Keep sequential work and blocking questions on this item. Create a direct
+subthread only when it and this item will have distinct active discussions, or
+when the user asks for a split. A child created from a child becomes its
+sibling. New items have independent sessions and must be understandable from
+their own title and body. For a parallel in-scope branch, use:
+  ostraka item add --parent <root-or-child-id> --channel inbox --status pending-user --title <one-line-title> --body <self-contained-question>
+Use backlog when parking a branch. The root reconciles closed children. For
+out-of-scope work, suggest a related item with:
+  ostraka item suggest --mentions <item-id> ...
+The user decides whether to keep or start it.
 
 Final reply command:
 {{.ReplyCommand}}`

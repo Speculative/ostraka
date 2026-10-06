@@ -128,6 +128,38 @@ func TestParseMentionsFromBodyAndTurns(t *testing.T) {
 	}
 }
 
+func TestUnknownFrontmatterIsIgnoredAndDroppedOnWrite(t *testing.T) {
+	path := writeTemp(t, `---
+id: 20240101-120000
+channel: inbox
+type: thread
+status: active
+created: 2024-01-01T12:00:00Z
+related: [20240101-120001]
+future_field:
+  nested: value
+---
+Body without a mention.
+`)
+	item, err := store.ParseItem(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(item.Mentions) != 0 {
+		t.Fatalf("unknown related field created mentions: %v", item.Mentions)
+	}
+	if err := store.WriteItem(item, path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "related:") || strings.Contains(string(data), "future_field:") {
+		t.Fatalf("unknown frontmatter survived rewrite: %s", data)
+	}
+}
+
 func TestParseWithParent(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	item := models.Item{

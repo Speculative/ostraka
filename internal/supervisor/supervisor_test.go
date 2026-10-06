@@ -98,13 +98,13 @@ func TestDispatchStartsFreshThenResumesPerItem(t *testing.T) {
 	if fh.calls[2] != "session-a" {
 		t.Errorf("third dispatch should resume item-1's session, got %q", fh.calls[2])
 	}
-	if !strings.Contains(fh.prompts[0], "Ostraka's initial prompt for this item") {
+	if !strings.Contains(fh.prompts[0], "Begin work on Ostraka item") {
 		t.Errorf("fresh dispatch did not use the bootstrap prompt: %q", fh.prompts[0])
 	}
 	if !strings.Contains(fh.prompts[2], "continues the conversation") {
 		t.Errorf("resumed dispatch did not use the continuation prompt: %q", fh.prompts[2])
 	}
-	if strings.Contains(fh.prompts[2], "initial prompt for this item") {
+	if strings.Contains(fh.prompts[2], "Begin work on Ostraka item") {
 		t.Errorf("resumed dispatch incorrectly used session-start wording: %q", fh.prompts[2])
 	}
 
@@ -162,7 +162,7 @@ func TestDispatchRotatesStaleSessionAndKeepsSelection(t *testing.T) {
 	if fh.models[0] != "opus" || fh.efforts[0] != "xhigh" {
 		t.Errorf("selection = (%q, %q), want (opus, xhigh)", fh.models[0], fh.efforts[0])
 	}
-	if !strings.Contains(fh.prompts[0], "Ostraka's initial prompt for this item") {
+	if !strings.Contains(fh.prompts[0], "Begin work on Ostraka item") {
 		t.Errorf("rotated dispatch did not use the bootstrap prompt: %q", fh.prompts[0])
 	}
 	fh.mu.Unlock()

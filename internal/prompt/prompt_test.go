@@ -16,14 +16,13 @@ func TestBootstrapIntroducesItemWithoutReinitializingHarness(t *testing.T) {
 	normalized := normalizeWhitespace(got)
 	for _, want := range []string{
 		"Begin work on Ostraka item item-1",
-		"Ostraka's initial prompt for this item",
-		"item context available to this dispatch",
+		"The item context is below",
 		"full item context",
 		"instructions",
 		"brief",
 		command,
-		"Starting a new Ostraka turn does not by itself require revalidation",
-		"bounded checkpoints",
+		"starting a new Ostraka turn alone does not require revalidation",
+		"finish a coherent slice",
 		"self-scheduling commands",
 	} {
 		if !strings.Contains(normalized, want) {
@@ -210,60 +209,26 @@ func TestPromptIncludesReparentActivityRoots(t *testing.T) {
 
 func TestAgentOrientationIncludesExactReplyCommand(t *testing.T) {
 	command := "go run ./cmd/ostraka item turn <item-id> --actor agent --content-stdin"
-	got := AgentOrientation(command)
-	normalized := normalizeWhitespace(got)
+	got := normalizeWhitespace(AgentOrientation(command))
 	for _, want := range []string{
 		command,
-		"real multiline content",
 		"ends this dispatch",
 		"project brief replace --content-stdin",
-		"complete replacement",
-		"both long-lived and broadly relevant to most items",
-		"supervisor includes the brief when initiating every item",
-		"project description, goals, and norms",
-		"not a log of recent changes",
-		"medium-duration state",
-		"recently fixed decision",
-		"item-specific findings",
-		"only matters to a subset of work",
-		"linking dependent items to the item that established it",
-		"do not duplicate it in the brief",
-		"threaded work interface",
-		"durable work card, roughly like a Kanban card",
-		"normal harness progress and partial responses are streamed into Ostraka",
-		"A retained provider trace",
-		"partial trace in the JSON field",
-		"not a posted conversation turn",
-		"stand alone when a run ends before a final response",
-		"Retained traces from earlier runs",
-		"A standalone retained trace is a conversation hole",
-		"no final agent turn was posted",
-		"non-zero \"turn_timestamp\" links a trace",
-		"zero \"turn_timestamp\" means the trace is standalone",
+		"within 6000 characters",
 		"ostraka item show <item-id> --include-partial --json",
-		"partial_traces",
-		"pipe the JSON through jq",
-		"Turn indexes are zero-based",
-		"jq '.turns[-20:]'",
-		"--argjson turn 42",
-		"Starting a new Ostraka turn does not by itself require revalidation",
-		"Do not rerun a successful check against unchanged inputs merely to reorient",
-		"Every new item has its own provider session",
-		"starts without this conversation",
-		"Write its title and body for that cold start",
-		"context, constraints, prior decisions, and desired outcome needed to act",
-		"omit unrelated history",
+		"standalone partial_trace entry",
+		"agent reply",
+		"starting a new Ostraka turn alone does not require revalidation",
+		"New items have independent sessions",
+		"ostraka item suggest --mentions <item-id>",
 	} {
-		if !strings.Contains(normalized, want) {
-			t.Fatalf("orientation missing %q: %q", want, got)
+		if !strings.Contains(got, want) {
+			t.Errorf("orientation missing %q", want)
 		}
 	}
-	if !strings.Contains(got, "Final reply command:") {
-		t.Fatalf("orientation omitted guidance: %q", got)
-	}
-	for _, unwanted := range []string{"complete item context", "only agent currently working"} {
-		if strings.Contains(normalized, unwanted) {
-			t.Fatalf("orientation unexpectedly contains %q: %q", unwanted, got)
+	for _, unwanted := range []string{"turn_timestamp", "--argjson turn 42", "partial_traces", "jq '.turns[-20:]'"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("orientation still includes %q", unwanted)
 		}
 	}
 }
@@ -271,8 +236,8 @@ func TestAgentOrientationIncludesExactReplyCommand(t *testing.T) {
 func TestThreadingGuidanceKeepsSequentialConversationInOneItem(t *testing.T) {
 	got := normalizeWhitespace(AgentOrientation("reply"))
 	for _, want := range []string{
-		"current item and proposed child",
-		"questions that block this item's progress",
+		"it and this item will have distinct active discussions",
+		"blocking questions on this item",
 		"when the user asks for a split",
 	} {
 		if !strings.Contains(got, want) {

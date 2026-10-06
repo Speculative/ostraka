@@ -23,15 +23,14 @@ var attributionRe = regexp.MustCompile(`^\*\*(\w+) · (.+?)\*\*$`)
 var mentionRe = regexp.MustCompile(`(^|[^A-Za-z0-9_-])@([A-Za-z0-9]+(-[A-Za-z0-9]+)*)`)
 
 type frontmatter struct {
-	ID      string   `yaml:"id"`
-	Channel string   `yaml:"channel"`
-	Type    string   `yaml:"type"`
-	Status  string   `yaml:"status"`
-	Created string   `yaml:"created"`
-	Parent  string   `yaml:"parent,omitempty"`
-	Group   string   `yaml:"group,omitempty"`
-	Related []string `yaml:"related,omitempty"`
-	Title   string   `yaml:"title,omitempty"`
+	ID      string `yaml:"id"`
+	Channel string `yaml:"channel"`
+	Type    string `yaml:"type"`
+	Status  string `yaml:"status"`
+	Created string `yaml:"created"`
+	Parent  string `yaml:"parent,omitempty"`
+	Group   string `yaml:"group,omitempty"`
+	Title   string `yaml:"title,omitempty"`
 }
 
 // titleMaxLen bounds a derived title. Only items written before title existed
@@ -190,7 +189,6 @@ func ParseItem(path string) (models.Item, error) {
 		Created: created,
 		Parent:  fm.Parent,
 		Group:   fm.Group,
-		Related: append([]string(nil), fm.Related...),
 		Title:   title,
 		Body:    itemBody,
 		Turns:   turns,
@@ -216,7 +214,6 @@ func WriteItem(item models.Item, path string) error {
 		Status:  string(item.Status),
 		Created: item.Created.UTC().Format(time.RFC3339Nano),
 		Parent:  item.Parent,
-		Related: append([]string(nil), item.Related...),
 		Title:   item.Title,
 	}
 	if item.Parent == "" {

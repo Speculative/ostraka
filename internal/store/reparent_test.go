@@ -18,15 +18,10 @@ func TestReparentSubthreadPreservesItemAndActivityHistory(t *testing.T) {
 	if _, err := s.AddMention(child.ID, newRoot.ID); err != nil {
 		t.Fatal(err)
 	}
-	childWithRelation, err := s.GetItem(child.ID)
-	if err != nil {
+	if _, err := s.AddMention(child.ID, oldRoot.ID); err != nil {
 		t.Fatal(err)
 	}
-	childWithRelation.Related = []string{oldRoot.ID}
 	path := filepath.Join(s.Root, "INBOX", child.ID+".md")
-	if err := store.WriteItem(childWithRelation, path); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := s.AddTurn(child.ID, models.ActorUser, "keep this turn"); err != nil {
 		t.Fatal(err)
 	}
@@ -55,8 +50,8 @@ func TestReparentSubthreadPreservesItemAndActivityHistory(t *testing.T) {
 	if moved.Body != before.Body || len(moved.Turns) != 1 || moved.Turns[0].Content != "keep this turn" {
 		t.Fatalf("moved conversation changed: %+v", moved)
 	}
-	if len(moved.Related) != 1 || moved.Related[0] != oldRoot.ID || len(moved.Mentions) != 1 || moved.Mentions[0] != newRoot.ID {
-		t.Fatalf("moved relations changed: related=%v mentions=%v", moved.Related, moved.Mentions)
+	if len(moved.Mentions) != 2 || moved.Mentions[0] != newRoot.ID || moved.Mentions[1] != oldRoot.ID {
+		t.Fatalf("moved mentions changed: %v", moved.Mentions)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("child path after move: %v", err)

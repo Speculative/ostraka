@@ -81,9 +81,9 @@ func TestPrepareGroupedArchiveExpandsArchivedFamily(t *testing.T) {
 
 func TestPrepareGroupedArchiveDoesNotTreatRelatedRootAsChild(t *testing.T) {
 	created := time.Date(2026, 8, 17, 5, 0, 0, 0, time.UTC)
-	root := models.Item{ID: "root", Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created, Title: "Root", Related: []string{"related"}}
+	root := models.Item{ID: "root", Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created, Title: "Root", Mentions: []string{"related"}}
 	child := models.Item{ID: "child", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(time.Minute), Title: "Child"}
-	related := models.Item{ID: "related", Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(2 * time.Minute), Title: "Related", Related: []string{root.ID}}
+	related := models.Item{ID: "related", Channel: models.ChannelInbox, Status: models.StatusArchived, Created: created.Add(2 * time.Minute), Title: "Related", Mentions: []string{root.ID}}
 
 	items, _ := archiveView.prepareGrouped([]models.Item{root, child, related}, false, nil)
 	if len(items) != 2 {

@@ -1,12 +1,10 @@
 package store_test
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Speculative/ostraka/internal/models"
-	"github.com/Speculative/ostraka/internal/store"
 )
 
 func TestSubthreadsStayOneLevelAndCreateActivity(t *testing.T) {
@@ -83,22 +81,6 @@ func TestCannotCreateSubthreadUnderTerminalRoot(t *testing.T) {
 	}
 }
 
-func TestRelatedItemsUnionBacklinks(t *testing.T) {
-	s := newTestStore(t)
-	a, _ := s.CreateItem(models.ChannelInbox, "a", "a", models.TypeThread, models.StatusActive, "")
-	b, _ := s.CreateItem(models.ChannelInbox, "b", "b", models.TypeThread, models.StatusActive, "")
-	if _, err := s.AddRelated(a.ID, b.ID); err != nil {
-		t.Fatal(err)
-	}
-	related, err := s.RelatedItems(b.ID)
-	if err != nil || len(related) != 1 || related[0].ID != a.ID {
-		t.Fatalf("related to b = %+v, err=%v", related, err)
-	}
-	if _, err := s.AddRelated(a.ID, a.ID); err == nil {
-		t.Fatal("self relation accepted")
-	}
-}
-
 func TestMentionsAreDirectedAndMayUseChildren(t *testing.T) {
 	s := newTestStore(t)
 	root, _ := s.CreateItem(models.ChannelInbox, "root", "root body", models.TypeThread, models.StatusActive, "")
@@ -133,33 +115,5 @@ func TestMentionsAreDirectedAndMayUseChildren(t *testing.T) {
 	backlinks, err := s.BacklinkItems(other.ID)
 	if err != nil || len(backlinks) != 1 || backlinks[0].ID != child.ID {
 		t.Fatalf("backlinks = %+v, err=%v", backlinks, err)
-	}
-	if related, err := s.RelatedItems(other.ID); err != nil || len(related) != 1 || related[0].ID != child.ID {
-		t.Fatalf("compatibility related = %+v, err=%v", related, err)
-	}
-}
-
-func TestLegacyRelatedFrontmatterRemainsReadable(t *testing.T) {
-	s := newTestStore(t)
-	a, _ := s.CreateItem(models.ChannelInbox, "a", "a", models.TypeThread, models.StatusActive, "")
-	b, _ := s.CreateItem(models.ChannelInbox, "b", "b", models.TypeThread, models.StatusActive, "")
-
-	path := filepath.Join(s.Root, "INBOX", a.ID+".md")
-	item, err := store.ParseItem(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	item.Related = []string{b.ID}
-	if err := store.WriteItem(item, path); err != nil {
-		t.Fatal(err)
-	}
-
-	mentioned, err := s.MentionedItems(a.ID)
-	if err != nil || len(mentioned) != 1 || mentioned[0].ID != b.ID {
-		t.Fatalf("legacy mentions = %+v, err=%v", mentioned, err)
-	}
-	backlinks, err := s.BacklinkItems(b.ID)
-	if err != nil || len(backlinks) != 1 || backlinks[0].ID != a.ID {
-		t.Fatalf("legacy backlinks = %+v, err=%v", backlinks, err)
 	}
 }

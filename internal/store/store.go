@@ -186,7 +186,7 @@ func (s *Store) listOnce(opts ListOpts) (items []models.Item, unstable bool, err
 	// not hide the source of a backlink.
 	byMentionedID := make(map[string][]string)
 	for _, item := range parsed {
-		for _, mentionedID := range outgoingMentionIDs(item) {
+		for _, mentionedID := range item.Mentions {
 			byMentionedID[mentionedID] = appendUnique(byMentionedID[mentionedID], item.ID)
 		}
 	}
@@ -544,14 +544,7 @@ func (s *Store) AddMention(firstID, secondID string) (models.Item, error) {
 	return first, nil
 }
 
-// AddRelated is the compatibility name used by the existing CLI and TUI.
-// New code should prefer AddMention, which makes the direction explicit.
-func (s *Store) AddRelated(firstID, secondID string) (models.Item, error) {
-	return s.AddMention(firstID, secondID)
-}
-
-// MentionedItems returns the items named by id's outgoing @mentions. Legacy
-// related frontmatter is included as a compatibility source of outgoing IDs.
+// MentionedItems returns the items named by id's outgoing @mentions.
 func (s *Store) MentionedItems(id string) ([]models.Item, error) {
 	item, err := s.GetItem(id)
 	if err != nil {
@@ -562,7 +555,7 @@ func (s *Store) MentionedItems(id string) ([]models.Item, error) {
 		return nil, err
 	}
 	ids := make(map[string]bool)
-	for _, mentionedID := range outgoingMentionIDs(item) {
+	for _, mentionedID := range item.Mentions {
 		ids[mentionedID] = true
 	}
 	return itemsWithIDs(all, ids), nil
@@ -581,43 +574,11 @@ func (s *Store) BacklinkItems(id string) ([]models.Item, error) {
 	}
 	ids := make(map[string]bool)
 	for _, candidate := range all {
-		if contains(outgoingMentionIDs(candidate), id) {
+		if contains(candidate.Mentions, id) {
 			ids[candidate.ID] = true
 		}
 	}
 	return itemsWithIDs(all, ids), nil
-}
-
-// RelatedItems preserves the old symmetric traversal API by returning the
-// union of outgoing mentions and backlinks. New callers that care about
-// presentation direction should use MentionedItems and BacklinkItems.
-func (s *Store) RelatedItems(id string) ([]models.Item, error) {
-	if _, err := s.GetItem(id); err != nil {
-		return nil, err
-	}
-	all, err := s.ListItems(ListOpts{})
-	if err != nil {
-		return nil, err
-	}
-	ids := make(map[string]bool)
-	item, _ := s.GetItem(id)
-	for _, related := range outgoingMentionIDs(item) {
-		ids[related] = true
-	}
-	for _, candidate := range all {
-		if contains(outgoingMentionIDs(candidate), id) {
-			ids[candidate.ID] = true
-		}
-	}
-	return itemsWithIDs(all, ids), nil
-}
-
-func outgoingMentionIDs(item models.Item) []string {
-	ids := append([]string(nil), item.Mentions...)
-	for _, legacyID := range item.Related {
-		ids = appendUnique(ids, legacyID)
-	}
-	return ids
 }
 
 func itemsWithIDs(items []models.Item, ids map[string]bool) []models.Item {
