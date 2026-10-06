@@ -61,6 +61,8 @@ func TestBacklogMoveModePersistsFamilyPriority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	initialOrder := append([]string(nil), order...)
+	m.backlogOrder = append([]string(nil), order...)
 	m.items, _ = m.view.prepareGroupedWithOrder(all, true, m.collapsed, order)
 	m.selected = 1 // b
 
@@ -78,14 +80,24 @@ func TestBacklogMoveModePersistsFamilyPriority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{a.ID, c.ID, b.ID}; !reflect.DeepEqual(order, want) {
-		t.Fatalf("order after j = %v, want a,c,b", order)
+	if !reflect.DeepEqual(order, initialOrder) {
+		t.Fatalf("persisted order after preview = %v, want unchanged %v", order, initialOrder)
+	}
+	if want := []string{a.ID, c.ID, b.ID}; !reflect.DeepEqual(itemIDs(m.items), want) {
+		t.Fatalf("preview order after j = %v, want a,c,b", itemIDs(m.items))
 	}
 
 	next, _ = m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
 	m = next.(model)
 	if m.backlogMoveMode {
 		t.Fatal("v did not leave backlog move mode")
+	}
+	order, err = s.BacklogOrder()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{a.ID, c.ID, b.ID}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("committed order = %v, want a,c,b", order)
 	}
 }
 

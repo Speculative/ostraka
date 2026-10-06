@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -86,6 +87,31 @@ func (s *Store) MoveBacklogRoot(id string, delta int) (models.Item, error) {
 		return models.Item{}, err
 	}
 	return item, nil
+}
+
+// SetBacklogOrder persists a complete ordering of the current backlog roots.
+// Requiring a full permutation prevents a stale TUI preview from dropping a
+// root that entered backlog while the preview was open.
+func (s *Store) SetBacklogOrder(ids []string) error {
+	items, err := s.ListItems(ListOpts{})
+	if err != nil {
+		return err
+	}
+	roots := backlogRoots(items)
+	if len(ids) != len(roots) {
+		return fmt.Errorf("backlog order has %d roots, want %d", len(ids), len(roots))
+	}
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := roots[id]; !ok {
+			return fmt.Errorf("item %q is not a backlog root", id)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("backlog order contains duplicate root %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return s.writeBacklogOrder(ids)
 }
 
 func errNotRootBacklog(id string) error {

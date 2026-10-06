@@ -188,8 +188,46 @@ func (v listView) prepareGroupedWithOrder(all []models.Item, showBacklog bool, c
 	for i, id := range backlogOrder {
 		backlogPositions[id] = i
 	}
+	type familySortInfo struct {
+		rank     int
+		activity time.Time
+	}
+	sortInfo := make(map[string]familySortInfo, len(families))
+	for _, family := range families {
+		info := familySortInfo{rank: rankOf(family.root.Status), activity: lastActivity(family.root)}
+		if v.archive {
+			info.rank = memberRank(family.members)
+			info.activity = time.Time{}
+			for _, item := range family.members {
+				if activity := lastActivity(item); activity.After(info.activity) {
+					info.activity = activity
+				}
+			}
+		}
+		sortInfo[family.key] = info
+	}
+	if !v.archive {
+		// Family rank and activity used to scan every item from inside the sort
+		// comparator. Aggregate them once so list preparation stays O(items +
+		// families log families), including during local backlog previews.
+		for _, item := range all {
+			key := rootID(item)
+			info, ok := sortInfo[key]
+			if !ok {
+				continue
+			}
+			if rank := rankOf(item.Status); rank < info.rank {
+				info.rank = rank
+			}
+			if activity := lastActivity(item); activity.After(info.activity) {
+				info.activity = activity
+			}
+			sortInfo[key] = info
+		}
+	}
 	sort.SliceStable(families, func(i, j int) bool {
-		ri, rj := v.familyRank(families[i].key, families[i].root, families[i].members, all), v.familyRank(families[j].key, families[j].root, families[j].members, all)
+		left, right := sortInfo[families[i].key], sortInfo[families[j].key]
+		ri, rj := left.rank, right.rank
 		if ri != rj {
 			return ri < rj
 		}
@@ -203,7 +241,7 @@ func (v listView) prepareGroupedWithOrder(all []models.Item, showBacklog bool, c
 				return iok
 			}
 		}
-		ai, aj := v.familyActivity(families[i].key, families[i].root, families[i].members, all), v.familyActivity(families[j].key, families[j].root, families[j].members, all)
+		ai, aj := left.activity, right.activity
 		if !ai.Equal(aj) {
 			return ai.After(aj)
 		}
@@ -274,23 +312,28 @@ func memberRank(items []models.Item) int {
 	return rank
 }
 
-func (v listView) familyActivity(key string, root models.Item, visible, all []models.Item) time.Time {
-	if v.archive {
-		latest := time.Time{}
-		for _, item := range visible {
-			if lastActivity(item).After(latest) {
-				latest = lastActivity(item)
-			}
+type familySummary struct {
+	hasChildren bool
+	open        int
+	done        int
+}
+
+func summarizeFamilies(items []models.Item) map[string]familySummary {
+	summaries := make(map[string]familySummary)
+	for _, item := range items {
+		key := rootID(item)
+		summary := summaries[key]
+		if item.Parent != "" {
+			summary.hasChildren = true
 		}
-		return latest
-	}
-	latest := lastActivity(root)
-	for _, item := range all {
-		if rootID(item) == key && lastActivity(item).After(latest) {
-			latest = lastActivity(item)
+		if models.TerminalStatuses[item.Status] {
+			summary.done++
+		} else if item.ID != key {
+			summary.open++
 		}
+		summaries[key] = summary
 	}
-	return latest
+	return summaries
 }
 
 func familyCounts(root models.Item, all []models.Item) (open, done int) {

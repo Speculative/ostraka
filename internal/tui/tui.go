@@ -264,20 +264,22 @@ type model struct {
 	showBacklog                  bool
 	backlogVisibilityInitialized bool
 	// hiddenBacklog is how many items the current view is suppressing.
-	hiddenBacklog int
-	items         []models.Item
-	allItems      []models.Item
-	backlogOrder  []string
-	searchIndex   map[string]string
-	selected      int
+	hiddenBacklog   int
+	items           []models.Item
+	allItems        []models.Item
+	familySummaries map[string]familySummary
+	backlogOrder    []string
+	searchIndex     map[string]string
+	selected        int
 	// itemsLoadGeneration identifies the newest asynchronous list load. A
 	// filesystem event can start a second load before the first one returns;
 	// older results must not repaint over a newer synchronous or async refresh.
 	itemsLoadGeneration uint64
 	// backlogMoveMode turns j/k into explicit priority changes for the
-	// selected backlog family. It is transient UI state; the order itself lives
-	// in the store.
-	backlogMoveMode bool
+	// selected backlog family. backlogMoveOrder is a local preview that is
+	// persisted once when the user commits the move.
+	backlogMoveMode  bool
+	backlogMoveOrder []string
 	// selectedByView remembers the item cursor independently for each list
 	// view. Switching views clears items while the next asynchronous load is
 	// pending, so the row index alone cannot restore the prior selection.
@@ -624,6 +626,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if msg.allItems != nil {
 			m.allItems = msg.allItems
+			m.familySummaries = summarizeFamilies(msg.allItems)
+			if m.backlogMoveMode {
+				m.backlogMoveOrder = rebaseBacklogMoveOrder(m.backlogMoveOrder, msg.backlogOrder)
+			}
 			m.backlogOrder = msg.backlogOrder
 			m.searchIndex = buildItemSearchIndex(msg.allItems)
 		}
@@ -985,9 +991,10 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.backlogMoveMode {
 		switch {
-		case msg.String() == "v" || msg.String() == "enter" || msg.String() == "esc":
-			m.backlogMoveMode = false
-			return m, nil
+		case msg.String() == "v" || msg.String() == "enter":
+			return m.finishBacklogMove(true)
+		case msg.String() == "esc":
+			return m.finishBacklogMove(false)
 		case msg.Type == tea.KeyUp || msg.Type == tea.KeyShiftUp || msg.String() == "k":
 			return m.moveBacklogRoot(-1)
 		case msg.Type == tea.KeyDown || msg.Type == tea.KeyShiftDown || msg.String() == "j":
@@ -1298,6 +1305,7 @@ func (m model) toggleBacklogMoveMode() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.backlogMoveMode = true
+	m.backlogMoveOrder = append([]string(nil), m.backlogOrder...)
 	m.focus = focusItemList
 	m.convSelection = -1
 	m.err = nil
@@ -1362,20 +1370,104 @@ func (m model) backlogPriorityError() error {
 func (m model) moveBacklogRoot(delta int) (tea.Model, tea.Cmd) {
 	root, ok := m.selectedBacklogRoot()
 	if !ok {
+		selectedID := m.selectedID()
 		m.backlogMoveMode = false
+		m.backlogMoveOrder = nil
+		m.items, m.hiddenBacklog = m.prepareVisibleItems(m.allItems)
+		m.restoreSelection(selectedID)
+		m.updateConv()
 		m.err = m.backlogPriorityError()
 		return m, nil
 	}
 	selectedID := m.selectedID()
-	if _, err := m.store.MoveBacklogRoot(root, delta); err != nil {
-		m.err = err
+	index := -1
+	for i, id := range m.backlogMoveOrder {
+		if id == root {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		m.backlogMoveOrder = append(m.backlogMoveOrder, root)
+		index = len(m.backlogMoveOrder) - 1
+	}
+	target := index + delta
+	if delta == 0 || target < 0 || target >= len(m.backlogMoveOrder) {
 		return m, nil
 	}
+	m.backlogMoveOrder[index], m.backlogMoveOrder[target] = m.backlogMoveOrder[target], m.backlogMoveOrder[index]
 	m.err = nil
-	m.reload()
+	m.items, m.hiddenBacklog = m.prepareVisibleItems(m.allItems)
 	m.restoreSelection(selectedID)
-	m.updateConv()
 	return m, nil
+}
+
+func (m model) finishBacklogMove(commit bool) (tea.Model, tea.Cmd) {
+	selectedID := m.selectedID()
+	if commit && !equalIDs(m.backlogMoveOrder, m.backlogOrder) {
+		if m.store == nil {
+			m.err = fmt.Errorf("cannot save backlog order without a store")
+			return m, nil
+		}
+		if err := m.store.SetBacklogOrder(m.backlogMoveOrder); err != nil {
+			m.err = err
+			return m, nil
+		}
+		m.backlogOrder = append([]string(nil), m.backlogMoveOrder...)
+	}
+	m.backlogMoveMode = false
+	m.backlogMoveOrder = nil
+	m.err = nil
+	if !commit {
+		m.items, m.hiddenBacklog = m.prepareVisibleItems(m.allItems)
+		m.restoreSelection(selectedID)
+		if m.selectedID() != m.convItemID {
+			m.updateConv()
+		}
+	}
+	return m, nil
+}
+
+func equalIDs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// rebaseBacklogMoveOrder carries the user's preview over a fresh store load.
+// Roots that left backlog disappear; newly parked roots follow the latest
+// persisted order until the user moves them.
+func rebaseBacklogMoveOrder(preview, latest []string) []string {
+	eligible := make(map[string]struct{}, len(latest))
+	for _, id := range latest {
+		eligible[id] = struct{}{}
+	}
+	out := make([]string, 0, len(latest))
+	seen := make(map[string]struct{}, len(latest))
+	for _, id := range preview {
+		if _, ok := eligible[id]; !ok {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, id := range latest {
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func (m model) beginReparent() (tea.Model, tea.Cmd) {
@@ -2152,6 +2244,10 @@ func (m *model) reload() {
 		return
 	}
 	m.allItems = items
+	m.familySummaries = summarizeFamilies(items)
+	if m.backlogMoveMode {
+		m.backlogMoveOrder = rebaseBacklogMoveOrder(m.backlogMoveOrder, backlogOrder)
+	}
 	m.backlogOrder = backlogOrder
 	m.searchIndex = buildItemSearchIndex(items)
 	m.items, m.hiddenBacklog = m.prepareVisibleItems(items)
@@ -2518,7 +2614,11 @@ func (m model) filterVisible() bool {
 }
 
 func (m model) prepareVisibleItems(all []models.Item) ([]models.Item, int) {
-	return m.view.prepareGroupedWithOrder(filterItemsIndexed(all, m.filterQuery, m.searchIndex), m.showBacklog, m.collapsed, m.backlogOrder)
+	order := m.backlogOrder
+	if m.backlogMoveMode {
+		order = m.backlogMoveOrder
+	}
+	return m.view.prepareGroupedWithOrder(filterItemsIndexed(all, m.filterQuery, m.searchIndex), m.showBacklog, m.collapsed, order)
 }
 
 // applyListFilter reapplies the current query synchronously. Search changes
@@ -2529,6 +2629,7 @@ func (m *model) applyListFilter() {
 		// Unit-level and pre-load models may only have a visible slice. Keep a
 		// copy as the source so clearing a query can restore it.
 		m.allItems = append([]models.Item(nil), m.items...)
+		m.familySummaries = summarizeFamilies(m.allItems)
 	}
 	if m.searchIndex == nil {
 		m.searchIndex = buildItemSearchIndex(m.allItems)
@@ -3196,7 +3297,7 @@ func (m model) renderFooter() string {
 			break
 		}
 		if m.backlogMoveMode {
-			text = "j/k move backlog  v/enter/esc finish"
+			text = "j/k preview move  enter/v commit  esc cancel"
 			break
 		}
 		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
@@ -3311,7 +3412,7 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 		if item.Parent != "" {
 			indent = "  ├─ "
 		} else if m.hasChildren(item.ID) {
-			open, done := familyCounts(item, m.allItems)
+			open, done := m.familyCounts(item)
 			chevron := "▾"
 			if m.view.familyCollapsed(item, m.collapsed) {
 				chevron = "▸"
@@ -3544,7 +3645,7 @@ func (m model) listRowHeight(item models.Item) int {
 	if item.Parent != "" {
 		indent = "  ├─ "
 	} else if m.hasChildren(item.ID) {
-		open, done := familyCounts(item, m.allItems)
+		open, done := m.familyCounts(item)
 		chevron := "▾"
 		if m.view.familyCollapsed(item, m.collapsed) {
 			chevron = "▸"
@@ -4902,6 +5003,9 @@ func (m model) hasChildren(root string) bool {
 	if root == "" {
 		return false
 	}
+	if m.familySummaries != nil {
+		return m.familySummaries[root].hasChildren
+	}
 	for _, item := range m.allItems {
 		if item.Parent == root {
 			return true
@@ -4913,6 +5017,14 @@ func (m model) hasChildren(root string) bool {
 		}
 	}
 	return false
+}
+
+func (m model) familyCounts(root models.Item) (open, done int) {
+	if m.familySummaries != nil {
+		summary := m.familySummaries[root.ID]
+		return summary.open, summary.done
+	}
+	return familyCounts(root, m.allItems)
 }
 
 // restoreSelection puts the cursor back on the item it was on, wherever that
