@@ -2480,7 +2480,7 @@ func (m *model) showProjectContext() {
 		content, m.err = m.store.ProjectInstructions()
 		m.projectEntries = []projectEntry{{
 			title:    "Current instructions",
-			meta:     "user-owned",
+			meta:     "user-owned behavior rules",
 			content:  content,
 			editable: true,
 		}}
@@ -2488,7 +2488,7 @@ func (m *model) showProjectContext() {
 		content, m.err = m.store.ProjectBrief()
 		m.projectEntries = []projectEntry{{
 			title:    "Current brief",
-			meta:     "agent-curated",
+			meta:     "agent-curated project facts",
 			content:  content,
 			editable: true,
 		}}

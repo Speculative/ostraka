@@ -121,8 +121,17 @@ revalidation. Run checks when changed code, a failed or incomplete check, or
 the request warrants them. Do not repeat successful checks against unchanged
 inputs just to reorient.
 
-Update the agent-curated project brief only for long-lived facts relevant to
-most items, using:
+Project instructions are user-owned rules for how agents work in this project.
+Follow an explicit current user request over an older project instruction for
+this item; Ostraka's required item workflow still applies. Edit the standing
+instructions when the user explicitly asks. If the user states a standing
+preference without asking to edit instructions, confirm whether to add it
+there. The agent-curated project brief holds stable project facts and enduring
+design choices that guide work; it does not set agent behavior. If a brief
+entry conflicts with instructions, follow the instructions, correct the brief,
+and mention the correction in the item reply.
+
+Update the brief only for long-lived context relevant to most items, using:
   ostraka project brief replace --content-stdin
 Replace it
 completely, preserve useful existing facts, and keep it within 6000

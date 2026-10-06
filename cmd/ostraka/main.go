@@ -72,8 +72,8 @@ func preambleProjectRoot() string {
 // ── ostraka project ──────────────────────────────────────────────────────────
 
 var projectCmd = &cobra.Command{Use: "project", Short: "Manage project context for new agent sessions"}
-var projectInstructionsCmd = &cobra.Command{Use: "instructions", Short: "User-owned project instructions"}
-var projectBriefCmd = &cobra.Command{Use: "brief", Short: "Agent-curated project brief"}
+var projectInstructionsCmd = &cobra.Command{Use: "instructions", Short: "User-owned rules for agent behavior"}
+var projectBriefCmd = &cobra.Command{Use: "brief", Short: "Agent-curated stable project facts"}
 
 func contentFromStdin(cmd *cobra.Command) (string, error) {
 	b, err := io.ReadAll(cmd.InOrStdin())
@@ -87,7 +87,7 @@ func contentFromStdin(cmd *cobra.Command) (string, error) {
 }
 
 var projectInstructionsShowCmd = &cobra.Command{
-	Use: "show", Short: "Show user-owned project instructions",
+	Use: "show", Short: "Show user-owned agent behavior rules",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		content, err := mustStore().ProjectInstructions()
 		if err != nil {
@@ -98,7 +98,7 @@ var projectInstructionsShowCmd = &cobra.Command{
 	},
 }
 var projectInstructionsReplaceCmd = &cobra.Command{
-	Use: "replace --content-stdin", Short: "Replace user-owned instructions from stdin",
+	Use: "replace --content-stdin", Short: "Replace user-owned agent behavior rules from stdin",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		content, err := contentFromStdin(cmd)
 		if err != nil {
@@ -108,7 +108,7 @@ var projectInstructionsReplaceCmd = &cobra.Command{
 	},
 }
 var projectBriefShowCmd = &cobra.Command{
-	Use: "show", Short: "Show the current agent-curated brief",
+	Use: "show", Short: "Show stable project facts curated by agents",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		content, err := mustStore().ProjectBrief()
 		if err != nil {
@@ -119,7 +119,7 @@ var projectBriefShowCmd = &cobra.Command{
 	},
 }
 var projectBriefReplaceCmd = &cobra.Command{
-	Use: "replace --content-stdin", Short: "Replace the complete brief from stdin (maximum 6000 characters)",
+	Use: "replace --content-stdin", Short: "Replace stable project facts from stdin (maximum 6000 characters)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		content, err := contentFromStdin(cmd)
 		if err != nil {

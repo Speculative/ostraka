@@ -35,6 +35,19 @@ Run `ostraka preamble` when an agent needs the static orientation and final
 reply guidance. Normal dispatched sessions receive the same guidance directly
 in their initial prompt.
 
+## Project context
+
+`ostraka project instructions` holds user-owned rules for how agents work in
+this project. An explicit current user request takes precedence over an older
+project instruction for that item; Ostraka's required item workflow still
+applies. Agents edit the standing instructions when the user explicitly asks.
+If a user states a standing preference without asking to edit instructions,
+agents confirm whether to add it there. `ostraka project brief` holds
+agent-curated, stable facts and enduring design choices about the project. It
+guides work but does not set agent behavior. If a brief entry conflicts with
+instructions, agents follow the instructions, correct the brief, and mention
+the correction in the item reply. Current work and decisions belong on items.
+
 Optional project workflows can be adopted through user-owned project
 instructions. The [numbered plan workflow
 pack](internal/instructionpacks/numbered-plan.md) is a

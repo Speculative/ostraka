@@ -233,6 +233,23 @@ func TestAgentOrientationIncludesExactReplyCommand(t *testing.T) {
 	}
 }
 
+func TestProjectContextGuidanceIsSharedWithPreamble(t *testing.T) {
+	orientation := normalizeWhitespace(AgentOrientation("reply"))
+	bootstrap := normalizeWhitespace(Bootstrap("item-1", "instructions", "brief", "context", "reply", nil))
+	for _, want := range []string{
+		"current user request over an older project instruction",
+		"confirm whether to add it",
+		"correct the brief",
+	} {
+		if !strings.Contains(orientation, want) {
+			t.Errorf("orientation missing %q", want)
+		}
+	}
+	if count := strings.Count(bootstrap, orientation); count != 1 {
+		t.Errorf("bootstrap contains shared orientation %d times, want once", count)
+	}
+}
+
 func TestThreadingGuidanceKeepsSequentialConversationInOneItem(t *testing.T) {
 	got := normalizeWhitespace(AgentOrientation("reply"))
 	for _, want := range []string{
