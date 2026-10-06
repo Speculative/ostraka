@@ -128,6 +128,14 @@ func TestParseMentionsFromBodyAndTurns(t *testing.T) {
 	}
 }
 
+func TestMentionIDsWithTrailingPunctuation(t *testing.T) {
+	got := store.MentionIDs("See @reference-thing. Also @reference-thing, then @other-item!")
+	want := []string{"reference-thing", "other-item"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mentions = %v, want %v", got, want)
+	}
+}
+
 func TestUnknownFrontmatterIsIgnoredAndDroppedOnWrite(t *testing.T) {
 	path := writeTemp(t, `---
 id: 20240101-120000
