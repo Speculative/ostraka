@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Speculative/ostraka/internal/instructionpacks"
 	"github.com/Speculative/ostraka/internal/models"
 	"github.com/Speculative/ostraka/internal/prompt"
 	"github.com/Speculative/ostraka/internal/store"
@@ -34,7 +35,8 @@ func init() {
 	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRenameCmd, itemRmCmd, itemReparentCmd, itemUnparentCmd, itemGroupCmd)
 	rootCmd.AddCommand(projectCmd)
 	projectCmd.AddCommand(projectInstructionsCmd, projectBriefCmd)
-	projectInstructionsCmd.AddCommand(projectInstructionsShowCmd, projectInstructionsReplaceCmd)
+	projectInstructionsCmd.AddCommand(projectInstructionsShowCmd, projectInstructionsReplaceCmd, projectInstructionsPackCmd)
+	projectInstructionsPackCmd.AddCommand(projectInstructionsPackListCmd, projectInstructionsPackShowCmd, projectInstructionsPackAddCmd)
 	projectBriefCmd.AddCommand(projectBriefShowCmd, projectBriefReplaceCmd, projectBriefHistoryCmd)
 	projectInstructionsReplaceCmd.Flags().Bool("content-stdin", false, "read complete replacement from standard input")
 	projectBriefReplaceCmd.Flags().Bool("content-stdin", false, "read complete replacement from standard input")
@@ -74,6 +76,53 @@ func preambleProjectRoot() string {
 var projectCmd = &cobra.Command{Use: "project", Short: "Manage project context for new agent sessions"}
 var projectInstructionsCmd = &cobra.Command{Use: "instructions", Short: "User-owned rules for agent behavior"}
 var projectBriefCmd = &cobra.Command{Use: "brief", Short: "Agent-curated stable project facts"}
+var projectInstructionsPackCmd = &cobra.Command{Use: "pack", Short: "Manage optional instruction packs"}
+
+var projectInstructionsPackListCmd = &cobra.Command{
+	Use: "list", Short: "List available packs", Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		for _, name := range instructionpacks.Names() {
+			fmt.Fprintln(cmd.OutOrStdout(), name)
+		}
+		return nil
+	},
+}
+
+var projectInstructionsPackShowCmd = &cobra.Command{
+	Use: "show <name>", Short: "Show a pack without installing it", Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		content, err := instructionpacks.Content(args[0])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), content)
+		return nil
+	},
+}
+
+var projectInstructionsPackAddCmd = &cobra.Command{
+	Use: "add <name>", Short: "Append a pack to project instructions", Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		s := mustStore()
+		current, err := s.ProjectInstructions()
+		if err != nil {
+			return err
+		}
+		updated, changed, err := instructionpacks.Add(current, args[0])
+		if err != nil {
+			return err
+		}
+		if !changed {
+			fmt.Fprintln(cmd.OutOrStdout(), "pack already present:", args[0])
+			return nil
+		}
+		if err := replaceProjectInstructions(s, updated); err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "added instruction pack:", args[0])
+		return nil
+	},
+}
 
 func contentFromStdin(cmd *cobra.Command) (string, error) {
 	b, err := io.ReadAll(cmd.InOrStdin())

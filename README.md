@@ -49,11 +49,13 @@ instructions, agents follow the instructions, correct the brief, and mention
 the correction in the item reply. Current work and decisions belong on items.
 
 Optional project workflows can be adopted through user-owned project
-instructions. The [numbered plan workflow
-pack](internal/instructionpacks/numbered-plan.md) is a
-paste-ready example for projects that use numbered execution items. Merge it
-with existing instructions rather than replacing them; it does not change
-Ostraka's default prompt.
+instructions. Run `ostraka project instructions pack list` to see available
+packs, `pack show <name>` to read one, and `pack add <name>` to append it to
+the current project's instructions. Add preserves existing instructions,
+skips an already installed pack, and reports edited marked content for manual
+reconciliation. The [numbered plan workflow
+pack](internal/instructionpacks/numbered-plan.md) is for projects that use
+numbered execution items. Packs do not change Ostraka's default prompt.
 
 ## Installation
 
