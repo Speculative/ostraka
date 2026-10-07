@@ -1519,14 +1519,35 @@ func (m model) beginReparent() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
-	targets := make([]models.Item, 0, len(allItems))
+	targetByID := make(map[string]models.Item, len(allItems))
 	for _, item := range allItems {
 		if item.ID == sourceID || item.Parent != "" || models.TerminalStatuses[item.Status] || item.ID == current.Parent {
 			continue
 		}
 		if item.Channel == current.Channel {
-			targets = append(targets, item)
+			targetByID[item.ID] = item
 		}
+	}
+	// Put visible targets in the same order as the item list. Keep eligible
+	// roots hidden by the current view available after those, in store order.
+	targets := make([]models.Item, 0, len(targetByID))
+	seenTargets := make(map[string]struct{}, len(targetByID))
+	for _, item := range m.items {
+		if target, ok := targetByID[item.ID]; ok {
+			targets = append(targets, target)
+			seenTargets[item.ID] = struct{}{}
+		}
+	}
+	for _, item := range allItems {
+		target, ok := targetByID[item.ID]
+		if !ok {
+			continue
+		}
+		if _, seen := seenTargets[item.ID]; seen {
+			continue
+		}
+		targets = append(targets, target)
+		seenTargets[item.ID] = struct{}{}
 	}
 	unparentAvailable := current.Parent != ""
 	if len(targets) == 0 && !unparentAvailable {
