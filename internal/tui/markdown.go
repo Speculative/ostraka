@@ -29,6 +29,16 @@ func renderMarkdown(markdown string, width int) string {
 	}
 
 	style := glamourstyles.DarkStyleConfig
+	// Glamour subtracts BlockQuote.Indent cells from the available width, but
+	// its default quote token ("│ ") occupies two cells for a one-cell indent.
+	// Use a one-cell token so quote prefixes are included accurately when prose
+	// wraps, keeping every continuation row inside the pane.
+	quoteIndent := uint(1)
+	quoteIndentToken := "│"
+	quoteColor := "245"
+	style.BlockQuote.Indent = &quoteIndent
+	style.BlockQuote.IndentToken = &quoteIndentToken
+	style.BlockQuote.Color = &quoteColor
 	// The conversation pane already supplies its own horizontal boundary. The
 	// default document margin consumes two cells on each side and makes the
 	// renderer wrap prose to a narrower width than the pane actually has.

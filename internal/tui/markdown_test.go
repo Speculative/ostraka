@@ -109,6 +109,31 @@ func TestRenderMarkdownKeepsRenderedLinesWithinWidth(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownKeepsBlockQuotePrefixesWhenWrapping(t *testing.T) {
+	const width = 24
+	got := renderMarkdown("> The quoted text is long enough to wrap across lines and reveal the width problem.", width)
+	plain := strings.TrimSpace(ansi.Strip(got))
+	for i, line := range strings.Split(plain, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "│") {
+			t.Errorf("quote continuation row %d lost its prefix: %q", i, line)
+		}
+		if actual := lipgloss.Width(line); actual > width {
+			t.Errorf("quote row %d width %d exceeds %d: %q", i, actual, width, line)
+		}
+	}
+	if !strings.Contains(got, "\x1b[38;5;245m") {
+		t.Fatalf("block quote text was not rendered in the darker quote color: %q", got)
+	}
+
+	plainBody := renderMarkdown("Ordinary body text stays in the default color.", width)
+	if strings.Contains(plainBody, "\x1b[38;5;245m") {
+		t.Fatalf("block quote color leaked into ordinary body text: %q", plainBody)
+	}
+}
+
 func TestRenderMarkdownKeepsShortHyphenatedTokensTogether(t *testing.T) {
 	inputs := []struct {
 		name  string
