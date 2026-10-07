@@ -368,6 +368,27 @@ func TestParseAppServerEventMarksFailedTurn(t *testing.T) {
 	if result.ErrorText != "quota exceeded" {
 		t.Errorf("failure text = %q, want quota exceeded", result.ErrorText)
 	}
+	if result.IsAuthenticationError {
+		t.Error("non-auth Codex error was marked as an authentication failure")
+	}
+}
+
+func TestParseAppServerEventPreservesStructuredUnauthorizedClassification(t *testing.T) {
+	result := TurnResult{}
+	parseAppServerEvent(appServerMessage{
+		Method: "turn/completed",
+		Params: json.RawMessage(`{"turn":{"status":"failed","error":{"message":"request failed","codexErrorInfo":"unauthorized"}}}`),
+	}, &result, nil)
+
+	if !result.IsError {
+		t.Fatal("failed turn was not marked as an error")
+	}
+	if !result.IsAuthenticationError {
+		t.Fatal("structured unauthorized error was not marked as an authentication failure")
+	}
+	if result.ErrorText != "request failed" {
+		t.Errorf("failure text = %q, want request failed", result.ErrorText)
+	}
 }
 
 func TestTurnErrorTextFallsBackToResultText(t *testing.T) {

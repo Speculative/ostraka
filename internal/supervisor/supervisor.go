@@ -939,6 +939,10 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		} else {
 			partialStatus = "failed"
 		}
+		authenticationFailure := !interrupted && isAuthenticationFailure(err, result.IsAuthenticationError)
+		if authenticationFailure {
+			err = authenticationFailureError(err)
+		}
 		if interrupted {
 			s.logger.Printf("item %s: turn interrupted; retaining session recovery", msg.itemID)
 			if clearErr := clearDispatchError(s.root, msg.itemID); clearErr != nil {
@@ -952,10 +956,10 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		}
 		// Put it back in a stable state so it doesn't sit forever showing as
 		// in-progress for a run that is already over. An intentional interrupt
-		// hands control to the user; an operational failure remains work owed by
-		// the agent and can be retried.
+		// and an authentication failure need user action; other operational
+		// failures remain work owed by the agent and can be retried.
 		nextStatus := models.StatusPendingAgent
-		if interrupted {
+		if interrupted || authenticationFailure {
 			nextStatus = models.StatusPendingUser
 		}
 		s.revertAcknowledged(msg.itemID, nextStatus)

@@ -23,6 +23,9 @@ type TurnResult struct {
 	Model      string
 	ResultText string
 	IsError    bool
+	// IsAuthenticationError is set when the provider reports a structured
+	// authentication failure, such as Codex App Server's unauthorized error.
+	IsAuthenticationError bool
 	// ErrorText is the provider's explanation when IsError is true. It is
 	// separate from ResultText because a failed turn must not look like an
 	// agent reply to the supervisor or the TUI.
@@ -834,6 +837,7 @@ func parseAppServerEvent(message appServerMessage, result *TurnResult, onEvent f
 				Status     string `json:"status"`
 				Error      *struct {
 					Message           string `json:"message"`
+					CodexErrorInfo    string `json:"codexErrorInfo"`
 					AdditionalDetails string `json:"additionalDetails"`
 				} `json:"error"`
 			} `json:"turn"`
@@ -843,6 +847,7 @@ func parseAppServerEvent(message appServerMessage, result *TurnResult, onEvent f
 			result.IsError = params.Turn.Status != "" && params.Turn.Status != "completed"
 			if params.Turn.Error != nil {
 				result.ErrorText = strings.TrimSpace(params.Turn.Error.Message)
+				result.IsAuthenticationError = strings.EqualFold(strings.TrimSpace(params.Turn.Error.CodexErrorInfo), "unauthorized")
 				if result.ErrorText == "" {
 					result.ErrorText = strings.TrimSpace(params.Turn.Error.AdditionalDetails)
 				}

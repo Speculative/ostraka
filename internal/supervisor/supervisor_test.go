@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,6 +309,39 @@ func TestProviderReportedFailureIsTreatedAsDispatchError(t *testing.T) {
 	failure, ok := s.DispatchError(item.ID)
 	if !ok || !strings.Contains(failure, "quota exceeded") {
 		t.Fatalf("dispatch error = %q, present=%v", failure, ok)
+	}
+}
+
+func TestAuthenticationFailureWaitsForUserActionBeforeRetry(t *testing.T) {
+	fh := &fakeHarness{err: errors.New("Failed to authenticate: OAuth session expired and could not be refreshed")}
+	s, st := newStoreBackedSupervisor(t, fh)
+	item, err := st.CreateItem(models.ChannelInbox, "t", "b", models.TypeThread, models.StatusPendingAgent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.dispatch(enqueueMsg{itemID: item.ID})
+
+	after, err := st.GetItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != models.StatusPendingUser {
+		t.Fatalf("status after authentication failure = %q, want pending-user", after.Status)
+	}
+	failure, ok := s.DispatchError(item.ID)
+	if !ok || !strings.Contains(failure, "authenticate the selected provider") || !strings.Contains(failure, "OAuth session expired") {
+		t.Fatalf("dispatch error = %q, present=%v", failure, ok)
+	}
+
+	// A subsequent stale queue notification must not start another provider
+	// turn while the item is waiting for the user to restore authentication.
+	s.dispatch(enqueueMsg{itemID: item.ID})
+	fh.mu.Lock()
+	calls := len(fh.calls)
+	fh.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("provider calls after repeated dispatch = %d, want 1", calls)
 	}
 }
 
