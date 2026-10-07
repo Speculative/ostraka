@@ -358,6 +358,7 @@ type model struct {
 	reparentTargets   []models.Item
 	reparentTargetIdx int
 	reparentFlatten   bool
+	reparentUnparent  bool
 	// mentionPicker is presentation-only state for the composer. The selected
 	// item is written back as a literal @canonical-id, so no picker state is
 	// persisted with the item or turn.
@@ -1501,13 +1502,20 @@ func (m model) beginReparent() (tea.Model, tea.Cmd) {
 			targets = append(targets, item)
 		}
 	}
-	if len(targets) == 0 {
+	unparentAvailable := current.Parent != ""
+	if len(targets) == 0 && !unparentAvailable {
 		m.err = fmt.Errorf("no compatible root is available for item %q", sourceID)
 		return m, nil
 	}
 	m.reparentItemID = sourceID
 	m.reparentTargets = targets
+	m.reparentUnparent = unparentAvailable
 	m.reparentTargetIdx = 0
+	if unparentAvailable && len(targets) > 0 {
+		// Keep the existing default action: pressing enter still chooses the
+		// first destination root. Unparent is an additional choice above it.
+		m.reparentTargetIdx = 1
+	}
 	m.reparentFlatten = false
 	m.mode = modeReparent
 	m.updateConv()
@@ -1518,9 +1526,10 @@ func (m model) handleReparentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
 		m.mode = modeNav
+		m.clearReparent()
 		m.updateConv()
 	case "j", "down":
-		if m.reparentTargetIdx < len(m.reparentTargets)-1 {
+		if m.reparentTargetIdx < m.reparentOptionCount()-1 {
 			m.reparentTargetIdx++
 		}
 	case "k", "up":
@@ -1528,34 +1537,69 @@ func (m model) handleReparentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.reparentTargetIdx--
 		}
 	case "f":
-		if m.hasChildren(m.reparentItemID) {
+		if m.selectedReparentUnparent() {
+			m.err = fmt.Errorf("flatten children is only available when moving under another root")
+		} else if m.hasChildren(m.reparentItemID) {
 			m.reparentFlatten = !m.reparentFlatten
 		} else {
 			m.err = fmt.Errorf("--flatten-children is only valid for item %q when it has subthreads", m.reparentItemID)
 		}
 	case "enter":
-		if m.store == nil || m.reparentTargetIdx < 0 || m.reparentTargetIdx >= len(m.reparentTargets) {
+		if m.store == nil || m.reparentTargetIdx < 0 || m.reparentTargetIdx >= m.reparentOptionCount() {
 			m.mode = modeNav
+			m.clearReparent()
 			return m, nil
 		}
-		targetID := m.reparentTargets[m.reparentTargetIdx].ID
-		if _, err := m.store.ReparentItem(m.reparentItemID, targetID, m.reparentFlatten); err != nil {
+		var err error
+		if m.selectedReparentUnparent() {
+			_, err = m.store.UnparentItem(m.reparentItemID)
+		} else {
+			targetIdx := m.reparentTargetIdx - m.reparentUnparentOffset()
+			if targetIdx < 0 || targetIdx >= len(m.reparentTargets) {
+				m.mode = modeNav
+				m.clearReparent()
+				return m, nil
+			}
+			targetID := m.reparentTargets[targetIdx].ID
+			_, err = m.store.ReparentItem(m.reparentItemID, targetID, m.reparentFlatten)
+		}
+		if err != nil {
 			m.err = err
 			return m, nil
 		}
 		sourceID := m.reparentItemID
 		m.err = nil
 		m.mode = modeNav
-		m.reparentItemID = ""
-		m.reparentTargets = nil
-		m.reparentTargetIdx = 0
-		m.reparentFlatten = false
+		m.clearReparent()
 		m.reload()
 		m.restoreSelection(sourceID)
 		m.updateConv()
 		return m.requestItemsLoad(m.view, m.showBacklog)
 	}
 	return m, nil
+}
+
+func (m model) reparentUnparentOffset() int {
+	if m.reparentUnparent {
+		return 1
+	}
+	return 0
+}
+
+func (m model) reparentOptionCount() int {
+	return len(m.reparentTargets) + m.reparentUnparentOffset()
+}
+
+func (m model) selectedReparentUnparent() bool {
+	return m.reparentUnparent && m.reparentTargetIdx == 0
+}
+
+func (m *model) clearReparent() {
+	m.reparentItemID = ""
+	m.reparentTargets = nil
+	m.reparentTargetIdx = 0
+	m.reparentFlatten = false
+	m.reparentUnparent = false
 }
 
 func (m model) enterCopyMode() model {
@@ -3144,35 +3188,42 @@ func (m model) proposalPopup() string {
 
 func (m model) reparentPopup() string {
 	source := m.reparentItemID
-	start, end := modalListWindow(m.reparentTargetIdx, len(m.reparentTargets), m.modalOptionRows())
+	start, end := modalListWindow(m.reparentTargetIdx, m.reparentOptionCount(), m.modalOptionRows())
 	rows := make([]string, 0, end-start+2)
 	if start > 0 {
-		rows = append(rows, dimStyle.Render("  ↑ more roots"))
+		rows = append(rows, dimStyle.Render("  ↑ more options"))
 	}
 	for i := start; i < end; i++ {
-		target := m.reparentTargets[i]
 		marker, style := "  ", lipgloss.NewStyle()
 		if i == m.reparentTargetIdx {
 			marker, style = "› ", lipgloss.NewStyle().Bold(true).Foreground(pendingFg)
 		}
-		row := marker + target.Title + "  [" + target.ID + "]"
+		row := ""
+		if m.reparentUnparent && i == 0 {
+			row = marker + "unparent (make root)"
+		} else {
+			target := m.reparentTargets[i-m.reparentUnparentOffset()]
+			row = marker + target.Title + "  [" + target.ID + "]"
+		}
 		rows = append(rows, style.Render(ansi.Truncate(row, m.modalContentWidth(), "…")))
 	}
-	if end < len(m.reparentTargets) {
-		rows = append(rows, dimStyle.Render("  ↓ more roots"))
+	if end < m.reparentOptionCount() {
+		rows = append(rows, dimStyle.Render("  ↓ more options"))
 	}
 	if len(rows) == 0 {
-		rows = []string{"(no compatible roots)"}
+		rows = []string{"(no move options)"}
 	}
-	help := "enter move   esc cancel"
-	if m.hasChildren(source) {
+	help := "enter choose   esc cancel"
+	if m.selectedReparentUnparent() {
+		help = "enter unparent   esc cancel"
+	} else if m.hasChildren(source) {
 		state := "off"
 		if m.reparentFlatten {
 			state = "on"
 		}
 		help = "f flatten children: " + state + "   " + help
 	}
-	header := ansi.Truncate("move "+source+" under", m.modalContentWidth(), "…")
+	header := ansi.Truncate("move "+source+" to", m.modalContentWidth(), "…")
 	help = ansi.Truncate(help, m.modalContentWidth(), "…")
 	return warningHeaderStyle.Render(header) + "\n" + strings.Join(rows, "\n") + "\n\n" + dimStyle.Render(help)
 }
@@ -3281,7 +3332,12 @@ func (m model) renderFooter() string {
 	case modeProposal:
 		text = "↑/↓ navigate  k keep for later  s start  x reject  esc cancel"
 	case modeReparent:
-		text = "j/k select root  enter move  f flatten children  esc cancel"
+		text = "j/k select option  enter choose  esc cancel"
+		if m.selectedReparentUnparent() {
+			text = "j/k select option  enter unparent  esc cancel"
+		} else if m.hasChildren(m.reparentItemID) {
+			text = "j/k select option  enter move  f flatten children  esc cancel"
+		}
 	case modeGroup:
 		if m.groupPicker.open {
 			text = "↑/↓ select group  enter/tab insert  ctrl+s apply  esc close"
