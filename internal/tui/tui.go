@@ -271,6 +271,10 @@ type model struct {
 	backlogOrder    []string
 	searchIndex     map[string]string
 	selected        int
+	// Modal selectors only change the drawer on the right. Reuse the left
+	// panel while they are open instead of restyling every item on each key.
+	modalListPanelCache      string
+	modalListPanelCacheValid bool
 	// itemsLoadGeneration identifies the newest asynchronous list load. A
 	// filesystem event can start a second load before the first one returns;
 	// older results must not repaint over a newer synchronous or async refresh.
@@ -572,7 +576,23 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.update(msg)
 	nm := next.(model)
-	nm.listOffset = nm.ensureListOffsetVisible()
+	// Arrow keys in a modal move its option cursor, not the item-list cursor.
+	// Recomputing every wrapped row height here made holding a direction scale
+	// with the entire inbox despite no list changes.
+	if _, key := msg.(tea.KeyMsg); !key || !nm.modalVisible() {
+		nm.listOffset = nm.ensureListOffsetVisible()
+	}
+	if _, resized := msg.(tea.WindowSizeMsg); resized {
+		nm.modalListPanelCacheValid = false
+	}
+	if !nm.modalVisible() {
+		nm.modalListPanelCache = ""
+		nm.modalListPanelCacheValid = false
+	} else if !nm.modalListPanelCacheValid {
+		// Populate once on modal entry (and after a resize or item reload).
+		nm.modalListPanelCache = nm.renderListPanel()
+		nm.modalListPanelCacheValid = true
+	}
 	return nm, cmd
 }
 
@@ -611,6 +631,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.view != m.view || (m.backlogVisibilityInitialized && msg.showBacklog != m.showBacklog) {
 			return m, nil
 		}
+		m.modalListPanelCache = ""
+		m.modalListPanelCacheValid = false
 		wasDraftSelected := m.draftVisible() && m.draftSelected
 		prevID := m.selectedID()
 		if prevID == "" && !wasDraftSelected {
@@ -904,8 +926,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next, cmd = m.handleNavKey(msg)
 		}
 		nm := next.(model)
-		if m.modalVisible() || nm.modalVisible() ||
-			m.composerVisible() != nm.composerVisible() {
+		// Moving a cursor inside one modal cannot change the drawer's height.
+		// Avoid laying out the conversation again for every held arrow key;
+		// transitions between modal types still recalculate normally.
+		sameModal := m.modalVisible() && nm.modalVisible() && m.mode == nm.mode
+		if !sameModal && (m.modalVisible() || nm.modalVisible() ||
+			m.composerVisible() != nm.composerVisible()) {
 			nm = nm.recalcLayout()
 		}
 		return nm, cmd
@@ -2709,27 +2735,8 @@ func (m model) View() string {
 	footer := m.renderFooter()
 
 	listW := m.listWidth()
-	mainH := m.height - 2 // subtract header and footer
-	listAvailH := mainH - 2
-	if m.filterVisible() {
-		listAvailH--
-	}
-	listContent, listScrollbarStr := m.renderList(listAvailH)
-	if m.filterVisible() {
-		filterRow := m.renderFilterRow(listW - 2)
-		listContent = lipgloss.JoinVertical(lipgloss.Left, filterRow, listContent)
-		listScrollbarStr = lipgloss.JoinVertical(lipgloss.Top, " ", listScrollbarStr)
-	}
-	listWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, listContent, listScrollbarStr)
-	listPanelStyle := lipgloss.NewStyle().
-		// No right padding: the scrollbar occupies that column instead,
-		// mirroring the conv pane and composer below.
-		Padding(1, 0, 1, 1).
-		BorderRight(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		Height(mainH)
-	listPanel := listPanelStyle.Width(listW).Render(listWithScrollbar)
-	convAreaW := m.width - (m.listWidth() + 1)
+	listPanel := m.listPanelView()
+	convAreaW := m.width - (listW + 1)
 	convScrollbar := renderScrollbar(m.conv.Height, m.conv.TotalLineCount(), m.conv.YOffset)
 	convWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, m.renderConv(), convScrollbar)
 	var convPanel string
@@ -2785,6 +2792,39 @@ func (m model) View() string {
 		frame = overlayCentered(frame, m.quitConfirmBox(), m.width)
 	}
 	return frame
+}
+
+// listPanelView reuses the unchanged left pane while a modal selector is
+// active. Selector keys only redraw the popup and its selection marker.
+func (m model) listPanelView() string {
+	if m.modalVisible() && m.modalListPanelCacheValid {
+		return m.modalListPanelCache
+	}
+	return m.renderListPanel()
+}
+
+func (m model) renderListPanel() string {
+	listW := m.listWidth()
+	mainH := m.height - 2 // subtract header and footer
+	listAvailH := mainH - 2
+	if m.filterVisible() {
+		listAvailH--
+	}
+	listContent, listScrollbarStr := m.renderList(listAvailH)
+	if m.filterVisible() {
+		filterRow := m.renderFilterRow(listW - 2)
+		listContent = lipgloss.JoinVertical(lipgloss.Left, filterRow, listContent)
+		listScrollbarStr = lipgloss.JoinVertical(lipgloss.Top, " ", listScrollbarStr)
+	}
+	listWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, listContent, listScrollbarStr)
+	listPanelStyle := lipgloss.NewStyle().
+		// No right padding: the scrollbar occupies that column instead,
+		// mirroring the conv pane and composer below.
+		Padding(1, 0, 1, 1).
+		BorderRight(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		Height(mainH)
+	return listPanelStyle.Width(listW).Render(listWithScrollbar)
 }
 
 // renderConv renders the conversation viewport, overlaying a "new messages
