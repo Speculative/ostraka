@@ -91,6 +91,7 @@ var (
 	selectedBg = lipgloss.Color("237")
 	pendingFg  = lipgloss.Color("11")
 	workingFg  = lipgloss.Color("10")
+	reorderFg  = lipgloss.Color("13")
 	// 245, not 8. ANSI 8 ("bright black") is unreadably dark on some terminal
 	// themes — it is the colour that made both the live pane and the hidden-
 	// backlog marker invisible. 245 is the grey the item meta lines already
@@ -3551,6 +3552,9 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 		var rowLineSty, metaSty lipgloss.Style
 		if isSelected {
 			rowLineSty = lipgloss.NewStyle().Width(colW).Background(selectedBg).Bold(true)
+			if m.backlogMoveMode {
+				rowLineSty = rowLineSty.Foreground(reorderFg)
+			}
 			metaSty = lipgloss.NewStyle().Width(colW).Background(selectedBg).Foreground(lipgloss.Color("245"))
 		} else {
 			rowLineSty = lipgloss.NewStyle().Width(colW)
@@ -3563,6 +3567,17 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 			if j == 0 && hasIndicator {
 				prefix = indent + indicator + " "
 				if isSelected {
+					if m.backlogMoveMode {
+						// Keep the item's status dot in its status colour while the
+						// selected title uses the reorder-mode accent.
+						prefixWidth := lipgloss.Width(prefix)
+						prefixStyle := lipgloss.NewStyle().Width(prefixWidth).Background(selectedBg).
+							Bold(true).Foreground(indicatorFg)
+						titleStyle := lipgloss.NewStyle().Width(max(1, colW-prefixWidth)).
+							Background(selectedBg).Bold(true).Foreground(reorderFg)
+						parts = append(parts, prefixStyle.Render(prefix)+titleStyle.Render(pl))
+						continue
+					}
 					// Apply the icon colour directly in the style rather than via
 					// an embedded ANSI string that would clobber the background.
 					parts = append(parts, lipgloss.NewStyle().Width(colW).Background(selectedBg).Bold(true).
