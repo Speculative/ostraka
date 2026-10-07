@@ -22,6 +22,13 @@ func (s *Store) BacklogOrder() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.BacklogOrderFor(items)
+}
+
+// BacklogOrderFor returns the backlog order using an item snapshot the caller
+// already loaded. This avoids rescanning and reparsing the store when a TUI
+// refresh needs both the item list and its backlog order.
+func (s *Store) BacklogOrderFor(items []models.Item) ([]string, error) {
 	ids, exists, err := s.readBacklogOrder()
 	if err != nil {
 		return nil, err

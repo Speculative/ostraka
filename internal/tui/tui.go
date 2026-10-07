@@ -39,6 +39,12 @@ type itemsLoadedMsg struct {
 	showBacklog   bool
 	generation    uint64
 }
+type statusSavedMsg struct {
+	before models.Item
+	item   models.Item
+	queue  bool
+	err    error
+}
 type watchEventMsg struct{}
 type errMsg error
 type draftCheckpointMsg struct{ sequence int }
@@ -202,7 +208,7 @@ func loadItemsCmd(s *store.Store, v listView, showBacklog bool, generation uint6
 		if err != nil {
 			return errMsg(err)
 		}
-		backlogOrder, err := s.BacklogOrder()
+		backlogOrder, err := s.BacklogOrderFor(items)
 		if err != nil {
 			return errMsg(err)
 		}
@@ -216,6 +222,13 @@ func loadItemsCmd(s *store.Store, v listView, showBacklog bool, generation uint6
 			showBacklog:   showBacklog,
 			generation:    generation,
 		}
+	}
+}
+
+func setStatusCmd(s *store.Store, before models.Item, status models.Status, queue bool) tea.Cmd {
+	return func() tea.Msg {
+		item, err := s.SetStatus(before.ID, status)
+		return statusSavedMsg{before: before, item: item, queue: queue, err: err}
 	}
 }
 
@@ -780,6 +793,22 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case statusSavedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.replaceItemSnapshot(msg.before)
+		} else {
+			m.err = nil
+			m.replaceItemSnapshot(msg.item)
+			if msg.queue {
+				m.sup.Enqueue(msg.item.ID)
+			}
+		}
+		// Reconcile with the store after the write. This also picks up lifecycle
+		// activity written for a closed subthread and invalidates any watcher
+		// snapshot that raced the status command.
+		return m.requestItemsLoad(m.view, m.showBacklog)
 
 	case watchEventMsg:
 		if waker, ok := m.sup.(activityWaker); ok {
@@ -2126,24 +2155,24 @@ func (m model) handleStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selected < len(m.items) {
 			item := m.items[m.selected]
 			status := userStatuses[m.statusIdx]
+			queue := false
 			// Moving an item the agent already owes a reply on into a working
 			// status is itself the "go" signal — otherwise you have to set
 			// active and then post a turn you have nothing to say in.
 			if wakesAgent(status) && awaitingAgent(item) {
 				status = models.StatusPendingAgent
-				if _, err := m.store.SetStatus(item.ID, status); err != nil {
-					m.err = err
-				} else {
-					m.sup.Enqueue(item.ID)
-				}
-			} else {
-				if _, err := m.store.SetStatus(item.ID, status); err != nil {
-					m.err = err
-				}
+				queue = true
 			}
+			optimistic := item
+			optimistic.Status = status
+			m.itemsLoadGeneration++ // invalidate a snapshot that predates this action
+			m.err = nil
+			m.replaceItemSnapshot(optimistic)
+			m.mode = modeNav
+			return m, setStatusCmd(m.store, item, status, queue)
 		}
 		m.mode = modeNav
-		return m.requestItemsLoad(m.view, m.showBacklog)
+		return m, nil
 	}
 	return m, nil
 }
@@ -2356,7 +2385,7 @@ func (m *model) reload() {
 		m.err = err
 		return
 	}
-	backlogOrder, err := m.store.BacklogOrder()
+	backlogOrder, err := m.store.BacklogOrderFor(items)
 	if err != nil {
 		m.err = err
 		return
@@ -2369,6 +2398,42 @@ func (m *model) reload() {
 	m.backlogOrder = backlogOrder
 	m.searchIndex = buildItemSearchIndex(items)
 	m.items, m.hiddenBacklog = m.prepareVisibleItems(items)
+}
+
+// replaceItemSnapshot applies a status result to the loaded list immediately,
+// preserving the current selection while the authoritative refresh runs.
+func (m *model) replaceItemSnapshot(item models.Item) {
+	selectedID := m.selectedID()
+	previousConvItemID := m.convItemID
+	wasAtBottom := m.conv.AtBottom()
+	if m.allItems == nil {
+		m.allItems = append([]models.Item(nil), m.items...)
+	}
+	found := false
+	for i := range m.allItems {
+		if m.allItems[i].ID == item.ID {
+			m.allItems[i] = item
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.allItems = append(m.allItems, item)
+	}
+	m.familySummaries = summarizeFamilies(m.allItems)
+	m.items, m.hiddenBacklog = m.prepareVisibleItems(m.allItems)
+	m.restoreSelection(selectedID)
+	if selectedID != "" && selectedID != m.selectedID() {
+		m.focus = focusItemList
+		m.convSelection = -1
+	}
+	m.modalListPanelCache = ""
+	m.modalListPanelCacheValid = false
+	m.updateConv()
+	if m.convItemID != previousConvItemID || wasAtBottom {
+		m.conv.GotoBottom()
+		m.newBelow = false
+	}
 }
 
 // chooseMention replaces the complete token around the cursor with a
