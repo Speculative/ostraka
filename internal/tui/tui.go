@@ -304,6 +304,10 @@ type model struct {
 	// within the visible window, only scrolling once selection would
 	// otherwise leave it. See ensureListOffsetVisible.
 	listOffset int
+	// Row heights only depend on list contents and layout. Keep them across
+	// navigation keys so moving the cursor does not wrap every item again.
+	cachedListRowHeights []int
+	listRowHeightsValid  bool
 
 	conv                   viewport.Model
 	input                  textarea.Model
@@ -572,16 +576,21 @@ func (m model) Init() tea.Cmd {
 
 // Update dispatches msg and then reconciles listOffset against wherever
 // selection and items ended up. Rows vary in height and the list panel's
-// available space depends on layout, so this runs after every message
+// available space depends on layout, so this runs after relevant messages
 // rather than being threaded through each of update's many return points.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.update(msg)
 	nm := next.(model)
+	stableListGeometry := listGeometryStableUpdate(msg, m, nm)
+	if !stableListGeometry {
+		nm.listRowHeightsValid = false
+	}
 	// Arrow keys in a modal move its option cursor, not the item-list cursor.
-	// Recomputing every wrapped row height here made holding a direction scale
-	// with the entire inbox despite no list changes.
+	// Reconcile only when the list cursor or its geometry may have changed.
 	if _, key := msg.(tea.KeyMsg); !key || !nm.modalVisible() {
-		nm.listOffset = nm.ensureListOffsetVisible()
+		if !stableListGeometry || nm.selectedListRow() != m.selectedListRow() {
+			nm.listOffset = nm.ensureListOffsetVisible()
+		}
 	}
 	if _, resized := msg.(tea.WindowSizeMsg); resized {
 		nm.modalListPanelCacheValid = false
@@ -595,6 +604,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		nm.modalListPanelCacheValid = true
 	}
 	return nm, cmd
+}
+
+// listGeometryStableUpdate identifies navigation keys that only change a
+// selection. Other updates may change row contents, order, width, or height,
+// so their cached row measurements must be rebuilt.
+func listGeometryStableUpdate(msg tea.Msg, before, after model) bool {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok || before.mode != modeNav || after.mode != modeNav ||
+		before.backlogMoveMode || after.backlogMoveMode || before.projectPane != after.projectPane {
+		return false
+	}
+	switch key.String() {
+	case "j", "k", "up", "down", "shift+up", "shift+down":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -3508,9 +3534,25 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 	textW := colW - badgeW
 
 	draftRow := m.draftRowIndex()
-	lines := make([]string, 0, len(m.items)+1)
-	for i, item := range m.items {
-		if m.draftVisible() && draftRow == i {
+	// Measure the visible window before styling rows. Most frames then format
+	// only the rows on screen, instead of rebuilding every offscreen row just
+	// to discard it below.
+	rowBudget := availH
+	if marker != "" {
+		rowBudget--
+	}
+	heights := m.cachedListRowHeights
+	rowCount := len(m.items)
+	if m.draftVisible() {
+		rowCount++
+	}
+	if !m.listRowHeightsValid || len(heights) != rowCount {
+		heights = m.listRowHeights()
+	}
+	first, end, offset, total := listRowWindow(heights, m.listOffset, m.selectedListRow(), rowBudget)
+	lines := make([]string, 0, end-first)
+	for row := first; row < end; row++ {
+		if m.draftVisible() && draftRow == row {
 			rowSty := lipgloss.NewStyle()
 			metaSty := lipgloss.NewStyle().Width(colW).Foreground(lipgloss.Color("245"))
 			if m.draftSelected {
@@ -3521,7 +3563,16 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 			lines = append(lines,
 				renderDraftTitlePrefix(rowSty, colW, m.draftTitlePrefix(), m.title.View())+"\n"+
 					metaSty.Render(m.draftIndent()+"  new item [backlog]"))
+			continue
 		}
+		i := row
+		if m.draftVisible() && row > draftRow {
+			i--
+		}
+		if i < 0 || i >= len(m.items) {
+			continue
+		}
+		item := m.items[i]
 		isSelected := !m.draftSelected && i == m.selected
 		indicator, indicatorFg, hasIndicator := statusIndicator(item.Status)
 
@@ -3593,34 +3644,9 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 		parts = append(parts, metaSty.Render(indent+"  "+meta))
 		lines = append(lines, strings.Join(parts, "\n"))
 	}
-
-	// The draft is a synthetic row: it has no file behind it yet, so it is
-	// rendered from the title input rather than from an item.
-	if m.draftVisible() && draftRow == len(m.items) {
-		rowSty := lipgloss.NewStyle()
-		metaSty := lipgloss.NewStyle().Width(colW).Foreground(lipgloss.Color("245"))
-		if m.draftSelected {
-			rowSty = rowSty.Background(selectedBg).Bold(true)
-			metaSty = metaSty.Background(selectedBg)
-		}
-		m.title.Width = m.titleWidth()
-		lines = append(lines,
-			renderDraftTitlePrefix(rowSty, colW, m.draftTitlePrefix(), m.title.View())+"\n"+
-				metaSty.Render(m.draftIndent()+"  new item [backlog]"))
-	}
-	// Clamp to the panel's height so a long list scrolls instead of pushing
-	// the header and footer off screen. Reserve a line for the marker row
-	// below, if any, before windowing so the two stay within budget together.
-	rowBudget := availH
-	if marker != "" {
-		rowBudget--
-	}
-	selectedRow := m.selectedListRow()
-	window, offset, total := windowListRows(lines, m.listOffset, selectedRow, rowBudget)
 	if marker != "" {
 		total++ // the marker row itself, appended below outside the window
 	}
-	lines = window
 
 	// Sits below the rows and is not selectable: selection indexes m.items,
 	// which this is deliberately not part of.
@@ -3687,16 +3713,26 @@ func windowListRows(rows []string, start, selected, availH int) (window []string
 	heights := make([]int, len(rows))
 	for i, r := range rows {
 		heights[i] = strings.Count(r, "\n") + 1
-		total += heights[i]
 	}
-	if availH <= 0 || len(rows) == 0 {
-		return rows, 0, total
+	first, end, offset, total := listRowWindow(heights, start, selected, availH)
+	return rows[first:end], offset, total
+}
+
+// listRowWindow returns the row slice and line metrics for a measured list.
+// Keeping this separate lets the item list choose its visible rows before it
+// pays to style them.
+func listRowWindow(heights []int, start, selected, availH int) (first, end, offset, total int) {
+	for _, height := range heights {
+		total += height
+	}
+	if availH <= 0 || len(heights) == 0 {
+		return 0, len(heights), 0, total
 	}
 	if selected < 0 {
 		selected = 0
 	}
-	if selected >= len(rows) {
-		selected = len(rows) - 1
+	if selected >= len(heights) {
+		selected = len(heights) - 1
 	}
 	if start < 0 {
 		start = 0
@@ -3725,12 +3761,12 @@ func windowListRows(rows []string, start, selected, availH int) (window []string
 	for i := start; i <= selected; i++ {
 		used += heights[i]
 	}
-	end := selected + 1
-	for end < len(rows) && used+heights[end] <= availH {
+	end = selected + 1
+	for end < len(heights) && used+heights[end] <= availH {
 		used += heights[end]
 		end++
 	}
-	return rows[start:end], offset, total
+	return start, end, offset, total
 }
 
 // listRowHeights mirrors the row heights renderList actually draws — each
@@ -3829,8 +3865,12 @@ func (m model) listAvailRows() int {
 // far enough to fit selected if it is below. This is what keeps the list
 // panel still while the selection moves within the visible page, instead of
 // re-centring on every keypress.
-func (m model) ensureListOffsetVisible() int {
-	heights := m.listRowHeights()
+func (m *model) ensureListOffsetVisible() int {
+	if !m.listRowHeightsValid {
+		m.cachedListRowHeights = m.listRowHeights()
+		m.listRowHeightsValid = true
+	}
+	heights := m.cachedListRowHeights
 	n := len(heights)
 	if n == 0 {
 		return 0
@@ -4404,18 +4444,25 @@ func (m *model) updateConv() {
 	sb.WriteString(wrapText(item.Title, w) + "\n")
 	sb.WriteString(wrapText(meta, w) + "\n" + headRule + "\n\n")
 	sb.WriteString(renderMarkdown(item.Body, w))
-	if m.store != nil {
-		if mentions, err := m.store.MentionedItems(item.ID); err == nil && len(mentions) > 0 {
-			sb.WriteString("\n\nmentions\n")
-			for _, mentioned := range mentions {
-				sb.WriteString(wrapText(mentioned.Title+"  ["+mentioned.ID+"]", w) + "\n")
-			}
+	mentioned := itemsForIDs(m.allItems, item.Mentions)
+	backlinks := itemsForIDs(m.allItems, item.Backlinks)
+	if len(m.allItems) == 0 && m.store != nil {
+		// Models populated by the normal list load already carry both directions
+		// of the relationship graph. Keep the store fallback for isolated models
+		// and tests that only set the selected item.
+		mentioned, _ = m.store.MentionedItems(item.ID)
+		backlinks, _ = m.store.BacklinkItems(item.ID)
+	}
+	if len(mentioned) > 0 {
+		sb.WriteString("\n\nmentions\n")
+		for _, related := range mentioned {
+			sb.WriteString(wrapText(related.Title+"  ["+related.ID+"]", w) + "\n")
 		}
-		if backlinks, err := m.store.BacklinkItems(item.ID); err == nil && len(backlinks) > 0 {
-			sb.WriteString("\n\nbacklinks\n")
-			for _, backlink := range backlinks {
-				sb.WriteString(wrapText(backlink.Title+"  ["+backlink.ID+"]", w) + "\n")
-			}
+	}
+	if len(backlinks) > 0 {
+		sb.WriteString("\n\nbacklinks\n")
+		for _, related := range backlinks {
+			sb.WriteString(wrapText(related.Title+"  ["+related.ID+"]", w) + "\n")
 		}
 	}
 	selectedKey := ""
@@ -4557,6 +4604,23 @@ func (m *model) updateConv() {
 	m.convFailure = len(failure)
 
 	m.conv.SetContent(sb.String())
+}
+
+func itemsForIDs(items []models.Item, ids []string) []models.Item {
+	if len(items) == 0 || len(ids) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		wanted[id] = struct{}{}
+	}
+	matched := make([]models.Item, 0, len(wanted))
+	for _, item := range items {
+		if _, ok := wanted[item.ID]; ok {
+			matched = append(matched, item)
+		}
+	}
+	return matched
 }
 
 // liveTrace is keyed by the ephemeral live file rather than by the item status.
@@ -5116,19 +5180,25 @@ func (m *model) moveItemSelection(delta int) {
 }
 
 func (m *model) moveItemSelectionWithPrompt(delta int, promptProposal bool) {
+	if m.advanceItemSelection(delta) {
+		m.showSelected(promptProposal)
+	}
+}
+
+func (m *model) advanceItemSelection(delta int) bool {
 	count := len(m.items)
 	if m.draftVisible() {
 		count++
 	}
 	if count == 0 {
-		return
+		return false
 	}
 	row := max(0, min(count-1, m.selectedListRow()+delta))
 	if row == m.selectedListRow() {
-		return
+		return false
 	}
 	m.selectListRow(row)
-	m.showSelected(promptProposal)
+	return true
 }
 
 func (m model) hasChildren(root string) bool {
@@ -5220,8 +5290,9 @@ func Run(s *store.Store) error {
 	sup.Start()
 	sup.EnqueuePendingActivityRoots()
 	reporter := &panicReporter{root: s.Root}
+	initialModel := newModel(s, watchCh, sup)
 	p := tea.NewProgram(
-		panicLoggingModel{inner: newModel(s, watchCh, sup), reporter: reporter},
+		panicLoggingModel{inner: initialModel, reporter: reporter},
 		tea.WithAltScreen(),
 	)
 	_, err = p.Run()
