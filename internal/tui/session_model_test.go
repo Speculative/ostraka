@@ -270,8 +270,8 @@ func TestRenderAgentInfoShowsTheChosenModelBeforeTheFirstTurn(t *testing.T) {
 	// No turn has run this process yet (LastTurnInfo is empty), so this must
 	// fall back to the explicitly selected model rather than going blank.
 	got := m.renderAgentInfo("item-1")
-	if got != "opus high " {
-		t.Errorf("renderAgentInfo = %q, want %q", got, "opus high ")
+	if got != "CODE · opus high " {
+		t.Errorf("renderAgentInfo = %q, want %q", got, "CODE · opus high ")
 	}
 }
 
@@ -284,19 +284,19 @@ func TestRenderAgentInfoKeepsContextPercentWithEffortAfterATurn(t *testing.T) {
 	}
 	m := newModel(nil, nil, sup)
 
-	if got := m.renderAgentInfo("item-1"); got != "claude-sonnet-5 high 80% left " {
+	if got := m.renderAgentInfo("item-1"); got != "CODE · claude-sonnet-5 high 80% left " {
 		t.Errorf("renderAgentInfo = %q, want model, effort, and remaining context", got)
 	}
 }
 
-func TestRenderAgentInfoIsBlankForAnItemWithNoModelChosen(t *testing.T) {
+func TestRenderAgentInfoShowsModeForAnItemWithNoModelChosen(t *testing.T) {
 	sup := newSessionModelTestSupervisor(t)
 	m := newModel(nil, nil, sup)
 
-	// A never-touched item has no explicit model and no turn: the harness's
-	// own default isn't knowable ahead of a turn, so this stays blank.
-	if got := m.renderAgentInfo("item-1"); got != "" {
-		t.Errorf("renderAgentInfo = %q, want empty", got)
+	// The harness's model isn't knowable ahead of a turn, but the default
+	// execution mode remains visible.
+	if got := m.renderAgentInfo("item-1"); got != "CODE " {
+		t.Errorf("renderAgentInfo = %q, want CODE", got)
 	}
 }
 
@@ -312,8 +312,8 @@ func TestChosenModelBecomesTheDefaultForFutureItems(t *testing.T) {
 	}
 
 	m := newModel(nil, nil, sup)
-	if got := m.renderAgentInfo("item-2"); got != "opus high " {
-		t.Errorf("renderAgentInfo before first turn = %q, want %q", got, "opus high ")
+	if got := m.renderAgentInfo("item-2"); got != "CODE · opus high " {
+		t.Errorf("renderAgentInfo before first turn = %q, want %q", got, "CODE · opus high ")
 	}
 }
 
@@ -323,7 +323,7 @@ func TestCodexSelectionAppearsOnUntouchedItemsBeforeFirstTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := newModel(nil, nil, sup)
-	if got := m.renderAgentInfo("backlogged-item"); got != "gpt-5.6-sol xhigh " {
+	if got := m.renderAgentInfo("backlogged-item"); got != "CODE · gpt-5.6-sol xhigh " {
 		t.Errorf("renderAgentInfo = %q", got)
 	}
 }
