@@ -215,9 +215,15 @@ type agentOrientationData struct {
 // Bootstrap builds the complete prompt for the first turn in an item's agent
 // session.
 func Bootstrap(itemID, instructions, brief, itemContext, replyCommand string, activities []models.Activity) string {
+	return BootstrapForMode(itemID, instructions, brief, itemContext, replyCommand, models.AgentModeCode, activities)
+}
+
+// BootstrapForMode builds the complete first-turn prompt with the item's
+// execution mode stated before the project and item context.
+func BootstrapForMode(itemID, instructions, brief, itemContext, replyCommand string, mode models.AgentMode, activities []models.Activity) string {
 	requireField("bootstrap", "ItemID", itemID)
 	requireField("bootstrap", "ItemContext", itemContext)
-	return renderPrompt(bootstrapTemplate, bootstrapData{
+	return executionModeGuidance(mode) + "\n\n" + renderPrompt(bootstrapTemplate, bootstrapData{
 		ItemID:       itemID,
 		Orientation:  AgentOrientation(replyCommand),
 		Instructions: emptyContext(instructions),
@@ -229,6 +235,12 @@ func Bootstrap(itemID, instructions, brief, itemContext, replyCommand string, ac
 // Nudge builds the shorter prompt used for later turns in an existing item
 // conversation.
 func Nudge(itemID string, userTurns []string, activities []models.Activity) string {
+	return NudgeForMode(itemID, models.AgentModeCode, userTurns, activities)
+}
+
+// NudgeForMode builds a continuation prompt with the current dispatch mode,
+// including when a saved provider session is resumed.
+func NudgeForMode(itemID string, mode models.AgentMode, userTurns []string, activities []models.Activity) string {
 	requireField("continuation", "ItemID", itemID)
 	var base string
 	if len(userTurns) > 0 {
@@ -247,7 +259,25 @@ func Nudge(itemID string, userTurns []string, activities []models.Activity) stri
 			ItemID: itemID,
 		})
 	}
-	return base + dispatchLengthGuidance + activitySection(activities, len(userTurns) > 0)
+	return executionModeGuidance(mode) + "\n\n" + base + dispatchLengthGuidance + activitySection(activities, len(userTurns) > 0)
+}
+
+func executionModeGuidance(mode models.AgentMode) string {
+	if models.NormalizeAgentMode(mode) == models.AgentModeChat {
+		return `Execution mode: CHAT (read-only).
+Treat the project workspace and its git state as read-only. You may inspect and
+search files, and explain findings or recommend changes, but do not edit,
+create, delete, rename, or otherwise write project files. Do not run commands
+that modify project files or git state, and do not commit. This applies to this
+dispatch and supersedes any earlier execution-mode instruction. A Code-mode
+dispatch may run at the same time and change files while you work. Re-check file
+contents and relevant state before relying on a prior read; search results and
+other observations may become stale. You may still post the required final
+Ostraka item reply.`
+	}
+	return `Execution mode: CODE.
+Implementation work is permitted for this dispatch. This mode applies to this
+dispatch and supersedes any earlier execution-mode instruction.`
 }
 
 const dispatchLengthGuidance = `

@@ -6,6 +6,26 @@ type Channel string
 type ItemType string
 type Status string
 type Actor string
+type AgentMode string
+
+const (
+	AgentModeCode AgentMode = "code"
+	AgentModeChat AgentMode = "chat"
+)
+
+// NormalizeAgentMode maps missing or unknown legacy values to code mode,
+// preserving the supervisor's original serialized execution behavior.
+func NormalizeAgentMode(mode AgentMode) AgentMode {
+	if mode == AgentModeChat {
+		return AgentModeChat
+	}
+	return AgentModeCode
+}
+
+// ValidAgentMode reports whether mode is supported by the item schema.
+func ValidAgentMode(mode AgentMode) bool {
+	return mode == AgentModeCode || mode == AgentModeChat
+}
 
 const (
 	ChannelInbox Channel = "inbox"
@@ -125,6 +145,7 @@ type Item struct {
 	Channel Channel
 	Type    ItemType
 	Status  Status
+	Mode    AgentMode
 	Created time.Time
 	Parent  string // empty if none
 	// Group is an optional planning classification. Roots persist it in

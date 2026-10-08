@@ -321,6 +321,31 @@ func (s *Store) RenameItem(id, title string) (models.Item, error) {
 	return item, nil
 }
 
+// SetMode changes the execution mode persisted with an item. Chat mode is a
+// prompt-level read-only instruction; code mode is serialized against other
+// code dispatches, while chat dispatches can overlap with either mode.
+func (s *Store) SetMode(id string, mode models.AgentMode) (models.Item, error) {
+	if !models.ValidAgentMode(mode) {
+		return models.Item{}, fmt.Errorf("unsupported agent mode %q", mode)
+	}
+	path, err := s.pathForID(id)
+	if err != nil {
+		return models.Item{}, err
+	}
+	item, err := ParseItem(path)
+	if err != nil {
+		return models.Item{}, err
+	}
+	if item.Mode == mode {
+		return item, nil
+	}
+	item.Mode = mode
+	if err := WriteItem(item, path); err != nil {
+		return models.Item{}, err
+	}
+	return item, nil
+}
+
 func (s *Store) CreateItem(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent string) (models.Item, error) {
 	return s.CreateItemWithGroup(channel, title, body, itemType, status, parent, "")
 }
@@ -372,6 +397,7 @@ func (s *Store) CreateItemWithGroup(channel models.Channel, title, body string, 
 		Channel: channel,
 		Type:    itemType,
 		Status:  status,
+		Mode:    models.AgentModeCode,
 		Created: now,
 		Parent:  parent,
 		Group:   group,

@@ -23,7 +23,7 @@ const (
 func itemContext(item models.Item) string {
 	var sb strings.Builder
 	sb.WriteString(item.Title + "\n")
-	sb.WriteString(fmt.Sprintf("channel: %s  type: %s  status: %s  created: %s\n\n", item.Channel, item.Type, item.Status, item.Created.Format(time.RFC3339)))
+	sb.WriteString(fmt.Sprintf("channel: %s  type: %s  status: %s  mode: %s  created: %s\n\n", item.Channel, item.Type, item.Status, models.NormalizeAgentMode(item.Mode), item.Created.Format(time.RFC3339)))
 	if item.Parent != "" {
 		sb.WriteString("parent: " + item.Parent + "\n\n")
 	}
@@ -82,7 +82,7 @@ func boundedItemContext(item models.Item) string {
 	if len([]rune(full)) <= bootstrapItemContextMaxChars {
 		return full
 	}
-	header := item.Title + "\n" + fmt.Sprintf("channel: %s  type: %s  status: %s\n\n", item.Channel, item.Type, item.Status)
+	header := item.Title + "\n" + fmt.Sprintf("channel: %s  type: %s  status: %s  mode: %s\n\n", item.Channel, item.Type, item.Status, models.NormalizeAgentMode(item.Mode))
 	body := trimRunes(item.Body, bootstrapItemContextMaxChars/2)
 	parts := []string{header + body}
 	used := len([]rune(parts[0]))
@@ -187,11 +187,12 @@ type enqueueMsg struct {
 	itemID   string
 	activity bool
 	pending  bool
+	mode     models.AgentMode
 }
 
-// Supervisor drives a background coding-agent harness, resuming it whenever
-// the user submits a turn on an ostraka item. One Supervisor serializes all
-// dispatches for a single .ostraka root (project) through a FIFO queue.
+// Supervisor drives background agent harnesses, resuming them whenever the
+// user submits a turn on an Ostraka item. One Supervisor allows chat dispatches
+// to overlap with one another and with one serialized code dispatch.
 type Supervisor struct {
 	root    string
 	harness Harness
@@ -223,11 +224,11 @@ type Supervisor struct {
 	turnCounts     map[string]int
 }
 
-// busyGuard tracks the item being dispatched right now, so the UI can ask
-// before quitting out from under a running turn.
+// busyGuard tracks dispatched items so the UI can ask before quitting out
+// from under running turns.
 type busyGuard struct {
-	mu     sync.Mutex
-	itemID string
+	mu    sync.Mutex
+	items map[string]bool
 }
 
 type activeTurn struct {
@@ -238,60 +239,73 @@ type activeTurn struct {
 }
 
 type activeTurnGuard struct {
-	mu   sync.Mutex
-	turn *activeTurn
+	mu    sync.Mutex
+	turns map[string]*activeTurn
 }
 
-// Busy reports the item currently being dispatched, if any.
+// Busy reports an item currently being dispatched, if any.
 func (s *Supervisor) Busy() (string, bool) {
 	s.busy.mu.Lock()
 	defer s.busy.mu.Unlock()
-	return s.busy.itemID, s.busy.itemID != ""
+	for itemID := range s.busy.items {
+		return itemID, true
+	}
+	return "", false
 }
 
-func (s *Supervisor) setBusy(itemID string) {
+func (s *Supervisor) setBusy(itemID string, busy bool) {
 	s.busy.mu.Lock()
 	defer s.busy.mu.Unlock()
-	s.busy.itemID = itemID
+	if s.busy.items == nil {
+		s.busy.items = make(map[string]bool)
+	}
+	if busy {
+		s.busy.items[itemID] = true
+	} else {
+		delete(s.busy.items, itemID)
+	}
 }
 
 func (s *Supervisor) clearActiveTurn(turn *activeTurn) {
 	s.active.mu.Lock()
-	if s.active.turn == turn {
-		s.active.turn = nil
+	if s.active.turns[turn.itemID] == turn {
+		delete(s.active.turns, turn.itemID)
 	}
 	s.active.mu.Unlock()
 }
 
-// Interrupt asks the active provider turn to stop. Providers with a native
-// protocol use it first; the per-turn context is the fallback, which causes
+// Interrupt asks every active provider turn to stop. Providers with a native
+// protocol use it first; each per-turn context is the fallback, which causes
 // process cleanup without shutting down the supervisor itself. It is safe and
 // successful when idle.
 func (s *Supervisor) Interrupt() error {
 	s.active.mu.Lock()
-	turn := s.active.turn
-	if turn != nil {
+	turns := make([]*activeTurn, 0, len(s.active.turns))
+	for _, turn := range s.active.turns {
 		turn.requested = true
+		turns = append(turns, turn)
 	}
 	s.active.mu.Unlock()
-	if turn == nil {
+	if len(turns) == 0 {
 		return nil
 	}
-	if turn.interrupt != nil {
-		if err := turn.interrupt(); err == nil {
-			return nil
+	for _, turn := range turns {
+		if turn.interrupt != nil {
+			if err := turn.interrupt(); err != nil {
+				s.logger.Printf("item %s: provider interrupt failed, using process cancellation: %v", turn.itemID, err)
+				turn.cancel()
+			}
 		} else {
-			s.logger.Printf("item %s: provider interrupt failed, using process cancellation: %v", turn.itemID, err)
+			turn.cancel()
 		}
 	}
-	turn.cancel()
 	return nil
 }
 
 func (s *Supervisor) interruptRequested(turn *activeTurn) bool {
 	s.active.mu.Lock()
 	defer s.active.mu.Unlock()
-	return turn.requested
+	return s.active.turns[turn.itemID] == turn && turn.requested
 }
 
 // Shutdown ends any in-flight dispatch and waits for the worker to stop. It is
@@ -457,8 +471,8 @@ func New(root string) *Supervisor {
 // This runs in New, before Start launches the worker: nothing can be in flight
 // yet, so every live log on disk is by definition an orphan and every
 // agent-acknowledged item is one no agent is working on. That reasoning
-// assumes one supervisor per root, which is also what the serial queue and the
-// single session file already assume.
+// assumes one supervisor per root, which is also what the concurrent dispatch
+// schedule and per-item session files already assume.
 func (s *Supervisor) recoverStaleDispatches() {
 	for _, log := range sweepLiveLogs(s.root) {
 		if strings.TrimSpace(log.content) != "" && s.store != nil {
@@ -505,9 +519,8 @@ func (s *Supervisor) recoverStaleDispatches() {
 	}
 }
 
-// Start launches the single worker goroutine that drains the queue serially,
-// never running two harness turns concurrently. Safe to call once per
-// Supervisor. Non-blocking.
+// Start launches the scheduler that allows chat work to overlap with other
+// chats and one code dispatch. Safe to call once per Supervisor. Non-blocking.
 func (s *Supervisor) Start() {
 	s.started = true
 	go s.run()
@@ -682,7 +695,7 @@ func (s *Supervisor) enqueueNewUserTurns(items []models.Item) {
 		s.queueMu.Unlock()
 		if busy {
 			// The active dispatch checks for a user turn appended after its
-			// start and queues the serialized follow-up when it unwinds.
+			// start and queues a follow-up when it unwinds.
 			continue
 		}
 		if item.Status != models.StatusPendingAgent {
@@ -698,18 +711,67 @@ func (s *Supervisor) enqueueNewUserTurns(items []models.Item) {
 func (s *Supervisor) run() {
 	defer close(s.done)
 	ctx := s.runContext()
-	for {
-		// Shutdown wins over a full queue: once it is cancelled, the remaining
-		// requests belong to a session that is ending, and draining them would
-		// start turns nobody is left to watch.
-		select {
-		case <-ctx.Done():
-			return
-		default:
+	finished := make(chan dispatchResult)
+	activeItems := make(map[string]bool)
+	activeChats := 0
+	codeActive := false
+	var pending []enqueueMsg
+
+	finish := func(result dispatchResult) {
+		delete(activeItems, result.itemID)
+		if result.mode == models.AgentModeChat {
+			activeChats--
+		} else {
+			codeActive = false
 		}
+	}
+	launch := func(msg enqueueMsg) {
+		mode := models.NormalizeAgentMode(msg.mode)
+		activeItems[msg.itemID] = true
+		if mode == models.AgentModeChat {
+			activeChats++
+		} else {
+			codeActive = true
+		}
+		go func() {
+			s.dispatch(msg)
+			finished <- dispatchResult{itemID: msg.itemID, mode: mode}
+		}()
+	}
+
+	for {
+		// Shutdown prevents new dispatches, then waits for every active provider
+		// turn to unwind so Shutdown retains its old join semantics.
+		if ctx.Err() != nil {
+			pending = nil
+			if activeChats == 0 && !codeActive {
+				return
+			}
+			finish(<-finished)
+			continue
+		}
+
+		started := false
+		for i, msg := range pending {
+			// Do not run two sessions for one item at once. Chat work can proceed
+			// while code is active; code work only waits for another code dispatch.
+			if activeItems[msg.itemID] || (msg.mode == models.AgentModeCode && codeActive) {
+				continue
+			}
+			pending = append(pending[:i], pending[i+1:]...)
+			launch(msg)
+			started = true
+			break
+		}
+		if started {
+			continue
+		}
+
 		select {
 		case <-ctx.Done():
-			return
+			continue
+		case result := <-finished:
+			finish(result)
 		case msg, ok := <-s.queue:
 			if !ok {
 				return
@@ -724,9 +786,24 @@ func (s *Supervisor) run() {
 				delete(s.pendingQueued, msg.itemID)
 				s.queueMu.Unlock()
 			}
-			s.dispatch(msg)
+			msg.mode = s.modeForItem(msg.itemID)
+			pending = append(pending, msg)
 		}
 	}
+}
+
+type dispatchResult struct {
+	itemID string
+	mode   models.AgentMode
+}
+
+func (s *Supervisor) modeForItem(itemID string) models.AgentMode {
+	if s.store != nil {
+		if item, err := s.store.GetItem(itemID); err == nil {
+			return models.NormalizeAgentMode(item.Mode)
+		}
+	}
+	return models.AgentModeCode
 }
 
 // markAcknowledged flags an item as being worked on, but only from
@@ -871,14 +948,18 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	if err := clearDispatchError(s.root, msg.itemID); err != nil {
 		s.logger.Printf("item %s: cannot clear previous dispatch error: %v", msg.itemID, err)
 	}
-	s.setBusy(msg.itemID)
-	defer s.setBusy("")
+	s.setBusy(msg.itemID, true)
+	defer s.setBusy(msg.itemID, false)
 
 	var userTurns []string
 	if haveDispatchItem && sf.SessionID != "" {
 		userTurns = unseenUserTurns(dispatchItem, sf.PromptedTurns)
 	}
-	prompt := agentprompt.Nudge(msg.itemID, userTurns, activities)
+	executionMode := models.NormalizeAgentMode(msg.mode)
+	if msg.mode == "" && haveDispatchItem {
+		executionMode = models.NormalizeAgentMode(dispatchItem.Mode)
+	}
+	prompt := agentprompt.NudgeForMode(msg.itemID, executionMode, userTurns, activities)
 	if sf.SessionID == "" {
 		instructions, brief := "", ""
 		context := fmt.Sprintf("Ostraka item %s could not be read.", msg.itemID)
@@ -886,6 +967,7 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 			instructions, _ = s.store.ProjectInstructions()
 			brief, _ = s.store.ProjectBrief()
 			if item, err := s.store.GetItem(msg.itemID); err == nil {
+				item.Mode = executionMode
 				context = boundedItemContext(item)
 				if partials, partialErr := s.store.ListPartialTraces(item.ID); partialErr == nil {
 					context += partialTraceContext(partials)
@@ -895,7 +977,7 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 				context += relationshipContext(s.store, item)
 			}
 		}
-		prompt = agentprompt.Bootstrap(msg.itemID, instructions, brief, context, replyCommand(s.root, msg.itemID), activities)
+		prompt = agentprompt.BootstrapForMode(msg.itemID, instructions, brief, context, replyCommand(s.root, msg.itemID), executionMode, activities)
 	}
 	harness := s.harnessFor(sf.Provider)
 	turnCtx, turnCancel := context.WithCancel(s.runContext())
@@ -905,7 +987,10 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		active.interrupt = interruptible.Interrupt
 	}
 	s.active.mu.Lock()
-	s.active.turn = active
+	if s.active.turns == nil {
+		s.active.turns = make(map[string]*activeTurn)
+	}
+	s.active.turns[msg.itemID] = active
 	s.active.mu.Unlock()
 	defer func() {
 		turnCancel()
@@ -1005,7 +1090,7 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 // queueUserFollowup handles the race where a user writes a turn after this
 // dispatch starts but before it finishes. The provider's reply may otherwise
 // move the item back to pending-user and make the queued request stale; mark
-// it pending-agent again so the serialized follow-up is admitted.
+// it pending-agent again so the follow-up is admitted after this dispatch.
 func (s *Supervisor) queueUserFollowup(itemID string, beforeTurns int) {
 	if s.store == nil {
 		return

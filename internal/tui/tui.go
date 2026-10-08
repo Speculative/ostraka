@@ -1118,6 +1118,9 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.projectPane == 0 && msg.String() == "shift+tab" {
+		return m.toggleSelectedAgentMode()
+	}
 	switch {
 	case msg.Type == tea.KeyLeft || msg.Type == tea.KeyShiftLeft || msg.String() == "h":
 		m.focus = focusItemList
@@ -1224,7 +1227,7 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "/":
 		return m.beginFilter()
 	case "q", "ctrl+c":
-		// Quitting now kills the running turn rather than leaving it to die
+		// Quitting now kills the running turns rather than leaving them to die
 		// whenever it next writes to a stdout nobody is reading, so the agent's
 		// work is genuinely lost — worth one keystroke of confirmation.
 		if _, busy := m.busyDispatch(); busy {
@@ -1326,6 +1329,35 @@ func (m model) handleHelpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "end", "G":
 		m.shortcuts.GotoBottom()
 	}
+	return m, nil
+}
+
+func (m model) toggleSelectedAgentMode() (tea.Model, tea.Cmd) {
+	itemID := m.selectedID()
+	if m.store == nil || itemID == "" || m.selected < 0 || m.selected >= len(m.items) {
+		return m, nil
+	}
+	current := models.NormalizeAgentMode(m.items[m.selected].Mode)
+	next := models.AgentModeCode
+	if current == models.AgentModeCode {
+		next = models.AgentModeChat
+	}
+	if _, err := m.store.SetMode(itemID, next); err != nil {
+		m.err = fmt.Errorf("change item mode: %w", err)
+		return m, nil
+	}
+	m.err = nil
+	for i := range m.items {
+		if m.items[i].ID == itemID {
+			m.items[i].Mode = next
+		}
+	}
+	for i := range m.allItems {
+		if m.allItems[i].ID == itemID {
+			m.allItems[i].Mode = next
+		}
+	}
+	m.updateConv()
 	return m, nil
 }
 
@@ -3091,6 +3123,7 @@ func shortcutHelpContent(width int) string {
 			{"c", "Create a subthread under the selected item."},
 			{"t / Enter", "Write a turn on the selected item, or reopen its draft."},
 			{"s", "Change status; on a proposed item, start it."},
+			{"Shift+Tab", "Toggle the selected item's Chat (read-only) or Code execution mode."},
 			{"S", "Choose a fresh agent session, model, and effort."},
 			{"m", "Move the item under another item; f in the picker also moves its children."},
 			{"g", "Edit the selected item's group."},
@@ -3098,7 +3131,7 @@ func shortcutHelpContent(width int) string {
 			{"v", "Reorder the selected backlog family; j/k preview, Enter commits, Esc cancels."},
 			{"r", "Refresh the current view."},
 			{"q", "Quit; confirm if a turn is running."},
-			{"Ctrl+C", "Interrupt a running turn; otherwise quit."},
+			{"Ctrl+C", "Interrupt all running turns; otherwise quit."},
 		}},
 		{title: "Views", rows: []shortcutHelpRow{
 			{"1 / 2 / 3", "Open Inbox, Archive, or Project Context."},
@@ -3464,7 +3497,7 @@ func (m model) quitConfirmBox() string {
 		// broken box rather than a narrow one. Drop to the short wording and
 		// the selectors' padding, which is the widest thing that still fits.
 		box = confirmStyle.Padding(0, 1).Render(
-			lipgloss.NewStyle().Bold(true).Render("stop the running turn?") + "\n" +
+			lipgloss.NewStyle().Bold(true).Render("stop the running turns?") + "\n" +
 				dimStyle.Render("y quit   other stay"))
 	}
 	return box
@@ -3687,7 +3720,7 @@ func (m model) renderFooter() string {
 	case modeSessionEffort:
 		text = "j/k select  enter start fresh session  esc back"
 	case modeQuit:
-		text = "y quit and stop the running turn  any other key stay"
+		text = "y quit and stop the running turns  any other key stay"
 	case modeHelp:
 		text = "↑/↓ j/k scroll  pgup/pgdn page  g/G top/bottom  esc/q/? close"
 	case modeProposal:
@@ -3729,27 +3762,36 @@ func (m model) renderFooter() string {
 		}
 	}
 
-	// Right-aligned agent/context info for the selected item: the model and
-	// remaining context % from its most recent turn. This is process-memory
-	// only (supervisor.TurnInfo) — it goes blank again after a restart, since
-	// there is no way to rederive it without running another turn.
-	right := m.renderAgentInfo(m.selectedID())
+	// Right-align mode and provider details only while an item is selected.
+	var right string
+	if m.projectPane == 0 {
+		right = m.renderAgentInfo(m.selectedID())
+	}
 	if m.mode == modeHelp {
 		right = ""
 	}
 
 	// Prefer a short help hint over the full navigation legend when the footer
-	// is narrow. Drop agent details next so the hint remains usable.
+	// is narrow, while keeping the selected item's mode visible at the right.
 	if lipgloss.Width(text)+lipgloss.Width(right) > m.width {
 		if m.mode == modeHelp {
 			text = "esc/q/? close"
 		} else {
 			text = "? help  ←/→ focus  f copy  1-3 views"
 		}
-		right = ""
 	}
-	if lipgloss.Width(text) > m.width {
-		text = ansi.Truncate(text, max(1, m.width), "…")
+	if lipgloss.Width(right) > m.width {
+		right = ansi.Truncate(right, max(1, m.width), "…")
+		text = ""
+	} else {
+		textWidth := m.width - lipgloss.Width(right)
+		if lipgloss.Width(text) > textWidth {
+			if textWidth == 0 {
+				text = ""
+			} else {
+				text = ansi.Truncate(text, textWidth, "…")
+			}
+		}
 	}
 	if pad := m.width - lipgloss.Width(text) - lipgloss.Width(right); pad > 0 {
 		text += strings.Repeat(" ", pad)
@@ -3757,44 +3799,58 @@ func (m model) renderFooter() string {
 	return footerStyle.Render(text + right)
 }
 
-// renderAgentInfo formats the model and remaining context % from itemID's
-// most recent turn this process. Before any turn has run — a freshly picked
-// session, or the TUI having just started against an item resumed from an
-// earlier process — it falls back to the explicitly selected model, if any,
-// so the user can tell what they are about to get without dispatching first.
-// An untouched item inherits the last explicit selection for its default
-// provider. If there is no saved preference, the harness default genuinely
-// is not knowable ahead of a turn (see 20260809-073211), so it renders "".
+// renderAgentInfo puts the selected item's execution mode beside its model
+// and effort, followed by remaining context % when a turn has reported it.
+// Model and context usage are process-memory details, so they may be absent
+// after a restart; the item's persisted mode remains visible.
 func (m model) renderAgentInfo(itemID string) string {
-	if itemID == "" || m.sup == nil {
+	if itemID == "" {
 		return ""
 	}
-	_, sessionModel, effort, _, _ := m.sup.Session(itemID)
-	if info, ok := m.sup.LastTurnInfo(itemID); ok {
-		model := info.Model
-		if model == "" {
-			model = sessionModel
-		}
-		agent := strings.TrimSpace(model + " " + effort)
-		if info.Context.WindowTokens <= 0 {
-			if agent == "" {
-				return ""
+	mode := strings.ToUpper(string(m.agentMode(itemID)))
+	var agent, usage string
+	if m.sup != nil {
+		_, sessionModel, effort, _, _ := m.sup.Session(itemID)
+		if info, ok := m.sup.LastTurnInfo(itemID); ok {
+			model := info.Model
+			if model == "" {
+				model = sessionModel
 			}
-			return agent + " "
+			agent = strings.TrimSpace(model + " " + effort)
+			if info.Context.WindowTokens > 0 {
+				remaining := 100 - info.Context.UsedTokens*100/info.Context.WindowTokens
+				if remaining < 0 {
+					remaining = 0
+				}
+				usage = fmt.Sprintf("%d%% left", remaining)
+			}
+		} else if sessionModel != "" {
+			agent = strings.TrimSpace(sessionModel + " " + effort)
 		}
-		remaining := 100 - info.Context.UsedTokens*100/info.Context.WindowTokens
-		if remaining < 0 {
-			remaining = 0
-		}
-		if agent == "" {
-			return fmt.Sprintf("%d%% left ", remaining)
-		}
-		return fmt.Sprintf("%s %d%% left ", agent, remaining)
 	}
-	if sessionModel != "" {
-		return strings.TrimSpace(sessionModel+" "+effort) + " "
+	if agent == "" {
+		agent = mode
+	} else {
+		agent = mode + " · " + agent
 	}
-	return ""
+	if usage != "" {
+		return agent + " " + usage + " "
+	}
+	return agent + " "
+}
+
+func (m model) agentMode(itemID string) models.AgentMode {
+	for _, item := range m.items {
+		if item.ID == itemID {
+			return models.NormalizeAgentMode(item.Mode)
+		}
+	}
+	for _, item := range m.allItems {
+		if item.ID == itemID {
+			return models.NormalizeAgentMode(item.Mode)
+		}
+	}
+	return models.AgentModeCode
 }
 
 func (m model) renderList(availH int) (content, scrollbar string) {

@@ -27,6 +27,7 @@ type frontmatter struct {
 	Channel string `yaml:"channel"`
 	Type    string `yaml:"type"`
 	Status  string `yaml:"status"`
+	Mode    string `yaml:"mode,omitempty"`
 	Created string `yaml:"created"`
 	Parent  string `yaml:"parent,omitempty"`
 	Group   string `yaml:"group,omitempty"`
@@ -186,6 +187,7 @@ func ParseItem(path string) (models.Item, error) {
 		Channel: channel,
 		Type:    itemType,
 		Status:  status,
+		Mode:    models.NormalizeAgentMode(models.AgentMode(fm.Mode)),
 		Created: created,
 		Parent:  fm.Parent,
 		Group:   fm.Group,
@@ -207,11 +209,13 @@ func WriteItem(item models.Item, path string) error {
 		}
 	}
 	item.Status = models.NormalizeStatus(item.Status)
+	item.Mode = models.NormalizeAgentMode(item.Mode)
 	fm := frontmatter{
 		ID:      item.ID,
 		Channel: string(item.Channel),
 		Type:    string(item.Type),
 		Status:  string(item.Status),
+		Mode:    string(item.Mode),
 		Created: item.Created.UTC().Format(time.RFC3339Nano),
 		Parent:  item.Parent,
 		Title:   item.Title,
