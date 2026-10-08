@@ -433,6 +433,8 @@ type model struct {
 	projectPane    int
 	projectEntries []projectEntry
 	editingProject bool
+	projectPreview bool
+	projectCursor  int
 
 	width  int
 	height int
@@ -1006,7 +1008,21 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.filterInput, cmd = m.filterInput.Update(msg)
 		cmds = append(cmds, cmd)
-	case modeCompose, modeGroup:
+	case modeCompose:
+		if m.editingProject && m.projectPreview {
+			var cmd tea.Cmd
+			m.conv, cmd = m.conv.Update(msg)
+			cmds = append(cmds, cmd)
+		} else {
+			prevLines := m.currentInputHeight()
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			cmds = append(cmds, cmd)
+			if m.currentInputHeight() != prevLines {
+				m = m.recalcLayout()
+			}
+		}
+	case modeGroup:
 		prevLines := m.currentInputHeight()
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -1187,10 +1203,12 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.editingProject = true
+			m.projectPreview = false
 			m.mode = modeCompose
 			m.input.Reset()
 			m.input.SetValue(m.projectEntries[m.selected].content)
 			m.input.CursorEnd()
+			m.projectCursor = textareaCursorOffset(m.input)
 			m = m.recalcLayout()
 			return m, m.input.Focus()
 		case "q", "ctrl+c":
@@ -2493,6 +2511,31 @@ func (m model) chooseMention() (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.editingProject && m.projectPreview {
+		switch msg.String() {
+		case "ctrl+o":
+			m.projectPreview = false
+			m = m.recalcLayout()
+			setTextareaCursorOffset(&m.input, m.projectCursor)
+			return m, m.input.Focus()
+		case "pgup":
+			return m, m.pageConversation(-1)
+		case "pgdown":
+			return m, m.pageConversation(1)
+		case "up", "k":
+			m.conv.ScrollUp(1)
+			m.syncNewBelow()
+			return m, nil
+		case "down", "j":
+			m.conv.ScrollDown(1)
+			m.syncNewBelow()
+			return m, nil
+		case "ctrl+s", "esc":
+			// Saving and canceling use the same paths as the editor view.
+		default:
+			return m, nil
+		}
+	}
 	if m.mentionPicker.open {
 		switch {
 		case msg.String() == "esc":
@@ -2517,6 +2560,13 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.editingProject && msg.String() == "ctrl+o" {
+		m.projectCursor = textareaCursorOffset(m.input)
+		m.projectPreview = true
+		m.input.Blur()
+		m = m.recalcLayout()
+		return m, nil
+	}
 	switch msg.String() {
 	case "ctrl+n":
 		if !m.editingNewItemDraft() && !m.editingProject && m.selected < len(m.items) && m.items[m.selected].Status != models.StatusProposed {
@@ -2538,6 +2588,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.editingProject = false
+			m.projectPreview = false
 			m.mode = modeNav
 			m.input.Blur()
 			m = m.recalcLayout()
@@ -2599,6 +2650,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.closeMentionPicker()
 		if m.editingProject {
 			m.editingProject = false
+			m.projectPreview = false
 			m.mode = modeNav
 			m.input.Blur()
 			m = m.recalcLayout()
@@ -2890,7 +2942,17 @@ func (m model) View() string {
 	convScrollbar := renderScrollbar(m.conv.Height, m.conv.TotalLineCount(), m.conv.YOffset)
 	convWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, m.renderConv(), convScrollbar)
 	var convPanel string
-	if m.mode == modeHelp {
+	if m.editingProject && !m.projectPreview {
+		// Project documents use the reading pane as their editor. Match the
+		// reader's padding and scrollbar so the cursor appears in place without
+		// leaving a second, narrow composer below it.
+		taView := m.input.View()
+		tvp := textareaViewport(&m.input)
+		scrollbar := renderScrollbar(m.input.Height(), tvp.TotalLineCount(), tvp.YOffset)
+		convPanel = lipgloss.NewStyle().Padding(1, 0, 1, 1).Render(
+			lipgloss.JoinHorizontal(lipgloss.Top, taView, scrollbar),
+		)
+	} else if m.mode == modeHelp {
 		helpScrollbar := renderScrollbar(m.shortcuts.Height, m.shortcuts.TotalLineCount(), m.shortcuts.YOffset)
 		helpWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, m.shortcuts.View(), helpScrollbar)
 		convPanel = lipgloss.NewStyle().Padding(1, 0, 1, 1).Render(helpWithScrollbar)
@@ -3042,6 +3104,7 @@ func shortcutHelpContent(width int) string {
 			{"1 / 2 / 3", "Open Inbox, Archive, or Project Context."},
 			{"Tab", "In Project Context, switch between instructions and brief."},
 			{"e", "Edit the selected project document."},
+			{"Ctrl+O", "Toggle between the project document editor and Markdown preview."},
 		}},
 		{title: "Writing and selection", rows: []shortcutHelpRow{
 			{"Ctrl+S", "Submit a turn, create an item, or save the current edit."},
@@ -3601,7 +3664,10 @@ func (m model) renderFooter() string {
 			text = "ctrl+s submit  ctrl+n related item  esc cancel  pgup/pgdn scroll"
 		}
 		if m.editingProject {
-			text = "ctrl+s save project document  esc cancel"
+			text = "ctrl+o preview  ctrl+s save project document  esc cancel"
+			if m.projectPreview {
+				text = "ctrl+o edit  ctrl+s save project document  esc cancel  pgup/pgdn scroll"
+			}
 		}
 		if m.editingNewItemDraft() {
 			text = "ctrl+s create item  esc keep draft  ctrl+c discard"
@@ -4385,7 +4451,7 @@ func (m *model) refreshPendingDraft() {
 }
 
 func (m model) composerVisible() bool {
-	return m.mode == modeCompose || m.mode == modeGroup ||
+	return (m.mode == modeCompose && !(m.editingProject && m.projectPreview)) || m.mode == modeGroup ||
 		(m.draftVisible() && m.draftSelected && m.draftBodyStarted) ||
 		(m.pendingDraftItemID != "" && m.pendingDraftItemID == m.selectedID())
 }
@@ -5101,6 +5167,9 @@ func (m *model) updateProjectConv() {
 		title = "Agent-curated project brief"
 	}
 	content := entry.content
+	if m.editingProject && m.projectPreview {
+		content = m.input.Value()
+	}
 	if content == "" {
 		content = "(empty)"
 	}
@@ -5298,6 +5367,11 @@ func (m model) recalcLayout() model {
 	mainH := m.height - 2 // subtract header and footer
 	if m.copyMode {
 		mainH = m.height
+	}
+	if m.editingProject && !m.projectPreview {
+		// The full-pane editor sits inside the reader's one-row top and bottom
+		// padding, exactly like the markdown viewport it replaces.
+		inputH = max(1, mainH-2)
 	}
 	m.shortcuts.Width = convW
 	m.shortcuts.Height = max(1, mainH-2)

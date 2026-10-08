@@ -1014,6 +1014,66 @@ func TestProjectBriefHistoryIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestProjectDocumentEditorFillsPaneAndTogglesMarkdownPreview(t *testing.T) {
+	st, err := store.NewStore(filepath.Join(t.TempDir(), ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const document = "# Notes\n\n**bold phrase** and more content."
+	if err := st.ReplaceProjectInstructions(document); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(st, nil, nil)
+	m.width, m.height = 100, 24
+	m.projectPane = 1
+	m.showProjectContext()
+	m = m.recalcLayout()
+
+	next, _ := m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = next.(model)
+	if !m.editingProject || m.projectPreview {
+		t.Fatalf("editor state = editing %v, preview %v", m.editingProject, m.projectPreview)
+	}
+	if m.input.Height() != m.height-4 {
+		t.Fatalf("full-pane editor height = %d, want %d", m.input.Height(), m.height-4)
+	}
+	editorView := m.View()
+	if got := lipgloss.Height(editorView); got != m.height {
+		t.Fatalf("editor frame height = %d, want %d", got, m.height)
+	}
+	if plain := ansi.Strip(editorView); !strings.Contains(plain, "**bold phrase**") || strings.Contains(plain, "User-owned project instructions") {
+		t.Fatalf("editor did not replace the reading pane: %q", plain)
+	}
+
+	const cursor = 12
+	setTextareaCursorOffset(&m.input, cursor)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	m = next.(model)
+	if !m.projectPreview || m.composerSlotVisible() {
+		t.Fatalf("preview state = preview %v, composer visible %v", m.projectPreview, m.composerSlotVisible())
+	}
+	if got := textareaCursorOffset(m.input); got != cursor {
+		t.Fatalf("cursor offset after preview toggle = %d, want %d", got, cursor)
+	}
+	preview := ansi.Strip(m.conv.View())
+	if !strings.Contains(preview, "bold phrase") || strings.Contains(preview, "**bold phrase**") {
+		t.Fatalf("preview did not render the current Markdown: %q", preview)
+	}
+	if got := lipgloss.Height(m.View()); got != m.height {
+		t.Fatalf("preview frame height = %d, want %d", got, m.height)
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	m = next.(model)
+	if m.projectPreview || !m.input.Focused() {
+		t.Fatalf("editor was not restored: preview=%v focused=%v", m.projectPreview, m.input.Focused())
+	}
+	if got := textareaCursorOffset(m.input); got != cursor {
+		t.Fatalf("cursor offset after restoring editor = %d, want %d", got, cursor)
+	}
+}
+
 func TestProjectContextIgnoresQueuedItemReloads(t *testing.T) {
 	m := model{
 		view:        channelView(models.ChannelInbox),
