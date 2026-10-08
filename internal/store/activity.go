@@ -51,9 +51,11 @@ func (s *Store) ListActivities(rootID string) ([]models.Activity, error) {
 	return activities, nil
 }
 
-// PendingActivities returns the events which have not yet been included in a
-// successful root dispatch. It deliberately does not mark them while reading:
-// a provider run may fail or may finish without posting its final item turn.
+// PendingActivities returns user-authored events which have not yet been
+// included in a successful root dispatch. Agent-authored events are already
+// known to their author and never become root work. It deliberately does not
+// mark pending user events while reading: a provider run may fail or may
+// finish without posting its final item turn.
 func (s *Store) PendingActivities(rootID string) ([]models.Activity, error) {
 	all, err := s.ListActivities(rootID)
 	if err != nil {
@@ -61,7 +63,7 @@ func (s *Store) PendingActivities(rootID string) ([]models.Activity, error) {
 	}
 	var pending []models.Activity
 	for _, activity := range all {
-		if !activity.Handled {
+		if !activity.Handled && activity.Actor != models.ActorAgent {
 			pending = append(pending, activity)
 		}
 	}
@@ -134,6 +136,11 @@ func activityID(now time.Time) string {
 }
 
 func (s *Store) appendActivity(rootID string, activity models.Activity) error {
+	if activity.Actor == models.ActorAgent {
+		// The agent already knows about changes made during its own dispatch.
+		// Keep them in the timeline, but do not feed them back as root work.
+		activity.Handled = true
+	}
 	if strings.TrimSpace(activity.ID) == "" {
 		activity.ID = activityID(activity.Timestamp)
 	}
@@ -153,14 +160,14 @@ func writeJSONAtomic(path string, value any) error {
 	return writeFileAtomic(path, append(b, '\n'))
 }
 
-func (s *Store) addSubthreadActivity(root models.Item, child models.Item, kind, result string) error {
+func (s *Store) addSubthreadActivity(root models.Item, child models.Item, kind, result string, actor models.Actor) error {
 	return s.appendActivity(root.ID, models.Activity{
 		ID:         activityID(time.Now().UTC()),
 		Type:       kind,
 		ChildID:    child.ID,
 		ChildTitle: child.Title,
 		Result:     result,
-		Actor:      models.ActorUser,
+		Actor:      actor,
 		Timestamp:  time.Now().UTC(),
 	})
 }

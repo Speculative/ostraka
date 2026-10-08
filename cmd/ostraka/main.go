@@ -227,6 +227,16 @@ func mustStore() *store.Store {
 	return s
 }
 
+// itemCommandActor uses the supervisor-provided dispatch marker to distinguish
+// agent CLI mutations from commands invoked by the user. The marker is scoped
+// to provider subprocesses and their descendants.
+func itemCommandActor() models.Actor {
+	if strings.TrimSpace(os.Getenv("OSTRAKA_AGENT_ITEM_ID")) != "" {
+		return models.ActorAgent
+	}
+	return models.ActorUser
+}
+
 func die(err error) {
 	fmt.Fprintln(os.Stderr, "error:", err)
 	os.Exit(1)
@@ -323,7 +333,7 @@ var itemRenameCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s := mustStore()
-		if _, err := s.RenameItem(args[0], args[1]); err != nil {
+		if _, err := s.RenameItemBy(args[0], args[1], itemCommandActor()); err != nil {
 			die(err)
 		}
 		return nil
@@ -358,7 +368,7 @@ var itemReparentCmd = &cobra.Command{
 		if len(args) == 2 {
 			parent = args[1]
 		}
-		item, err := mustStore().ReparentItem(args[0], parent, reparentFlags.flattenChildren)
+		item, err := mustStore().ReparentItemBy(args[0], parent, reparentFlags.flattenChildren, itemCommandActor())
 		if err != nil {
 			return err
 		}
@@ -372,7 +382,7 @@ var itemUnparentCmd = &cobra.Command{
 	Short: "Promote a child to a top-level item",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		item, err := mustStore().UnparentItem(args[0])
+		item, err := mustStore().UnparentItemBy(args[0], itemCommandActor())
 		if err != nil {
 			return err
 		}
@@ -439,9 +449,9 @@ var itemAddCmd = &cobra.Command{
 		}
 		var item models.Item
 		if addFlags.parent != "" {
-			item, err = s.CreateSubthread(addFlags.parent, addFlags.title, addFlags.body, models.ItemType(addFlags.itype), status)
+			item, err = s.CreateSubthreadBy(addFlags.parent, addFlags.title, addFlags.body, models.ItemType(addFlags.itype), status, itemCommandActor())
 		} else {
-			item, err = s.CreateItemWithGroup(models.Channel(addFlags.channel), addFlags.title, addFlags.body, models.ItemType(addFlags.itype), status, "", group)
+			item, err = s.CreateItemWithGroupBy(models.Channel(addFlags.channel), addFlags.title, addFlags.body, models.ItemType(addFlags.itype), status, "", group, itemCommandActor())
 		}
 		if err != nil {
 			return err
@@ -727,7 +737,11 @@ var itemTurnCmd = &cobra.Command{
 			return err
 		}
 		s := mustStore()
-		if _, err := s.AddTurn(args[0], models.Actor(turnFlags.actor), content); err != nil {
+		actor := models.Actor(turnFlags.actor)
+		if itemCommandActor() == models.ActorAgent {
+			actor = models.ActorAgent
+		}
+		if _, err := s.AddTurn(args[0], actor, content); err != nil {
 			die(err)
 		}
 		return nil
@@ -763,7 +777,7 @@ var itemStatusCmd = &cobra.Command{
 			return err
 		}
 		s := mustStore()
-		if _, err := s.SetStatus(args[0], status); err != nil {
+		if _, err := s.SetStatusBy(args[0], status, itemCommandActor()); err != nil {
 			die(err)
 		}
 		return nil
@@ -779,7 +793,7 @@ var itemGroupCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		item, err := mustStore().SetGroup(args[0], group)
+		item, err := mustStore().SetGroupBy(args[0], group, itemCommandActor())
 		if err != nil {
 			return err
 		}
@@ -845,6 +859,6 @@ var itemRmCmd = &cobra.Command{
 				return nil
 			}
 		}
-		return s.DeleteItem(args[0])
+		return s.DeleteItemBy(args[0], itemCommandActor())
 	},
 }

@@ -161,6 +161,43 @@ func TestChildRenameAndGroupChangesUseRootActivityJournal(t *testing.T) {
 	}
 }
 
+func TestAgentMutationActivitiesAreAttributedAndHandled(t *testing.T) {
+	s := newTestStore(t)
+	root, err := s.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.CreateSubthreadBy(root.ID, "child", "body", models.TypeThread, models.StatusActive, models.ActorAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RenameItemBy(child.ID, "renamed child", models.ActorAgent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetGroupBy(child.ID, "agent-work", models.ActorAgent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetStatusBy(child.ID, models.StatusArchived, models.ActorAgent); err != nil {
+		t.Fatal(err)
+	}
+
+	activities, err := s.ListActivities(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activities) != 4 {
+		t.Fatalf("agent activity journal = %+v, want creation, rename, group, close", activities)
+	}
+	for _, activity := range activities {
+		if activity.Actor != models.ActorAgent || !activity.Handled {
+			t.Errorf("agent activity should be attributed and handled: %+v", activity)
+		}
+	}
+	if pending, err := s.PendingActivities(root.ID); err != nil || len(pending) != 0 {
+		t.Fatalf("agent actions remain pending for their root = %+v, err=%v", pending, err)
+	}
+}
+
 func TestRenameItemRejectsInvalidTitleWithoutChangingItem(t *testing.T) {
 	s := newTestStore(t)
 	item, err := s.CreateItem(models.ChannelInbox, "old title", "body", models.TypeThread, models.StatusActive, "")

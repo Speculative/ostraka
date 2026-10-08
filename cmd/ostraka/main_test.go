@@ -99,6 +99,86 @@ func TestItemRenameCommandRequiresIDAndTitle(t *testing.T) {
 	}
 }
 
+func TestAgentItemCommandsMarkChildChangesAsAgentActions(t *testing.T) {
+	project := t.TempDir()
+	s, err := store.NewStore(filepath.Join(project, ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := s.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	t.Setenv("OSTRAKA_AGENT_ITEM_ID", root.ID)
+
+	oldFlags := addFlags
+	t.Cleanup(func() { addFlags = oldFlags })
+	addFlags.channel = "inbox"
+	addFlags.title = "agent child"
+	addFlags.body = "created by an agent dispatch"
+	addFlags.itype = "thread"
+	addFlags.status = "active"
+	addFlags.parent = root.ID
+	addFlags.group = ""
+	addFlags.mentions = nil
+	if err := itemAddCmd.RunE(itemAddCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	activities, err := s.ListActivities(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activities) != 1 || activities[0].Type != store.ActivitySubthreadCreated ||
+		activities[0].Actor != models.ActorAgent || !activities[0].Handled {
+		t.Fatalf("agent child creation activity = %+v", activities)
+	}
+	childID := activities[0].ChildID
+	if err := itemStatusCmd.RunE(itemStatusCmd, []string{childID, "archived"}); err != nil {
+		t.Fatal(err)
+	}
+	activities, err = s.ListActivities(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activities) != 2 || activities[1].Type != store.ActivitySubthreadClosed ||
+		activities[1].Actor != models.ActorAgent || !activities[1].Handled {
+		t.Fatalf("agent child close activity = %+v", activities)
+	}
+}
+
+func TestAgentItemTurnCannotClaimUserActor(t *testing.T) {
+	project := t.TempDir()
+	s, err := store.NewStore(filepath.Join(project, ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	t.Setenv("OSTRAKA_AGENT_ITEM_ID", item.ID)
+	oldActor, oldContentStdin := turnFlags.actor, turnFlags.contentStdin
+	t.Cleanup(func() {
+		turnFlags.actor = oldActor
+		turnFlags.contentStdin = oldContentStdin
+	})
+	turnFlags.actor = "user"
+	turnFlags.contentStdin = false
+	if err := itemTurnCmd.RunE(itemTurnCmd, []string{item.ID, "agent-authored"}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := s.GetItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Turns) != 1 || updated.Turns[0].Actor != models.ActorAgent {
+		t.Fatalf("agent-authored turn = %+v, want actor agent", updated.Turns)
+	}
+}
+
 func TestAgentProjectReplacementUsesDispatchItemForActivity(t *testing.T) {
 	project := t.TempDir()
 	s, err := store.NewStore(filepath.Join(project, ".ostraka"))

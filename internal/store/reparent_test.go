@@ -77,6 +77,31 @@ func TestReparentSubthreadPreservesItemAndActivityHistory(t *testing.T) {
 	}
 }
 
+func TestAgentReparentActivitiesAreHandledOnBothRoots(t *testing.T) {
+	s := newTestStore(t)
+	oldRoot, _ := s.CreateItem(models.ChannelInbox, "old root", "body", models.TypeThread, models.StatusActive, "")
+	newRoot, _ := s.CreateItem(models.ChannelInbox, "new root", "body", models.TypeThread, models.StatusActive, "")
+	child, _ := s.CreateSubthread(oldRoot.ID, "child", "body", models.TypeThread, models.StatusActive)
+	if _, err := s.ReparentItemBy(child.ID, newRoot.ID, false, models.ActorAgent); err != nil {
+		t.Fatal(err)
+	}
+	for _, rootID := range []string{oldRoot.ID, newRoot.ID} {
+		activities, err := s.ListActivities(rootID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var moved *models.Activity
+		for i := range activities {
+			if activities[i].Type == store.ActivitySubthreadMoved {
+				moved = &activities[i]
+			}
+		}
+		if moved == nil || moved.Actor != models.ActorAgent || !moved.Handled {
+			t.Errorf("move activity on root %s = %+v, want handled agent activity", rootID, activities)
+		}
+	}
+}
+
 func TestReparentParentRequiresAndAppliesFlattenChildren(t *testing.T) {
 	s := newTestStore(t)
 	oldRoot, _ := s.CreateItem(models.ChannelInbox, "old root", "old body", models.TypeThread, models.StatusActive, "")

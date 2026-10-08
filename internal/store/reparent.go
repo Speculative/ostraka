@@ -14,6 +14,10 @@ import (
 // children then become siblings beneath newRootID, preserving the one-level
 // hierarchy invariant.
 func (s *Store) ReparentItem(itemID, newRootID string, flattenChildren bool) (models.Item, error) {
+	return s.ReparentItemBy(itemID, newRootID, flattenChildren, models.ActorUser)
+}
+
+func (s *Store) ReparentItemBy(itemID, newRootID string, flattenChildren bool, actor models.Actor) (models.Item, error) {
 	if strings.TrimSpace(itemID) == "" {
 		return models.Item{}, fmt.Errorf("item ID must not be blank")
 	}
@@ -146,12 +150,12 @@ func (s *Store) ReparentItem(itemID, newRootID string, flattenChildren bool) (mo
 		return models.Item{}, err
 	}
 	for _, changed := range changes {
-		activity := movedActivity(changed.after, changed.oldRoot, newRoot.ID)
+		activity := movedActivity(changed.after, changed.oldRoot, newRoot.ID, actor)
 		oldJournal := journals[changed.oldRoot]
 		oldJournal.after = append(oldJournal.after, activity)
 		journals[changed.oldRoot] = oldJournal
 		newJournal := journals[newRoot.ID]
-		newJournal.after = append(newJournal.after, movedActivity(changed.after, changed.oldRoot, newRoot.ID))
+		newJournal.after = append(newJournal.after, movedActivity(changed.after, changed.oldRoot, newRoot.ID, actor))
 		journals[newRoot.ID] = newJournal
 	}
 
@@ -196,6 +200,10 @@ func (s *Store) ReparentItem(itemID, newRootID string, flattenChildren bool) (mo
 // old root receives an activity record and a backlog child becomes a new root
 // entry in the explicit backlog order.
 func (s *Store) UnparentItem(itemID string) (models.Item, error) {
+	return s.UnparentItemBy(itemID, models.ActorUser)
+}
+
+func (s *Store) UnparentItemBy(itemID string, actor models.Actor) (models.Item, error) {
 	path, err := s.pathForID(itemID)
 	if err != nil {
 		return models.Item{}, err
@@ -224,7 +232,7 @@ func (s *Store) UnparentItem(itemID string) (models.Item, error) {
 		ChildTitle: item.Title,
 		FromRootID: root.ID,
 		Result:     "unparented",
-		Actor:      models.ActorUser,
+		Actor:      actor,
 		Timestamp:  time.Now().UTC(),
 	}); err != nil {
 		return models.Item{}, err
@@ -237,7 +245,7 @@ func (s *Store) UnparentItem(itemID string) (models.Item, error) {
 	return item, nil
 }
 
-func movedActivity(child models.Item, fromRootID, toRootID string) models.Activity {
+func movedActivity(child models.Item, fromRootID, toRootID string, actor models.Actor) models.Activity {
 	now := time.Now().UTC()
 	return models.Activity{
 		ID:         activityID(now),
@@ -247,7 +255,8 @@ func movedActivity(child models.Item, fromRootID, toRootID string) models.Activi
 		FromRootID: fromRootID,
 		ToRootID:   toRootID,
 		Result:     "moved",
-		Actor:      models.ActorUser,
+		Actor:      actor,
+		Handled:    actor == models.ActorAgent,
 		Timestamp:  now,
 	}
 }

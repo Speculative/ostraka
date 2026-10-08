@@ -281,6 +281,12 @@ func (s *Store) inheritGroup(item models.Item) models.Item {
 // RenameItem changes an item's single-line title without changing its body,
 // turns, or filesystem location.
 func (s *Store) RenameItem(id, title string) (models.Item, error) {
+	return s.RenameItemBy(id, title, models.ActorUser)
+}
+
+// RenameItemBy records which actor changed the item's title. Agent-authored
+// changes remain visible in the root journal without prompting the same agent.
+func (s *Store) RenameItemBy(id, title string, actor models.Actor) (models.Item, error) {
 	if err := ValidateTitle(title); err != nil {
 		return models.Item{}, err
 	}
@@ -313,7 +319,7 @@ func (s *Store) RenameItem(id, title string) (models.Item, error) {
 		ChildID:       childActivityID(item),
 		ChildTitle:    childActivityTitle(item),
 		Result:        "renamed",
-		Actor:         models.ActorUser,
+		Actor:         actor,
 		Timestamp:     time.Now().UTC(),
 	}); err != nil {
 		return models.Item{}, err
@@ -347,13 +353,21 @@ func (s *Store) SetMode(id string, mode models.AgentMode) (models.Item, error) {
 }
 
 func (s *Store) CreateItem(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent string) (models.Item, error) {
-	return s.CreateItemWithGroup(channel, title, body, itemType, status, parent, "")
+	return s.CreateItemBy(channel, title, body, itemType, status, parent, models.ActorUser)
+}
+
+func (s *Store) CreateItemBy(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent string, actor models.Actor) (models.Item, error) {
+	return s.CreateItemWithGroupBy(channel, title, body, itemType, status, parent, "", actor)
 }
 
 // CreateItemWithGroup creates an item and assigns a group to a new root. A
 // child always inherits its root's group and cannot create a second grouping
 // axis of its own.
 func (s *Store) CreateItemWithGroup(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent, group string) (models.Item, error) {
+	return s.CreateItemWithGroupBy(channel, title, body, itemType, status, parent, group, models.ActorUser)
+}
+
+func (s *Store) CreateItemWithGroupBy(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent, group string, actor models.Actor) (models.Item, error) {
 	status = models.NormalizeStatus(status)
 	if err := ValidateChannel(channel); err != nil {
 		return models.Item{}, err
@@ -434,7 +448,7 @@ func (s *Store) CreateItemWithGroup(channel models.Channel, title, body string, 
 		}
 	}
 	if parent != "" {
-		if err := s.addSubthreadActivity(parentItem, item, ActivitySubthreadCreated, ""); err != nil {
+		if err := s.addSubthreadActivity(parentItem, item, ActivitySubthreadCreated, "", actor); err != nil {
 			return models.Item{}, err
 		}
 	}
@@ -444,6 +458,10 @@ func (s *Store) CreateItemWithGroup(channel models.Channel, title, body string, 
 // SetGroup assigns group to the root owning id. Passing an empty group clears
 // the assignment. The returned item is the root whose frontmatter changed.
 func (s *Store) SetGroup(id, group string) (models.Item, error) {
+	return s.SetGroupBy(id, group, models.ActorUser)
+}
+
+func (s *Store) SetGroupBy(id, group string, actor models.Actor) (models.Item, error) {
 	if err := ValidateGroup(group); err != nil {
 		return models.Item{}, err
 	}
@@ -486,7 +504,7 @@ func (s *Store) SetGroup(id, group string) (models.Item, error) {
 		Group:         group,
 		PreviousGroup: oldGroup,
 		Result:        previous + " → " + result,
-		Actor:         models.ActorUser,
+		Actor:         actor,
 		Timestamp:     time.Now().UTC(),
 	}); err != nil {
 		return models.Item{}, err
@@ -528,6 +546,10 @@ func (s *Store) reserveItemID(id string) (release func(), acquired bool, err err
 // attaches the new item directly to the root. This is the store-level guard
 // behind the product's one-level tree invariant.
 func (s *Store) CreateSubthread(contextID string, title, body string, itemType models.ItemType, status models.Status) (models.Item, error) {
+	return s.CreateSubthreadBy(contextID, title, body, itemType, status, models.ActorUser)
+}
+
+func (s *Store) CreateSubthreadBy(contextID string, title, body string, itemType models.ItemType, status models.Status, actor models.Actor) (models.Item, error) {
 	context, err := s.GetItem(contextID)
 	if err != nil {
 		return models.Item{}, err
@@ -536,7 +558,7 @@ func (s *Store) CreateSubthread(contextID string, title, body string, itemType m
 	if context.Parent != "" {
 		rootID = context.Parent
 	}
-	item, err := s.CreateItem(context.Channel, title, body, itemType, status, rootID)
+	item, err := s.CreateItemBy(context.Channel, title, body, itemType, status, rootID, actor)
 	if err != nil {
 		return models.Item{}, err
 	}
@@ -794,6 +816,10 @@ func (s *Store) validateChildStatusTransition(item models.Item, status models.St
 }
 
 func (s *Store) DeleteItem(id string) error {
+	return s.DeleteItemBy(id, models.ActorUser)
+}
+
+func (s *Store) DeleteItemBy(id string, actor models.Actor) error {
 	path, err := s.pathForID(id)
 	if err != nil {
 		return err
@@ -828,7 +854,7 @@ func (s *Store) DeleteItem(id string) error {
 			ChildID:    deleted.ID,
 			ChildTitle: deleted.Title,
 			Result:     "deleted",
-			Actor:      models.ActorUser,
+			Actor:      actor,
 			Timestamp:  time.Now().UTC(),
 		}); err != nil {
 			return err

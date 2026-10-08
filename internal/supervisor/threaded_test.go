@@ -2,6 +2,8 @@ package supervisor
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -53,6 +55,24 @@ func TestChildActivityDispatchIncludesAndHandlesEvents(t *testing.T) {
 	}
 	if pending, err := st.PendingActivities(root.ID); err != nil || len(pending) != 0 {
 		t.Fatalf("pending activities after synthesis = %+v, err=%v", pending, err)
+	}
+}
+
+func TestAgentChildActivityDoesNotWakeItsRoot(t *testing.T) {
+	s, st := newStoreBackedSupervisor(t, &activityHarness{})
+	root, _ := st.CreateItem(models.ChannelInbox, "root", "body", models.TypeThread, models.StatusActive, "")
+	journal := filepath.Join(st.Root, "ACTIVITY", root.ID+".json")
+	if err := os.WriteFile(journal, []byte("[{\"id\":\"agent-close\",\"type\":\"subthread.closed\",\"child_id\":\"child\",\"actor\":\"agent\"}]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	s.EnqueuePendingActivityRoots()
+	got, err := st.GetItem(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != models.StatusActive {
+		t.Fatalf("root status after agent activity = %q, want active", got.Status)
 	}
 }
 

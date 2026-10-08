@@ -611,6 +611,9 @@ func (s *Supervisor) EnqueuePendingActivityRoots() {
 		}
 		shouldWake := false
 		for _, activity := range activities {
+			if activity.Actor == models.ActorAgent {
+				continue
+			}
 			if activity.Type == store.ActivitySubthreadClosed || activity.Type == store.ActivitySubthreadDeleted {
 				shouldWake = true
 				break
