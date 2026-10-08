@@ -904,6 +904,17 @@ func TestFooterUsesThreeViewKeyRange(t *testing.T) {
 	if strings.Contains(got, "1-4") {
 		t.Errorf("footer still advertises the removed fourth view: %q", got)
 	}
+	if !strings.Contains(got, "? help") {
+		t.Errorf("full navigation footer does not advertise shortcut help: %q", got)
+	}
+	m.width = 32
+	got = m.renderFooter()
+	if plain := ansi.Strip(got); !strings.Contains(plain, "? help") {
+		t.Errorf("narrow footer dropped the help hint: %q", plain)
+	}
+	if lipgloss.Width(got) != m.width {
+		t.Errorf("narrow footer width = %d, want %d", lipgloss.Width(got), m.width)
+	}
 }
 
 func TestProjectContextUsesTheThirdViewKey(t *testing.T) {
@@ -1467,6 +1478,80 @@ func TestOpeningModalRecalculatesTheComposerSlot(t *testing.T) {
 	}
 	if got := lipgloss.Height(m.View()); got != m.height {
 		t.Fatalf("rendered height after opening modal = %d, want %d", got, m.height)
+	}
+}
+
+func TestShortcutHelpUsesAndScrollsTheFullReadingPane(t *testing.T) {
+	m := newModel(nil, nil, nil)
+	m.width = 100
+	m.height = 22
+	m.items = []models.Item{{
+		ID:      "help-item",
+		Channel: models.ChannelInbox,
+		Status:  models.StatusActive,
+		Title:   "shortcut help keeps the item list visible",
+		Body:    "conversation content stays behind the help reader",
+	}}
+	m.allItems = append([]models.Item(nil), m.items...)
+	m.selected = 0
+	m = m.recalcLayout()
+	conversationOffset := m.conv.YOffset
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m = next.(model)
+	if m.mode != modeHelp {
+		t.Fatalf("? opened mode %v, want shortcut help", m.mode)
+	}
+	if !m.modalListPanelCacheValid {
+		t.Fatal("help reader did not cache the unchanged item list")
+	}
+	if m.shortcuts.Height != m.height-4 {
+		t.Fatalf("help viewport height = %d, want full reading pane height %d", m.shortcuts.Height, m.height-4)
+	}
+	if m.shortcuts.TotalLineCount() <= m.shortcuts.Height {
+		t.Fatalf("help content has %d rows for a %d-row viewport; expected scrollable content", m.shortcuts.TotalLineCount(), m.shortcuts.Height)
+	}
+	plain := ansi.Strip(m.View())
+	if !strings.Contains(plain, "Keyboard shortcuts") || !strings.Contains(plain, "help-item") {
+		t.Fatalf("help view or item list is missing: %q", plain)
+	}
+	rows := strings.Split(m.View(), "\n")
+	if len(rows) != m.height {
+		t.Fatalf("help frame has %d rows, want %d", len(rows), m.height)
+	}
+	for i, row := range rows {
+		if got := lipgloss.Width(row); got != m.width {
+			t.Fatalf("help frame row %d is %d columns wide, want %d", i, got, m.width)
+		}
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = next.(model)
+	if m.shortcuts.YOffset == 0 {
+		t.Fatal("PgDn did not scroll the shortcut list")
+	}
+	if !m.modalListPanelCacheValid {
+		t.Fatal("scrolling help invalidated the unchanged item list")
+	}
+	if m.conv.YOffset != conversationOffset {
+		t.Fatalf("help scrolling moved conversation from %d to %d", conversationOffset, m.conv.YOffset)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
+	if m.mode != modeNav {
+		t.Fatalf("Esc closed help into mode %v, want navigation", m.mode)
+	}
+}
+
+func TestShortcutHelpContentFitsAvailablePaneWidth(t *testing.T) {
+	for _, width := range []int{12, 24, 47, 48, 72} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			for i, line := range strings.Split(shortcutHelpContent(width), "\n") {
+				if got := lipgloss.Width(line); got > width {
+					t.Errorf("help line %d is %d columns wide, want at most %d: %q", i, got, width, ansi.Strip(line))
+				}
+			}
+		})
 	}
 }
 

@@ -260,9 +260,10 @@ func loadModelsCmd(sup supervisorClient, provider supervisor.Provider) tea.Cmd {
 // ── model ────────────────────────────────────────────────────────────────────
 
 type model struct {
-	store   *store.Store
-	watchCh <-chan struct{}
-	sup     supervisorClient
+	shortcuts viewport.Model
+	store     *store.Store
+	watchCh   <-chan struct{}
+	sup       supervisorClient
 
 	view  listView
 	views []listView
@@ -285,8 +286,8 @@ type model struct {
 	backlogOrder    []string
 	searchIndex     map[string]string
 	selected        int
-	// Modal selectors only change the drawer on the right. Reuse the left
-	// panel while they are open instead of restyling every item on each key.
+	// Right-pane dialogs and readers leave the item list unchanged. Reuse the
+	// left panel while they are open instead of restyling every item on each key.
 	modalListPanelCache      string
 	modalListPanelCacheValid bool
 	// itemsLoadGeneration identifies the newest asynchronous list load. A
@@ -469,6 +470,7 @@ const (
 	modeProposal
 	modeReparent
 	modeGroup
+	modeHelp
 )
 
 type paneFocus uint8
@@ -556,6 +558,7 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) mod
 			archiveView,
 		},
 		input:          ta,
+		shortcuts:      viewport.New(1, 1),
 		title:          ti,
 		filterInput:    fi,
 		collapsed:      make(map[string]bool),
@@ -608,7 +611,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, resized := msg.(tea.WindowSizeMsg); resized {
 		nm.modalListPanelCacheValid = false
 	}
-	if !nm.modalVisible() {
+	if !nm.reusesListPanel() {
 		nm.modalListPanelCache = ""
 		nm.modalListPanelCacheValid = false
 	} else if !nm.modalListPanelCacheValid {
@@ -972,6 +975,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next, cmd = m.handleSessionEffortKey(msg)
 		case modeQuit:
 			next, cmd = m.handleQuitKey(msg)
+		case modeHelp:
+			next, cmd = m.handleHelpKey(msg)
 		case modeProposal:
 			next, cmd = m.handleProposalKey(msg)
 		case modeReparent:
@@ -982,11 +987,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next, cmd = m.handleNavKey(msg)
 		}
 		nm := next.(model)
-		// Moving a cursor inside one modal cannot change the drawer's height.
-		// Avoid laying out the conversation again for every held arrow key;
-		// transitions between modal types still recalculate normally.
+		// Moving within one selector or the help reader cannot change the
+		// right pane's layout. Avoid rebuilding it for every held arrow key;
+		// transitions into or out of those views still recalculate normally.
 		sameModal := m.modalVisible() && nm.modalVisible() && m.mode == nm.mode
-		if !sameModal && (m.modalVisible() || nm.modalVisible() ||
+		sameHelp := m.mode == modeHelp && nm.mode == modeHelp
+		if !sameModal && !sameHelp && (m.modalVisible() || nm.modalVisible() ||
+			m.mode == modeHelp || nm.mode == modeHelp ||
 			m.composerVisible() != nm.composerVisible()) {
 			nm = nm.recalcLayout()
 		}
@@ -1007,6 +1014,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentInputHeight() != prevLines {
 			m = m.recalcLayout()
 		}
+	case modeHelp:
+		var cmd tea.Cmd
+		m.shortcuts, cmd = m.shortcuts.Update(msg)
+		cmds = append(cmds, cmd)
 	case modeTitle:
 		var cmd tea.Cmd
 		m.title, cmd = m.title.Update(msg)
@@ -1063,6 +1074,11 @@ func (m model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "?" {
+		m.mode = modeHelp
+		m.shortcuts.GotoTop()
+		return m, nil
+	}
 	if msg.String() == "ctrl+c" {
 		if _, busy := m.busyDispatch(); busy {
 			// Interrupt is deliberately fire-and-observe: the provider finishes
@@ -1271,6 +1287,26 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if itemID := m.selectedID(); itemID != "" {
 			return m.beginReparent()
 		}
+	}
+	return m, nil
+}
+
+func (m model) handleHelpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q", "?":
+		m.mode = modeNav
+	case "up", "shift+up", "k":
+		m.shortcuts.ScrollUp(1)
+	case "down", "shift+down", "j":
+		m.shortcuts.ScrollDown(1)
+	case "pgup":
+		m.shortcuts.ScrollUp(max(1, m.shortcuts.Height/2))
+	case "pgdown":
+		m.shortcuts.ScrollDown(max(1, m.shortcuts.Height/2))
+	case "home", "g":
+		m.shortcuts.GotoTop()
+	case "end", "G":
+		m.shortcuts.GotoBottom()
 	}
 	return m, nil
 }
@@ -2854,7 +2890,11 @@ func (m model) View() string {
 	convScrollbar := renderScrollbar(m.conv.Height, m.conv.TotalLineCount(), m.conv.YOffset)
 	convWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, m.renderConv(), convScrollbar)
 	var convPanel string
-	if m.composerSlotVisible() {
+	if m.mode == modeHelp {
+		helpScrollbar := renderScrollbar(m.shortcuts.Height, m.shortcuts.TotalLineCount(), m.shortcuts.YOffset)
+		helpWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, m.shortcuts.View(), helpScrollbar)
+		convPanel = lipgloss.NewStyle().Padding(1, 0, 1, 1).Render(helpWithScrollbar)
+	} else if m.composerSlotVisible() {
 		// Per-element padding so the separator spans the full column width,
 		// giving │──────── instead of │ ──────── at the corner. Scrollbar
 		// occupies the 1-char right padding slot, mirroring the input below.
@@ -2911,10 +2951,14 @@ func (m model) View() string {
 // listPanelView reuses the unchanged left pane while a modal selector is
 // active. Selector keys only redraw the popup and its selection marker.
 func (m model) listPanelView() string {
-	if m.modalVisible() && m.modalListPanelCacheValid {
+	if m.reusesListPanel() && m.modalListPanelCacheValid {
 		return m.modalListPanelCache
 	}
 	return m.renderListPanel()
+}
+
+func (m model) reusesListPanel() bool {
+	return m.modalVisible() || m.mode == modeHelp
 }
 
 func (m model) renderListPanel() string {
@@ -2956,6 +3000,101 @@ func (m model) renderConv() string {
 			Render("↓ new messages below ↓")
 	}
 	return strings.Join(lines, "\n")
+}
+
+type shortcutHelpRow struct {
+	keys   string
+	action string
+}
+
+type shortcutHelpSection struct {
+	title string
+	rows  []shortcutHelpRow
+}
+
+func shortcutHelpContent(width int) string {
+	width = max(1, width)
+	sections := []shortcutHelpSection{
+		{title: "Navigation", rows: []shortcutHelpRow{
+			{"?", "Open or close this shortcut guide."},
+			{"← / h, → / l", "Move focus between the item list and reading pane."},
+			{"↑ / k, ↓ / j", "Move through items, or select conversation entries when the reading pane has focus."},
+			{"Space", "Fold an item family in the list; expand or collapse a selected partial trace in the reader."},
+			{"PgUp / PgDn", "Scroll the reading pane by half a screen."},
+			{"f", "Show only the reading pane for terminal copy and selection."},
+			{"/", "Filter items by text."},
+		}},
+		{title: "Items", rows: []shortcutHelpRow{
+			{"a", "Create a root item."},
+			{"c", "Create a subthread under the selected item."},
+			{"t / Enter", "Write a turn on the selected item, or reopen its draft."},
+			{"s", "Change status; on a proposed item, start it."},
+			{"S", "Choose a fresh agent session, model, and effort."},
+			{"m", "Move the item under another item; f in the picker also moves its children."},
+			{"g", "Edit the selected item's group."},
+			{"b", "Show or hide backlog items."},
+			{"v", "Reorder the selected backlog family; j/k preview, Enter commits, Esc cancels."},
+			{"r", "Refresh the current view."},
+			{"q", "Quit; confirm if a turn is running."},
+			{"Ctrl+C", "Interrupt a running turn; otherwise quit."},
+		}},
+		{title: "Views", rows: []shortcutHelpRow{
+			{"1 / 2 / 3", "Open Inbox, Archive, or Project Context."},
+			{"Tab", "In Project Context, switch between instructions and brief."},
+			{"e", "Edit the selected project document."},
+		}},
+		{title: "Writing and selection", rows: []shortcutHelpRow{
+			{"Ctrl+S", "Submit a turn, create an item, or save the current edit."},
+			{"Ctrl+N", "Start a related item from the turn editor."},
+			{"@", "Search for and insert an item mention in an editor."},
+			{"Tab / Enter", "Insert a highlighted match in a mention or group picker."},
+			{"Enter", "Move from a new item's title to its body."},
+			{"Esc / Ctrl+C", "Close an editor; Ctrl+C discards an unfinished new item."},
+			{"Ctrl+←/→, Alt+←/→", "Move by word in text editors."},
+			{"Ctrl+W, Alt+Backspace", "Delete the previous word in text editors."},
+			{"↑/↓, j/k", "Move through choices in dialogs; Enter selects and Esc goes back."},
+			{"k / s / x", "On a proposed item, keep for later, start now, or reject."},
+			{"g / G, Home / End", "In copy view, jump to the top or bottom; f, Esc, or q returns."},
+		}},
+	}
+
+	keyWidth := 0
+	for _, section := range sections {
+		for _, row := range section.rows {
+			keyWidth = max(keyWidth, lipgloss.Width(row.keys))
+		}
+	}
+	keyColumn := min(22, keyWidth)
+	lines := []string{
+		warningHeaderStyle.Render(ansi.Truncate("Keyboard shortcuts", width, "…")),
+		dimStyle.Render(ansi.Truncate("Keys depend on the active pane or dialog.", width, "…")),
+		"",
+	}
+	for _, section := range sections {
+		lines = append(lines, warningHeaderStyle.Render(ansi.Truncate(section.title, width, "…")))
+		for _, row := range section.rows {
+			if width >= 48 {
+				key := ansi.Truncate(row.keys, keyColumn, "…")
+				keyCell := lipgloss.NewStyle().Bold(true).Foreground(pendingFg).Width(keyColumn).Render(key)
+				descWidth := max(1, width-keyColumn-2)
+				descLines := strings.Split(wrapText(row.action, descWidth), "\n")
+				lines = append(lines, keyCell+"  "+descLines[0])
+				for _, continuation := range descLines[1:] {
+					lines = append(lines, strings.Repeat(" ", keyColumn+2)+continuation)
+				}
+				continue
+			}
+
+			lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(pendingFg).
+				Render(ansi.Truncate(row.keys, width, "…")))
+			indent := min(2, max(0, width-1))
+			for _, descLine := range strings.Split(wrapText(row.action, max(1, width-indent)), "\n") {
+				lines = append(lines, strings.Repeat(" ", indent)+descLine)
+			}
+		}
+		lines = append(lines, "")
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
 }
 
 func (m model) modalBox() string {
@@ -3483,6 +3622,8 @@ func (m model) renderFooter() string {
 		text = "j/k select  enter start fresh session  esc back"
 	case modeQuit:
 		text = "y quit and stop the running turn  any other key stay"
+	case modeHelp:
+		text = "↑/↓ j/k scroll  pgup/pgdn page  g/G top/bottom  esc/q/? close"
 	case modeProposal:
 		text = "↑/↓ navigate  k keep for later  s start  x reject  esc cancel"
 	case modeReparent:
@@ -3503,21 +3644,21 @@ func (m model) renderFooter() string {
 		}
 	default:
 		if m.projectPane != 0 {
-			text = "←/→/h/l pane  j/k versions  f copy view  tab switch document  e edit  esc/ctrl+c interrupt  1-3 view  q quit"
+			text = "←/→/h/l pane  j/k versions  f copy view  tab switch document  e edit  ctrl+c interrupt/quit  1-3 view  q quit  ? help"
 			break
 		}
 		if m.backlogMoveMode {
-			text = "j/k preview move  enter/v commit  esc cancel"
+			text = "j/k preview move  enter/v commit  esc cancel  ? help"
 			break
 		}
-		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
+		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 		}
 		if m.showBacklog {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  esc/ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh"
+				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 			}
 		}
 	}
@@ -3527,15 +3668,24 @@ func (m model) renderFooter() string {
 	// only (supervisor.TurnInfo) — it goes blank again after a restart, since
 	// there is no way to rederive it without running another turn.
 	right := m.renderAgentInfo(m.selectedID())
-
-	// The hint text grows with the keymap; drop it rather than overflow the row.
-	if len(text)+len(right) > m.width {
-		text = "←/→/h/l focus  f copy view  1-3 view"
-		if len(text)+len(right) > m.width {
-			text = ""
-		}
+	if m.mode == modeHelp {
+		right = ""
 	}
-	if pad := m.width - len(text) - len(right); pad > 0 {
+
+	// Prefer a short help hint over the full navigation legend when the footer
+	// is narrow. Drop agent details next so the hint remains usable.
+	if lipgloss.Width(text)+lipgloss.Width(right) > m.width {
+		if m.mode == modeHelp {
+			text = "esc/q/? close"
+		} else {
+			text = "? help  ←/→ focus  f copy  1-3 views"
+		}
+		right = ""
+	}
+	if lipgloss.Width(text) > m.width {
+		text = ansi.Truncate(text, max(1, m.width), "…")
+	}
+	if pad := m.width - lipgloss.Width(text) - lipgloss.Width(right); pad > 0 {
 		text += strings.Repeat(" ", pad)
 	}
 	return footerStyle.Render(text + right)
@@ -5149,6 +5299,9 @@ func (m model) recalcLayout() model {
 	if m.copyMode {
 		mainH = m.height
 	}
+	m.shortcuts.Width = convW
+	m.shortcuts.Height = max(1, mainH-2)
+	m.shortcuts.SetContent(shortcutHelpContent(convW))
 	slotH := 0
 	if m.modalVisible() {
 		slotH = m.modalPanelHeight()
