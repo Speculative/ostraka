@@ -31,6 +31,40 @@ func TestPrepareGroupedSortsByFamilyAttentionAndFoldsPerRoot(t *testing.T) {
 	}
 }
 
+func TestPrepareGroupedShowsBacklogChildrenOfLiveParents(t *testing.T) {
+	root := models.Item{ID: "root", Channel: models.ChannelInbox, Status: models.StatusActive, Created: time.Now(), Title: "Root"}
+	child := models.Item{ID: "child", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusBacklog, Created: root.Created.Add(time.Minute), Title: "Backlog child"}
+	parked := models.Item{ID: "parked", Channel: models.ChannelInbox, Status: models.StatusBacklog, Created: root.Created.Add(2 * time.Minute), Title: "Parked root"}
+	all := []models.Item{root, child, parked}
+
+	items, hidden := channelView(models.ChannelInbox).prepareGrouped(all, false, nil)
+	if hidden != 1 {
+		t.Fatalf("hidden backlog count = %d, want only the unrelated parked root", hidden)
+	}
+	if len(items) != 2 || items[0].ID != root.ID || items[1].ID != child.ID {
+		t.Fatalf("visible family = %+v, want live parent and backlog child", items)
+	}
+
+	// Search can filter the parent row out while the complete snapshot still
+	// provides the status needed to keep a matching backlog child visible.
+	items, hidden = channelView(models.ChannelInbox).prepareGroupedWithOrderAndContext(
+		[]models.Item{child}, all, false, nil, nil,
+	)
+	if hidden != 0 || len(items) != 1 || items[0].ID != child.ID {
+		t.Fatalf("filtered child = %+v hidden=%d, want visible child and no hidden backlog", items, hidden)
+	}
+}
+
+func TestPrepareGroupedKeepsChildrenOfBacklogParentsHidden(t *testing.T) {
+	root := models.Item{ID: "root", Channel: models.ChannelInbox, Status: models.StatusBacklog, Created: time.Now(), Title: "Root"}
+	child := models.Item{ID: "child", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusBacklog, Created: root.Created.Add(time.Minute), Title: "Backlog child"}
+
+	items, hidden := channelView(models.ChannelInbox).prepareGrouped([]models.Item{root, child}, false, nil)
+	if len(items) != 0 || hidden != 2 {
+		t.Fatalf("items=%+v hidden=%d, want both backlog rows hidden", items, hidden)
+	}
+}
+
 func TestPrepareGroupedDetachesChildWhenParentIsOutsideView(t *testing.T) {
 	child := models.Item{ID: "child", Parent: "archived-root", Channel: models.ChannelInbox, Status: models.StatusBacklog, Created: time.Now(), Title: "Child"}
 	items, _ := channelView(models.ChannelInbox).prepareGrouped([]models.Item{child}, true, nil)

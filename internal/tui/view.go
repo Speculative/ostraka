@@ -132,6 +132,12 @@ func (v listView) prepareGrouped(all []models.Item, showBacklog bool, collapsed 
 // backlog positions only break ties between families whose effective attention
 // rank is backlog; an urgent child still promotes its family above parked work.
 func (v listView) prepareGroupedWithOrder(all []models.Item, showBacklog bool, collapsed map[string]bool, backlogOrder []string) ([]models.Item, int) {
+	return v.prepareGroupedWithOrderAndContext(all, all, showBacklog, collapsed, backlogOrder)
+}
+
+// prepareGroupedWithOrderAndContext lets a filtered list use the full snapshot
+// to decide whether a backlog child belongs under a non-backlog parent.
+func (v listView) prepareGroupedWithOrderAndContext(all, contextItems []models.Item, showBacklog bool, collapsed map[string]bool, backlogOrder []string) ([]models.Item, int) {
 	// Unit-level view tests and a partially written legacy file may have no
 	// stable ID. Grouping such rows would merge unrelated roots under the empty
 	// map key, so retain the old flat behavior until IDs are available.
@@ -141,11 +147,14 @@ func (v listView) prepareGroupedWithOrder(all []models.Item, showBacklog bool, c
 		}
 	}
 	visible := make(map[string]models.Item)
-	byID := make(map[string]models.Item, len(all))
+	byID := make(map[string]models.Item, len(contextItems))
+	for _, item := range contextItems {
+		byID[item.ID] = item
+	}
 	hidden := 0
 	for _, item := range all {
-		byID[item.ID] = item
-		if v.includes(item, showBacklog) {
+		pinnedBacklogChild := v.isBacklogChildOfNonBacklogParent(item, byID)
+		if v.includes(item, showBacklog) || pinnedBacklogChild {
 			visible[item.ID] = item
 		} else if !showBacklog && v.includes(item, true) {
 			hidden++
@@ -277,6 +286,14 @@ func (v listView) prepareGroupedWithOrder(all []models.Item, showBacklog bool, c
 		}
 	}
 	return out, hidden
+}
+
+func (v listView) isBacklogChildOfNonBacklogParent(item models.Item, byID map[string]models.Item) bool {
+	if v.archive || item.Status != models.StatusBacklog || item.Parent == "" {
+		return false
+	}
+	parent, ok := byID[item.Parent]
+	return ok && parent.Status != models.StatusBacklog
 }
 
 // familyCollapsed gives archived roots a tidy default while retaining an

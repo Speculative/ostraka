@@ -432,30 +432,30 @@ func TestPrepareCountsOnlyBacklogAsHidden(t *testing.T) {
 	}
 }
 
-func TestInitialBacklogFitsOnlyWhenInboxLeavesListSpace(t *testing.T) {
+func TestInitialBacklogShownOnlyWhenInboxLeavesListSpace(t *testing.T) {
 	m := model{width: 80, height: 10} // six list rows after chrome
 	all := []models.Item{
 		item(models.ChannelInbox, models.StatusActive, t0),
 		item(models.ChannelInbox, models.StatusBacklog, t0),
 	}
-	if !m.initialBacklogFits(all) {
+	if !m.shouldShowBacklogInitially(all) {
 		t.Error("short inbox should show backlog on startup")
 	}
 
 	all = append(all, item(models.ChannelInbox, models.StatusBacklog, t0))
-	if m.initialBacklogFits(all) {
+	if m.shouldShowBacklogInitially(all) {
 		t.Error("inbox that fills the list should hide backlog on startup")
 	}
 }
 
-func TestInitialBacklogFitUsesRenderedRowHeights(t *testing.T) {
+func TestInitialBacklogVisibilityUsesRenderedRowHeights(t *testing.T) {
 	m := model{width: 80, height: 9} // five list rows after chrome
 	all := []models.Item{
 		item(models.ChannelInbox, models.StatusActive, t0),
 		item(models.ChannelInbox, models.StatusBacklog, t0),
 	}
 	all[1].Title = strings.Repeat("backlog ", 20)
-	if m.initialBacklogFits(all) {
+	if m.shouldShowBacklogInitially(all) {
 		t.Error("wrapped titles that fill the list should hide backlog")
 	}
 }
@@ -473,6 +473,24 @@ func TestFirstInboxLoadAppliesAutomaticBacklogVisibility(t *testing.T) {
 	}
 	if len(got.items) != len(all) {
 		t.Errorf("shown items = %d, want %d", len(got.items), len(all))
+	}
+}
+
+func TestFirstInboxLoadShowsBacklogWhenNoLiveItemsRemain(t *testing.T) {
+	m := model{view: channelView(models.ChannelInbox), width: 80, height: 6}
+	all := []models.Item{
+		{ID: "backlog-a", Channel: models.ChannelInbox, Status: models.StatusBacklog, Created: t0, Title: "Backlog A"},
+		{ID: "backlog-b", Channel: models.ChannelInbox, Status: models.StatusBacklog, Created: t0.Add(time.Minute), Title: "Backlog B"},
+		{ID: "backlog-c", Channel: models.ChannelInbox, Status: models.StatusBacklog, Created: t0.Add(2 * time.Minute), Title: "Backlog C"},
+	}
+
+	out, _ := m.Update(itemsLoadedMsg{allItems: all, view: m.view})
+	got := out.(model)
+	if !got.backlogVisibilityInitialized || !got.showBacklog {
+		t.Error("an inbox with no live items should reveal backlog on startup")
+	}
+	if len(got.items) != len(all) || got.hiddenBacklog != 0 {
+		t.Errorf("shown items=%d hidden backlog=%d, want all %d rows", len(got.items), got.hiddenBacklog, len(all))
 	}
 }
 

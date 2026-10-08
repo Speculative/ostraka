@@ -273,8 +273,8 @@ type model struct {
 	groupError  error
 	groupPicker groupPickerState
 	// showBacklog reveals parked items in the channel views. At startup the
-	// inbox includes them when all its rows fit; after that, b is an explicit
-	// user choice that reloads preserve.
+	// inbox includes them when all its rows fit or when no live rows remain;
+	// after that, b is an explicit user choice that reloads preserve.
 	showBacklog                  bool
 	backlogVisibilityInitialized bool
 	// hiddenBacklog is how many items the current view is suppressing.
@@ -697,7 +697,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchIndex = buildItemSearchIndex(msg.allItems)
 		}
 		if !m.backlogVisibilityInitialized && msg.allItems != nil && m.view == channelView(models.ChannelInbox) && m.listBaseAvailRows() > 0 {
-			m.showBacklog = m.initialBacklogFits(msg.allItems)
+			m.showBacklog = m.shouldShowBacklogInitially(msg.allItems)
 			m.backlogVisibilityInitialized = true
 			m.items, m.hiddenBacklog = m.prepareVisibleItems(msg.allItems)
 		} else if msg.allItems != nil {
@@ -2801,7 +2801,8 @@ func (m model) prepareVisibleItems(all []models.Item) ([]models.Item, int) {
 	if m.backlogMoveMode {
 		order = m.backlogMoveOrder
 	}
-	return m.view.prepareGroupedWithOrder(filterItemsIndexed(all, m.filterQuery, m.searchIndex), m.showBacklog, m.collapsed, order)
+	filtered := filterItemsIndexed(all, m.filterQuery, m.searchIndex)
+	return m.view.prepareGroupedWithOrderAndContext(filtered, all, m.showBacklog, m.collapsed, order)
 }
 
 // applyListFilter reapplies the current query synchronously. Search changes
@@ -3900,12 +3901,16 @@ func (m model) listBaseAvailRows() int {
 	return rows
 }
 
-// initialBacklogFits reports whether showing all live inbox items, including
-// parked backlog, still leaves room in the list. A list exactly full is not
-// considered a short inbox: hiding backlog then reserves the extra line for
-// the marker and makes the overflow discoverable.
-func (m model) initialBacklogFits(all []models.Item) bool {
-	items, _ := channelView(models.ChannelInbox).prepare(all, true)
+// shouldShowBacklogInitially reveals backlog when there are no live inbox rows
+// or when showing the complete inbox still leaves room in the list. A list
+// exactly full is not considered short: hiding backlog reserves the extra
+// line for the marker and makes the overflow discoverable.
+func (m model) shouldShowBacklogInitially(all []models.Item) bool {
+	inbox := channelView(models.ChannelInbox)
+	if liveItems, _ := inbox.prepare(all, false); len(liveItems) == 0 {
+		return true
+	}
+	items, _ := inbox.prepare(all, true)
 	used := 0
 	for _, item := range items {
 		used += m.listRowHeight(item)
