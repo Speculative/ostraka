@@ -23,15 +23,35 @@ var attributionRe = regexp.MustCompile(`^\*\*(\w+) · (.+?)\*\*$`)
 var mentionRe = regexp.MustCompile(`(^|[^A-Za-z0-9_-])@([A-Za-z0-9]+(-[A-Za-z0-9]+)*)`)
 
 type frontmatter struct {
-	ID      string `yaml:"id"`
-	Channel string `yaml:"channel"`
-	Type    string `yaml:"type"`
-	Status  string `yaml:"status"`
-	Mode    string `yaml:"mode,omitempty"`
-	Created string `yaml:"created"`
-	Parent  string `yaml:"parent,omitempty"`
-	Group   string `yaml:"group,omitempty"`
-	Title   string `yaml:"title,omitempty"`
+	ID      string           `yaml:"id"`
+	Channel string           `yaml:"channel"`
+	Type    string           `yaml:"type"`
+	Status  string           `yaml:"status"`
+	Mode    string           `yaml:"mode,omitempty"`
+	Goal    *goalFrontmatter `yaml:"goal,omitempty"`
+	Created string           `yaml:"created"`
+	Parent  string           `yaml:"parent,omitempty"`
+	Group   string           `yaml:"group,omitempty"`
+	Title   string           `yaml:"title,omitempty"`
+}
+
+// Quote the initiating text explicitly: yaml.v3's literal-block encoder can
+// discard leading blank lines, while the goal must survive byte-for-byte.
+type goalFrontmatter models.Goal
+
+func (g goalFrontmatter) MarshalYAML() (any, error) {
+	var node yaml.Node
+	type plainGoal goalFrontmatter
+	if err := node.Encode(plainGoal(g)); err != nil {
+		return nil, err
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		if node.Content[i].Value == "prompt" {
+			node.Content[i+1].Style = yaml.DoubleQuotedStyle
+			node.Content[i+1].Value = g.Prompt
+		}
+	}
+	return &node, nil
 }
 
 // titleMaxLen bounds a derived title. Only items written before title existed
@@ -188,6 +208,7 @@ func ParseItem(path string) (models.Item, error) {
 		Type:    itemType,
 		Status:  status,
 		Mode:    models.NormalizeAgentMode(models.AgentMode(fm.Mode)),
+		Goal:    (*models.Goal)(fm.Goal),
 		Created: created,
 		Parent:  fm.Parent,
 		Group:   fm.Group,
@@ -216,6 +237,7 @@ func WriteItem(item models.Item, path string) error {
 		Type:    string(item.Type),
 		Status:  string(item.Status),
 		Mode:    string(item.Mode),
+		Goal:    (*goalFrontmatter)(item.Goal),
 		Created: item.Created.UTC().Format(time.RFC3339Nano),
 		Parent:  item.Parent,
 		Title:   item.Title,

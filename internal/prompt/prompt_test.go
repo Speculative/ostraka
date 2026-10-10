@@ -350,3 +350,21 @@ func TestReplyCommandFallsBackToInstalledCLI(t *testing.T) {
 		t.Errorf("ReplyCommand() = %q, want %q", got, want)
 	}
 }
+
+func TestGoalGuidanceRepeatsDurableGoalAndExactEndCommand(t *testing.T) {
+	item := models.Item{ID: "goal-owner", Mode: models.AgentModeGoal, Goal: &models.Goal{Prompt: "\nAn exact goal\nwith multiple lines.\n"}}
+	text := GoalGuidance(item, "ostraka goal end goal-owner")
+	for _, expected := range []string{item.Goal.Prompt, "ostraka goal end goal-owner", "reschedules you automatically", "--status active", "--status pending-user"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("missing %q in %s", expected, text)
+		}
+	}
+	if text := NudgeForMode(item.ID, item.Mode, nil, nil); !strings.Contains(text, "Execution mode: GOAL.") {
+		t.Fatal("resumed prompt did not identify goal execution")
+	}
+	item.Parent = "root"
+	text = GoalGuidance(item, "ostraka goal end goal-owner")
+	if !strings.Contains(text, "Only this item belongs to the goal") || strings.Contains(text, "--status active") {
+		t.Fatal("child goal was given root delegation scope")
+	}
+}

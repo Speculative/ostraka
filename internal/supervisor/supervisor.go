@@ -184,11 +184,12 @@ func replyCommand(root, itemID string) string {
 const queueCapacity = 64
 
 type enqueueMsg struct {
-	itemID   string
-	activity bool
-	pending  bool
-	control  bool
-	mode     models.AgentMode
+	itemID        string
+	activity      bool
+	pending       bool
+	control       bool
+	mode          models.AgentMode
+	goalStartedAt time.Time
 }
 
 // Supervisor drives background agent harnesses, resuming them whenever the
@@ -281,6 +282,18 @@ func (s *Supervisor) ToggleDispatchPause() bool {
 	return paused
 }
 
+// pauseDispatches holds automatic goal retries on interruption or a provider
+// failure. The existing P control resumes the queue after recovery.
+func (s *Supervisor) pauseDispatches() {
+	s.pauseMu.Lock()
+	s.dispatchPaused = true
+	s.pauseMu.Unlock()
+	select {
+	case s.queue <- enqueueMsg{control: true}:
+	default:
+	}
+}
+
 func (s *Supervisor) setBusy(itemID string, busy bool) {
 	s.busy.mu.Lock()
 	defer s.busy.mu.Unlock()
@@ -307,6 +320,11 @@ func (s *Supervisor) clearActiveTurn(turn *activeTurn) {
 // process cleanup without shutting down the supervisor itself. It is safe and
 // successful when idle.
 func (s *Supervisor) Interrupt() error {
+	if s.store != nil {
+		if goal, found, _ := s.store.GoalItem(); found && goal.Goal != nil {
+			s.pauseDispatches()
+		}
+	}
 	s.active.mu.Lock()
 	turns := make([]*activeTurn, 0, len(s.active.turns))
 	for _, turn := range s.active.turns {
@@ -620,6 +638,10 @@ func (s *Supervisor) enqueueActivity(itemID string) {
 // filesystem notification; queue de-duplication keeps a burst of writes from
 // launching duplicate runs.
 func (s *Supervisor) EnqueuePendingActivityRoots() {
+	select {
+	case s.queue <- enqueueMsg{control: true}:
+	default:
+	}
 	if s.store == nil {
 		return
 	}
@@ -747,6 +769,10 @@ func (s *Supervisor) run() {
 	activeChats := 0
 	codeActive := false
 	var pending []enqueueMsg
+	// A goal is durable; polling recovers continuations even without fsnotify
+	// (including when the supervisor restarts with a pending-user goal).
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
 
 	finish := func(result dispatchResult) {
 		delete(activeItems, result.itemID)
@@ -783,12 +809,76 @@ func (s *Supervisor) run() {
 		}
 
 		started := false
+		var goal models.Item
+		var goalActive bool
+		var goalErr error
+		if s.store != nil {
+			var found bool
+			goal, found, goalErr = s.store.GoalItem()
+			goalActive = found && goal.Goal != nil
+		}
+		if goalActive && !s.DispatchesPaused() {
+			// Children are single-turn delegates. Queue them before the parent's
+			// next continuation so serialized code work can actually make progress.
+			if goal.Parent == "" {
+				items, _ := s.store.ListItems(store.ListOpts{})
+				for _, child := range items {
+					if child.Parent != goal.ID || child.Status != models.StatusPendingAgent || activeItems[child.ID] {
+						continue
+					}
+					queued := false
+					for _, msg := range pending {
+						if msg.itemID == child.ID {
+							queued = true
+							break
+						}
+					}
+					if !queued {
+						pending = append(pending, enqueueMsg{itemID: child.ID, mode: child.Mode})
+					}
+				}
+			}
+		}
+		if goalActive && !activeItems[goal.ID] && !s.DispatchesPaused() {
+			queued := false
+			for _, msg := range pending {
+				if msg.itemID == goal.ID {
+					queued = true
+					break
+				}
+			}
+			if !queued {
+				if ready, err := s.store.PrepareGoalDispatch(goal.ID, goal.Goal.StartedAt); err != nil {
+					s.logger.Printf("cannot queue goal %s: %v", goal.ID, err)
+				} else if ready {
+					pending = append(pending, enqueueMsg{itemID: goal.ID, mode: models.AgentModeGoal, goalStartedAt: goal.Goal.StartedAt})
+				}
+			}
+		}
 		s.pauseMu.Lock()
-		if !s.dispatchPaused {
+		if !s.dispatchPaused && goalErr == nil {
 			for i, msg := range pending {
+				if !msg.goalStartedAt.IsZero() && (!goalActive || goal.ID != msg.itemID || !goal.Goal.StartedAt.Equal(msg.goalStartedAt)) {
+					pending = append(pending[:i], pending[i+1:]...)
+					started = true // discard the stale continuation, then re-evaluate
+					break
+				}
+				// Re-read mode at admission: it may have changed while queued.
+				msg.mode = s.modeForItem(msg.itemID)
+				if s.store != nil {
+					item, err := s.store.GetItem(msg.itemID)
+					if err == nil {
+						if item.Mode == models.AgentModeGoal && item.Goal == nil {
+							continue
+						}
+						if goalActive && !store.GoalAllows(goal, item) {
+							continue
+						}
+					}
+				}
 				// Do not run two sessions for one item at once. Chat work can proceed
 				// while code is active; code work only waits for another code dispatch.
-				if activeItems[msg.itemID] || (msg.mode == models.AgentModeCode && codeActive) {
+				if activeItems[msg.itemID] || (msg.mode != models.AgentModeChat && codeActive) {
 					continue
 				}
 				pending = append(pending[:i], pending[i+1:]...)
@@ -804,6 +894,8 @@ func (s *Supervisor) run() {
 
 		select {
 		case <-ctx.Done():
+			continue
+		case <-ticker.C:
 			continue
 		case result := <-finished:
 			finish(result)
@@ -825,7 +917,16 @@ func (s *Supervisor) run() {
 				s.queueMu.Unlock()
 			}
 			msg.mode = s.modeForItem(msg.itemID)
-			pending = append(pending, msg)
+			duplicate := false
+			for _, queued := range pending {
+				if s.store != nil && queued.itemID == msg.itemID {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				pending = append(pending, msg)
+			}
 		}
 	}
 }
@@ -850,22 +951,18 @@ func (s *Supervisor) modeForItem(itemID string) models.AgentMode {
 // harness turn. The bool is the dispatch admission result; callers must not
 // run the harness when the queued request has gone stale.
 func (s *Supervisor) markAcknowledged(itemID string) bool {
+	return s.markAcknowledgedGoal(itemID, time.Time{})
+}
+
+func (s *Supervisor) markAcknowledgedGoal(itemID string, startedAt time.Time) bool {
 	if s.store == nil {
 		return true
 	}
-	item, err := s.store.GetItem(itemID)
+	admitted, err := s.store.AcknowledgeDispatch(itemID, startedAt)
 	if err != nil {
-		s.logger.Printf("item %s: cannot read to mark acknowledged: %v", itemID, err)
-		return false
-	}
-	if item.Status != models.StatusPendingAgent {
-		return false
-	}
-	if _, err := s.store.SetStatus(itemID, models.StatusAgentAcknowledged); err != nil {
 		s.logger.Printf("item %s: cannot mark acknowledged: %v", itemID, err)
-		return false
 	}
-	return true
+	return admitted
 }
 
 // revertAcknowledged clears the in-progress marker if it is still set. It is a
@@ -929,8 +1026,16 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		live.clear()
 	}()
 
-	if !s.markAcknowledged(msg.itemID) {
-		s.logger.Printf("item %s: skipping stale dispatch; item is no longer pending-agent", msg.itemID)
+	if !s.markAcknowledgedGoal(msg.itemID, msg.goalStartedAt) {
+		s.logger.Printf("item %s: skipping dispatch; status or goal admission changed", msg.itemID)
+		// If a goal activated after scheduler selection, preserve the user's
+		// unrelated queued request until it can be admitted. A cancelled goal
+		// continuation must never become an ordinary code dispatch.
+		if s.store != nil && msg.goalStartedAt.IsZero() {
+			if item, err := s.store.GetItem(msg.itemID); err == nil && item.Status == models.StatusPendingAgent {
+				s.enqueuePending(msg.itemID)
+			}
+		}
 		return
 	}
 	runStarted = true
@@ -1017,6 +1122,9 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		}
 		prompt = agentprompt.BootstrapForMode(msg.itemID, instructions, brief, context, replyCommand(s.root, msg.itemID), executionMode, activities)
 	}
+	if haveDispatchItem && executionMode == models.AgentModeGoal && dispatchItem.Goal != nil {
+		prompt += agentprompt.GoalGuidance(dispatchItem, agentprompt.EndGoalCommand(filepath.Dir(s.root), dispatchItem.ID))
+	}
 	harness := s.harnessFor(sf.Provider)
 	turnCtx, turnCancel := context.WithCancel(s.runContext())
 	turnCtx = withAgentItemID(turnCtx, msg.itemID)
@@ -1057,6 +1165,12 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		s.setTurnInfo(msg.itemID, TurnInfo{Model: model, Context: result.Context})
 	}
 	if err != nil {
+		if executionMode == models.AgentModeGoal && s.store != nil && dispatchItem.Goal != nil {
+			// A failure from an ended/replaced goal must not pause its successor.
+			if goal, found, _ := s.store.GoalItem(); found && goal.ID == msg.itemID && goal.Goal != nil && goal.Goal.StartedAt.Equal(dispatchItem.Goal.StartedAt) {
+				s.pauseDispatches()
+			}
+		}
 		if interrupted {
 			partialStatus = "interrupted"
 		} else {

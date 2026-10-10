@@ -76,3 +76,7 @@ item context directly and `ostraka preamble` provides the static agent guidance,
 so no separate Ostraka skill installation is required.
 See [docs/deploying.md](docs/deploying.md) for release, local checkout, and
 Carthage setup details.
+
+Goal mode keeps one item working until the agent explicitly ends its loop.
+Use Shift+Tab to select GOAL, then send its initiating user turn. See
+[goal mode](docs/goals.md) for queueing, child delegation, and controls.

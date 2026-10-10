@@ -287,6 +287,11 @@ func (s *Store) RenameItem(id, title string) (models.Item, error) {
 // RenameItemBy records which actor changed the item's title. Agent-authored
 // changes remain visible in the root journal without prompting the same agent.
 func (s *Store) RenameItemBy(id, title string, actor models.Actor) (models.Item, error) {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return models.Item{}, err
+	}
+	defer unlock()
 	if err := ValidateTitle(title); err != nil {
 		return models.Item{}, err
 	}
@@ -331,6 +336,15 @@ func (s *Store) RenameItemBy(id, title string, actor models.Actor) (models.Item,
 // prompt-level read-only instruction; code mode is serialized against other
 // code dispatches, while chat dispatches can overlap with either mode.
 func (s *Store) SetMode(id string, mode models.AgentMode) (models.Item, error) {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return models.Item{}, err
+	}
+	defer unlock()
+	return s.setMode(id, mode)
+}
+
+func (s *Store) setMode(id string, mode models.AgentMode) (models.Item, error) {
 	if !models.ValidAgentMode(mode) {
 		return models.Item{}, fmt.Errorf("unsupported agent mode %q", mode)
 	}
@@ -345,6 +359,19 @@ func (s *Store) SetMode(id string, mode models.AgentMode) (models.Item, error) {
 	if item.Mode == mode {
 		return item, nil
 	}
+	if mode == models.AgentModeGoal {
+		if models.TerminalStatuses[item.Status] || item.Status == models.StatusBacklog || item.Status == models.StatusProposed {
+			return models.Item{}, fmt.Errorf("goal mode requires a live item")
+		}
+		goal, found, err := s.GoalItem()
+		if err != nil {
+			return models.Item{}, err
+		}
+		if found && goal.ID != id {
+			return models.Item{}, fmt.Errorf("goal mode already belongs to item %s", goal.ID)
+		}
+	}
+	item.Goal = nil
 	item.Mode = mode
 	if err := WriteItem(item, path); err != nil {
 		return models.Item{}, err
@@ -368,6 +395,11 @@ func (s *Store) CreateItemWithGroup(channel models.Channel, title, body string, 
 }
 
 func (s *Store) CreateItemWithGroupBy(channel models.Channel, title, body string, itemType models.ItemType, status models.Status, parent, group string, actor models.Actor) (models.Item, error) {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return models.Item{}, err
+	}
+	defer unlock()
 	status = models.NormalizeStatus(status)
 	if err := ValidateChannel(channel); err != nil {
 		return models.Item{}, err
@@ -394,6 +426,11 @@ func (s *Store) CreateItemWithGroupBy(channel models.Channel, title, body string
 		if models.TerminalStatuses[parentItem.Status] {
 			return models.Item{}, fmt.Errorf("cannot create a subthread under terminal item %q", parent)
 		}
+	}
+	// An agent's active child under a root goal is delegated work. Decision
+	// children remain pending-user and never dispatch just because they exist.
+	if parent != "" && actor == models.ActorAgent && status == models.StatusActive && parentItem.Mode == models.AgentModeGoal && parentItem.Goal != nil {
+		status = models.StatusPendingAgent
 	}
 	// Check collisions across the complete namespace so live and archived
 	// items, including legacy timestamp IDs, can coexist safely.
@@ -465,6 +502,11 @@ func (s *Store) SetGroup(id, group string) (models.Item, error) {
 }
 
 func (s *Store) SetGroupBy(id, group string, actor models.Actor) (models.Item, error) {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return models.Item{}, err
+	}
+	defer unlock()
 	if err := ValidateGroup(group); err != nil {
 		return models.Item{}, err
 	}
@@ -574,6 +616,11 @@ func (s *Store) CreateSubthreadBy(contextID string, title, body string, itemType
 // so reparenting or editing either endpoint cannot leave a reciprocal edge
 // index out of sync.
 func (s *Store) AddMention(firstID, secondID string) (models.Item, error) {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return models.Item{}, err
+	}
+	defer unlock()
 	first, err := s.GetItem(firstID)
 	if err != nil {
 		return models.Item{}, err
@@ -669,6 +716,11 @@ func appendUnique(values []string, value string) []string {
 }
 
 func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.Item, error) {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return models.Item{}, err
+	}
+	defer unlock()
 	path, err := s.pathForID(id)
 	if err != nil {
 		return models.Item{}, err
@@ -687,6 +739,13 @@ func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.I
 		Content:   content,
 	})
 	item.Mentions = itemMentionIDs(item.Body, item.Turns)
+	if actor == models.ActorUser && item.Mode == models.AgentModeGoal && item.Goal == nil {
+		if strings.TrimSpace(content) == "" {
+			return models.Item{}, fmt.Errorf("goal must not be blank")
+		}
+		item.Goal = &models.Goal{Prompt: content, StartedAt: item.Turns[len(item.Turns)-1].Timestamp}
+		item.Status = models.StatusPendingAgent
+	}
 	if actor == models.ActorAgent {
 		if next, ok := StatusAfterAgentTurn(item.Status); ok {
 			if err := s.validateChildStatusTransition(item, next); err != nil {
@@ -739,6 +798,11 @@ func (s *Store) SetStatus(id string, status models.Status) (models.Item, error) 
 }
 
 func (s *Store) SetStatusBy(id string, status models.Status, actor models.Actor) (models.Item, error) {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return models.Item{}, err
+	}
+	defer unlock()
 	status = models.NormalizeStatus(status)
 	oldPath, err := s.pathForID(id)
 	if err != nil {
@@ -761,6 +825,9 @@ func (s *Store) SetStatusBy(id string, status models.Status, actor models.Actor)
 				return models.Item{}, fmt.Errorf("cannot close root %q while subthread %q is still open", item.ID, child.ID)
 			}
 		}
+	}
+	if item.Mode == models.AgentModeGoal && (models.TerminalStatuses[status] || status == models.StatusBacklog || status == models.StatusProposed) {
+		return models.Item{}, fmt.Errorf("end goal mode for item %s before parking or archiving it", id)
 	}
 	oldStatus := item.Status
 	item.Status = status
@@ -823,6 +890,11 @@ func (s *Store) DeleteItem(id string) error {
 }
 
 func (s *Store) DeleteItemBy(id string, actor models.Actor) error {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	path, err := s.pathForID(id)
 	if err != nil {
 		return err
@@ -830,6 +902,9 @@ func (s *Store) DeleteItemBy(id string, actor models.Actor) error {
 	deleted, err := ParseItem(path)
 	if err != nil {
 		return err
+	}
+	if deleted.Mode == models.AgentModeGoal {
+		return fmt.Errorf("end goal mode for item %s before deleting it", id)
 	}
 	items, err := s.ListItems(ListOpts{})
 	if err != nil {

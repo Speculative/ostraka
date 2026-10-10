@@ -19,6 +19,11 @@ func (s *Store) ReparentItem(itemID, newRootID string, flattenChildren bool) (mo
 }
 
 func (s *Store) ReparentItemBy(itemID, newRootID string, flattenChildren bool, actor models.Actor) (models.Item, error) {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return models.Item{}, err
+	}
+	defer unlock()
 	if strings.TrimSpace(itemID) == "" {
 		return models.Item{}, fmt.Errorf("item ID must not be blank")
 	}
@@ -41,6 +46,9 @@ func (s *Store) ReparentItemBy(itemID, newRootID string, flattenChildren bool, a
 	if !ok {
 		return models.Item{}, fmt.Errorf("item %q not found", newRootID)
 	}
+	if item.Mode == models.AgentModeGoal {
+		return models.Item{}, fmt.Errorf("end goal mode for item %s before reparenting it", item.ID)
+	}
 	if item.ID == newRoot.ID {
 		return models.Item{}, fmt.Errorf("an item cannot be reparented to itself")
 	}
@@ -61,6 +69,11 @@ func (s *Store) ReparentItemBy(itemID, newRootID string, flattenChildren bool, a
 	for _, candidate := range items {
 		if candidate.Parent == item.ID {
 			children = append(children, candidate)
+		}
+	}
+	for _, child := range children {
+		if child.Mode == models.AgentModeGoal {
+			return models.Item{}, fmt.Errorf("end goal mode for item %s before moving its family", child.ID)
 		}
 	}
 	if len(children) > 0 && !flattenChildren {
@@ -252,6 +265,11 @@ func (s *Store) UnparentItem(itemID string) (models.Item, error) {
 }
 
 func (s *Store) UnparentItemBy(itemID string, actor models.Actor) (models.Item, error) {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return models.Item{}, err
+	}
+	defer unlock()
 	path, err := s.pathForID(itemID)
 	if err != nil {
 		return models.Item{}, err
@@ -259,6 +277,9 @@ func (s *Store) UnparentItemBy(itemID string, actor models.Actor) (models.Item, 
 	item, err := ParseItem(path)
 	if err != nil {
 		return models.Item{}, err
+	}
+	if item.Mode == models.AgentModeGoal {
+		return models.Item{}, fmt.Errorf("end goal mode for item %s before unparenting it", item.ID)
 	}
 	if item.Parent == "" {
 		return models.Item{}, fmt.Errorf("item %q is already a root", item.ID)

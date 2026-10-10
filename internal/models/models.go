@@ -11,20 +11,21 @@ type AgentMode string
 const (
 	AgentModeCode AgentMode = "code"
 	AgentModeChat AgentMode = "chat"
+	AgentModeGoal AgentMode = "goal"
 )
 
 // NormalizeAgentMode maps missing or unknown legacy values to code mode,
 // preserving the supervisor's original serialized execution behavior.
 func NormalizeAgentMode(mode AgentMode) AgentMode {
-	if mode == AgentModeChat {
-		return AgentModeChat
+	if mode == AgentModeChat || mode == AgentModeGoal {
+		return mode
 	}
 	return AgentModeCode
 }
 
 // ValidAgentMode reports whether mode is supported by the item schema.
 func ValidAgentMode(mode AgentMode) bool {
-	return mode == AgentModeCode || mode == AgentModeChat
+	return mode == AgentModeCode || mode == AgentModeChat || mode == AgentModeGoal
 }
 
 const (
@@ -140,11 +141,19 @@ type Activity struct {
 	Handled       bool      `json:"handled"`
 }
 
+// Goal records the initiating user turn independently of bounded prompt history.
+// A goal-mode item with no Goal is armed, awaiting its first user turn.
+type Goal struct {
+	Prompt    string    `json:"prompt" yaml:"prompt"`
+	StartedAt time.Time `json:"started_at" yaml:"started_at"`
+}
+
 type Item struct {
 	ID      string
 	Channel Channel
 	Type    ItemType
 	Status  Status
+	Goal    *Goal
 	Mode    AgentMode
 	Created time.Time
 	Parent  string // empty if none

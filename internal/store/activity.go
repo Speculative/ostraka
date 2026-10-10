@@ -92,6 +92,11 @@ func (s *Store) markActivities(rootID string, ids map[string]bool) error {
 // succeeded and posted an agent turn. Keeping the operation explicit prevents
 // a failed dispatch from silently losing a child decision.
 func (s *Store) MarkActivitiesHandled(rootID string, ids []string) error {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	set := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		set[id] = true
@@ -103,6 +108,11 @@ func (s *Store) MarkActivitiesHandled(rootID string, ids []string) error {
 // for agent lifecycle events, while subthread lifecycle events continue to use
 // the more specific store methods below.
 func (s *Store) AddActivity(itemID string, activity models.Activity) error {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if activity.Timestamp.IsZero() {
 		activity.Timestamp = time.Now().UTC()
 	}

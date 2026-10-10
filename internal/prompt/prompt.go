@@ -263,6 +263,12 @@ func NudgeForMode(itemID string, mode models.AgentMode, userTurns []string, acti
 }
 
 func executionModeGuidance(mode models.AgentMode) string {
+	if mode == models.AgentModeGoal {
+		return `Execution mode: GOAL.
+Implementation work is permitted for this dispatch. The supervisor will
+continue dispatching this item until goal mode is explicitly ended. This mode
+applies to this dispatch and supersedes earlier execution-mode instructions.`
+	}
 	if models.NormalizeAgentMode(mode) == models.AgentModeChat {
 		return `Execution mode: CHAT (read-only).
 Treat the project workspace and its git state as read-only. You may inspect and
@@ -278,6 +284,43 @@ Ostraka item reply.`
 	return `Execution mode: CODE.
 Implementation work is permitted for this dispatch. This mode applies to this
 dispatch and supersedes any earlier execution-mode instruction.`
+}
+
+// GoalGuidance is deliberately appended on both fresh and resumed turns. The
+// initiating prompt is durable authority, not a fabricated new user turn.
+func GoalGuidance(item models.Item, endCommand string) string {
+	if item.Goal == nil {
+		return ""
+	}
+	children := "This goal is on a child item. Only this item belongs to the goal; new sibling items do not join its dispatch scope."
+	if item.Parent == "" {
+		children = `Direct children of this item can be dispatched during the goal.
+Delegate work with a self-contained child created using item add --parent ` + item.ID + ` --status active; it receives one dispatch under the normal queue rules.
+Use --status pending-user for decisions to leave for the user. Continue independent
+work while those decisions wait, and incorporate child closures reported in nudges.
+Children do not inherit this goal loop and cannot end their parent's goal.`
+	}
+	return fmt.Sprintf(`
+
+--- active Ostraka goal ---
+Goal owner: %s. Continue working towards the initiating user goal below on
+every dispatch. Later user turns and project instructions still apply.
+The supervisor reschedules you automatically, including when you omit a final
+reply. Do not reschedule yourself or fabricate user turns. At a checkpoint,
+post the usual substantive item reply and end your dispatch; the loop remains
+active. Finish a coherent slice so a fresh session can resume from the item.
+When the goal is complete, explicitly end goal mode before your final reply:
+%s
+The command requires this exact initiating item ID. Only the owner dispatch
+or the user can end it. Ending the loop does not archive the item.
+Do not request permission inside the bypass-permissions container. Follow
+the goal's instructions about decisions; defer nonblocking decisions to child
+items when appropriate rather than stopping the goal to ask the user.
+%s
+
+Initiating user goal (repeated verbatim):
+%s
+--- end active Ostraka goal ---`, item.ID, endCommand, children, item.Goal.Prompt)
 }
 
 const dispatchLengthGuidance = `
@@ -367,4 +410,11 @@ func ReplyCommand(projectRoot, itemID string) string {
 		return fmt.Sprintf("go run ./cmd/ostraka item turn %s --actor agent --content-stdin", itemID)
 	}
 	return fmt.Sprintf("ostraka item turn %s --actor agent --content-stdin", itemID)
+}
+
+func EndGoalCommand(projectRoot, itemID string) string {
+	if _, err := os.Stat(filepath.Join(projectRoot, "cmd", "ostraka", "main.go")); err == nil {
+		return fmt.Sprintf("go run ./cmd/ostraka goal end %s", itemID)
+	}
+	return fmt.Sprintf("ostraka goal end %s", itemID)
 }

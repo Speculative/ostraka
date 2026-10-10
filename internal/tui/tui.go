@@ -103,6 +103,7 @@ var (
 	selectedBg = lipgloss.Color("237")
 	pendingFg  = lipgloss.Color("11")
 	workingFg  = lipgloss.Color("10")
+	goalFg     = lipgloss.Color("12")
 	reorderFg  = lipgloss.Color("13")
 	// 245, not 8. ANSI 8 ("bright black") is unreadably dark on some terminal
 	// themes — it is the colour that made both the live pane and the hidden-
@@ -1392,9 +1393,12 @@ func (m model) toggleSelectedAgentMode() (tea.Model, tea.Cmd) {
 	current := models.NormalizeAgentMode(m.items[m.selected].Mode)
 	next := models.AgentModeCode
 	if current == models.AgentModeCode {
+		next = models.AgentModeGoal
+	} else if current == models.AgentModeGoal {
 		next = models.AgentModeChat
 	}
-	if _, err := m.store.SetMode(itemID, next); err != nil {
+	changed, err := m.store.SetMode(itemID, next)
+	if err != nil {
 		m.err = fmt.Errorf("change item mode: %w", err)
 		return m, nil
 	}
@@ -1402,11 +1406,13 @@ func (m model) toggleSelectedAgentMode() (tea.Model, tea.Cmd) {
 	for i := range m.items {
 		if m.items[i].ID == itemID {
 			m.items[i].Mode = next
+			m.items[i].Goal = changed.Goal
 		}
 	}
 	for i := range m.allItems {
 		if m.allItems[i].ID == itemID {
 			m.allItems[i].Mode = next
+			m.allItems[i].Goal = changed.Goal
 		}
 	}
 	m.updateConv()
@@ -2649,6 +2655,18 @@ func (m model) handleProposalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// itemStatusIndicator gives goal mode its blue marker while preserving the
+// filled working dot and outlined idle dot.
+func itemStatusIndicator(item models.Item) (string, lipgloss.Color, bool) {
+	if item.Mode == models.AgentModeGoal {
+		if item.Status == models.StatusAgentAcknowledged {
+			return "●", goalFg, true
+		}
+		return "○", goalFg, true
+	}
+	return statusIndicator(item.Status)
+}
+
 // statusIndicator gives the glyph and colour of an item's list marker. Active
 // hand-offs use filled dots; queued and parked items use outlined dots so they
 // keep their place in the icon column without looking active.
@@ -3375,7 +3393,7 @@ func shortcutHelpContent(width int) string {
 			{"t / Enter", "Write a turn on the selected item, or reopen its draft."},
 			{"s", "Change status; on a proposed item, start it."},
 			{"P", "Pause queued dispatches while batching item changes; active turns continue."},
-			{"Shift+Tab", "Toggle the selected item's Chat (read-only) or Code execution mode."},
+			{"Shift+Tab", "Cycle the selected item through CHAT → CODE → GOAL. Send a user turn to start a goal; cycling away ends it."},
 			{"S", "Choose a fresh agent session, model, and effort."},
 			{"m", "Move the item under another item; f in the picker also moves its children."},
 			{"g", "Edit the selected item's group."},
@@ -3924,11 +3942,37 @@ func (m model) renderHeader() string {
 			Render("  ⏸ dispatches paused  ")
 		row = lipgloss.JoinHorizontal(lipgloss.Top, row, paused)
 	}
+	if goal, found := m.goalItem(); found {
+		label := "goal active: " + goal.ID
+		if goal.Goal == nil {
+			label = "goal armed: " + goal.ID
+		}
+		badge := lipgloss.NewStyle().Bold(true).Foreground(goalFg).Background(headerBg).Render("  " + label + "  ")
+		if m.width > 0 {
+			badge = ansi.Truncate(badge, m.width, "")
+			row = ansi.Truncate(row, max(0, m.width-lipgloss.Width(badge)), "")
+		}
+		row = lipgloss.JoinHorizontal(lipgloss.Top, row, badge)
+	}
 	pad := m.width - lipgloss.Width(row)
 	if pad > 0 {
 		row += lipgloss.NewStyle().Background(headerBg).Render(strings.Repeat(" ", pad))
 	}
 	return row
+}
+
+func (m model) goalItem() (models.Item, bool) {
+	for _, item := range m.allItems {
+		if item.Mode == models.AgentModeGoal {
+			return item, true
+		}
+	}
+	for _, item := range m.items {
+		if item.Mode == models.AgentModeGoal {
+			return item, true
+		}
+	}
+	return models.Item{}, false
 }
 
 func (m model) dispatchesPaused() bool {
@@ -4186,7 +4230,7 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 		}
 		item := m.items[i]
 		isSelected := !m.draftSelected && i == m.selected
-		indicator, indicatorFg, hasIndicator := statusIndicator(item.Status)
+		indicator, indicatorFg, hasIndicator := itemStatusIndicator(item)
 
 		preview := item.Title
 		indent := ""
