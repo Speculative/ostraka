@@ -44,6 +44,37 @@ func TestShiftTabGoalCycleAndExclusiveOwner(t *testing.T) {
 	}
 }
 
+func TestShiftTabCyclesModeWhileComposingTurn(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "work", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(s, nil, nil)
+	m.items, m.allItems = []models.Item{item}, []models.Item{item}
+	m.selected = 0
+	next, _ := m.openComposer()
+	m = next.(model)
+	m.input.SetValue("unsent turn")
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = next.(model)
+	if m.mode != modeCompose || m.input.Value() != "unsent turn" || m.items[0].Mode != models.AgentModeGoal {
+		t.Fatal("Shift+Tab did not change mode while preserving the composed turn")
+	}
+
+	stored, err := s.GetItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Mode != models.AgentModeGoal {
+		t.Fatal("composed turn mode change was not persisted")
+	}
+}
+
 func TestGoalBlueIndicatorAndHeaderAcrossViews(t *testing.T) {
 	goal := models.Item{ID: "goal", Mode: models.AgentModeGoal, Goal: &models.Goal{Prompt: "work"}, Status: models.StatusAgentAcknowledged}
 	glyph, color, ok := itemStatusIndicator(goal)

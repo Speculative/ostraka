@@ -2829,6 +2829,9 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if msg.String() == "shift+tab" && !m.editingProject && !m.editingNewItemDraft() {
+		return m.toggleSelectedAgentMode()
+	}
 	if m.mentionPicker.open {
 		switch {
 		case msg.String() == "esc":
@@ -3393,7 +3396,7 @@ func shortcutHelpContent(width int) string {
 			{"t / Enter", "Write a turn on the selected item, or reopen its draft."},
 			{"s", "Change status; on a proposed item, start it."},
 			{"P", "Pause queued dispatches while batching item changes; active turns continue."},
-			{"Shift+Tab", "Cycle the selected item through CHAT → CODE → GOAL. Send a user turn to start a goal; cycling away ends it."},
+			{"Shift+Tab", "Cycle the selected item through CHAT → CODE → GOAL while navigating or writing a turn. Send a user turn to start a goal; cycling away ends it."},
 			{"S", "Choose a fresh agent session, model, and effort."},
 			{"m", "Move the item under another item; f in the picker also moves its children."},
 			{"g", "Edit the selected item's group."},
@@ -3995,9 +3998,9 @@ func (m model) renderFooter() string {
 		text = "enter apply  esc cancel"
 	case modeCompose:
 		if m.mentionPicker.open {
-			text = "↑/↓ select  enter/tab insert  esc close"
+			text = "↑/↓ select  enter/tab insert  shift+tab mode  esc close"
 		} else {
-			text = "ctrl+s submit  ctrl+n related item  esc cancel  pgup/pgdn scroll"
+			text = "ctrl+s submit  shift+tab mode  ctrl+n related item  esc cancel  pgup/pgdn scroll"
 		}
 		if m.editingProject {
 			text = "ctrl+o preview  ctrl+s save project document  esc cancel"
@@ -4010,7 +4013,7 @@ func (m model) renderFooter() string {
 		} else if m.selected < len(m.items) && !dispatchable(m.items[m.selected].Status) {
 			// Silent submit is the surprising case, so name it rather than
 			// leaving the reader to discover the agent never woke up.
-			text = "ctrl+s save (no dispatch — backlog)  ctrl+n related item  esc cancel  pgup/pgdn scroll"
+			text = "ctrl+s save (no dispatch — backlog)  shift+tab mode  ctrl+n related item  esc cancel  pgup/pgdn scroll"
 		}
 	case modeTitle:
 		text = "enter next (body)  esc keep draft  ctrl+c discard"
