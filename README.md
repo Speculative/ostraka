@@ -35,6 +35,14 @@ Run `ostraka preamble` when an agent needs the static orientation and final
 reply guidance. Normal dispatched sessions receive the same guidance directly
 in their initial prompt.
 
+## Commit messages
+
+Run `./scripts/install-git-hooks.sh` to install the repository's commit-message
+hook for this checkout. It checks Conventional Commit subjects (maximum 50
+characters), the blank line after the subject, a nonempty body,
+and a 72-character limit for each body line. When `OSTRAKA_AGENT_ITEM_ID` is
+set for an agent dispatch, it also requires a final `Co-Authored-By` trailer.
+
 ## Project context
 
 `ostraka project instructions` holds user-owned rules for how agents work in

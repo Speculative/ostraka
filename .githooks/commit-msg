@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+message_file=${1:?commit message file is required}
+
+awk -v agent_item_id="${OSTRAKA_AGENT_ITEM_ID:-}" '
+function fail(message) {
+	printf "commit-msg: %s\n", message > "/dev/stderr"
+	failed = 1
+}
+
+NR == 1 {
+	if (length($0) > 50) {
+		fail("subject is " length($0) " characters; maximum is 50")
+	}
+	if ($0 !~ /^[a-z][a-z0-9-]*(\([^()]+\))?!?: .+/) {
+		fail("subject must use Conventional Commit format: type(scope): description")
+	}
+	next
+}
+
+NR == 2 {
+	if ($0 != "") {
+		fail("the line after the subject must be blank")
+	}
+	next
+}
+
+{
+	if (length($0) > 72) {
+		fail("body line " NR " is " length($0) " characters; maximum is 72")
+	}
+	if ($0 ~ /^Co-Authored-By:/) {
+		coauthor_count++
+		coauthor_line = NR
+		if ($0 !~ /^Co-Authored-By: .+ <[^<>[:space:]]+@[^<>[:space:]]+>$/) {
+			fail("Co-Authored-By trailer must include a name and email")
+		}
+	} else if ($0 ~ /[^[:space:]]/) {
+		body_has_text = 1
+	}
+	if ($0 ~ /[^[:space:]]/) {
+		last_nonblank_line = NR
+	}
+}
+
+END {
+	if (NR < 3) {
+		fail("commit message needs a blank line and explanatory body")
+	}
+	if (NR >= 3 && !body_has_text) {
+		fail("commit message needs a nonempty explanatory body")
+	}
+	if (coauthor_count > 0 && coauthor_line != last_nonblank_line) {
+		fail("Co-Authored-By trailer must be the final nonblank line")
+	}
+	if (agent_item_id != "" && coauthor_count == 0) {
+		fail("agent-authored commits need a final Co-Authored-By trailer")
+	}
+	if (failed) {
+		exit 1
+	}
+}
+' "$message_file"
