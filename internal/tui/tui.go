@@ -34,6 +34,7 @@ type itemsLoadedMsg struct {
 	items         []models.Item
 	allItems      []models.Item
 	backlogOrder  []string
+	childOrders   map[string][]string
 	hiddenBacklog int
 	view          listView
 	showBacklog   bool
@@ -217,11 +218,16 @@ func loadItemsCmd(s *store.Store, v listView, showBacklog bool, generation uint6
 		if err != nil {
 			return errMsg(err)
 		}
+		childOrders, err := s.ChildOrdersFor(items)
+		if err != nil {
+			return errMsg(err)
+		}
 		shown, hidden := v.prepare(items, showBacklog)
 		return itemsLoadedMsg{
 			items:         shown,
 			allItems:      items,
 			backlogOrder:  backlogOrder,
+			childOrders:   childOrders,
 			hiddenBacklog: hidden,
 			view:          v,
 			showBacklog:   showBacklog,
@@ -302,8 +308,14 @@ type model struct {
 	// backlogMoveMode turns j/k into explicit priority changes for the
 	// selected backlog family. backlogMoveOrder is a local preview that is
 	// persisted once when the user commits the move.
-	backlogMoveMode  bool
-	backlogMoveOrder []string
+	backlogMoveMode   bool
+	backlogMoveOrder  []string
+	childOrders       map[string][]string
+	childMoveMode     bool
+	childMoveParent   string
+	childMoveBase     []string
+	childMoveOrder    []string
+	childMoveConflict bool
 	// selectedByView remembers the item cursor independently for each list
 	// view. Switching views clears items while the next asynchronous load is
 	// pending, so the row index alone cannot restore the prior selection.
@@ -635,7 +647,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func listGeometryStableUpdate(msg tea.Msg, before, after model) bool {
 	key, ok := msg.(tea.KeyMsg)
 	if !ok || before.mode != modeNav || after.mode != modeNav ||
-		before.backlogMoveMode || after.backlogMoveMode || before.projectPane != after.projectPane {
+		before.backlogMoveMode || after.backlogMoveMode || before.childMoveMode || after.childMoveMode ||
+		before.projectPane != after.projectPane {
 		return false
 	}
 	switch key.String() {
@@ -698,12 +711,26 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasAtBottom := m.conv.AtBottom()
 
 		if msg.allItems != nil {
+			if m.childMoveMode {
+				current := findItem(msg.allItems, prevID)
+				if current.ID == "" || current.Parent != m.childMoveParent || models.TerminalStatuses[current.Status] {
+					m.closeChildMove()
+				} else {
+					latest := msg.childOrders[m.childMoveParent]
+					var conflict bool
+					m.childMoveOrder, m.childMoveBase, conflict = reconcileChildMoveOrder(
+						m.childMoveOrder, m.childMoveBase, latest,
+					)
+					m.childMoveConflict = m.childMoveConflict || conflict
+				}
+			}
 			m.allItems = msg.allItems
 			m.familySummaries = summarizeFamilies(msg.allItems)
 			if m.backlogMoveMode {
 				m.backlogMoveOrder = rebaseBacklogMoveOrder(m.backlogMoveOrder, msg.backlogOrder)
 			}
 			m.backlogOrder = msg.backlogOrder
+			m.childOrders = msg.childOrders
 			m.searchIndex = buildItemSearchIndex(msg.allItems)
 		}
 		if !m.backlogVisibilityInitialized && msg.allItems != nil && m.view == channelView(models.ChannelInbox) && m.listBaseAvailRows() > 0 {
@@ -1115,6 +1142,20 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.childMoveMode {
+		switch {
+		case msg.String() == "v" || msg.String() == "enter":
+			return m.finishChildMove(true)
+		case msg.String() == "esc":
+			return m.finishChildMove(false)
+		case msg.Type == tea.KeyUp || msg.Type == tea.KeyShiftUp || msg.String() == "k":
+			return m.moveChild(-1)
+		case msg.Type == tea.KeyDown || msg.Type == tea.KeyShiftDown || msg.String() == "j":
+			return m.moveChild(1)
+		default:
+			return m, nil
+		}
+	}
 	if m.backlogMoveMode {
 		switch {
 		case msg.String() == "v" || msg.String() == "enter":
@@ -1272,7 +1313,7 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g":
 		return m.beginGroupEdit()
 	case "v":
-		return m.toggleBacklogMoveMode()
+		return m.toggleReorderMode()
 	case "r":
 		return m.requestItemsLoad(m.view, m.showBacklog)
 	case "t", "enter":
@@ -1475,9 +1516,26 @@ func (m model) closeGroup() model {
 	return m.recalcLayout()
 }
 
-func (m model) toggleBacklogMoveMode() (tea.Model, tea.Cmd) {
+func (m model) toggleReorderMode() (tea.Model, tea.Cmd) {
 	if m.store == nil || m.view.archive || m.draftSelected || m.selected < 0 || m.selected >= len(m.items) {
 		return m, nil
+	}
+	selected := findItem(m.allItems, m.selectedID())
+	if selected.Parent != "" {
+		parent := findItem(m.allItems, selected.Parent)
+		if parent.ID == "" || parent.Parent != "" {
+			m.err = fmt.Errorf("cannot reorder subthreads without their parent")
+			return m, nil
+		}
+		if models.TerminalStatuses[parent.Status] {
+			m.err = m.backlogPriorityError()
+			return m, nil
+		}
+		if strings.TrimSpace(m.filterQuery) != "" {
+			m.err = fmt.Errorf("clear the filter before reordering subthreads")
+			return m, nil
+		}
+		return m.beginChildMove(selected)
 	}
 	_, ok := m.selectedBacklogRoot()
 	if !ok {
@@ -1490,6 +1548,162 @@ func (m model) toggleBacklogMoveMode() (tea.Model, tea.Cmd) {
 	m.convSelection = -1
 	m.err = nil
 	return m, nil
+}
+
+func (m model) beginChildMove(selected models.Item) (tea.Model, tea.Cmd) {
+	if selected.Parent == "" || m.store == nil {
+		return m, nil
+	}
+	ids := append([]string(nil), m.childOrders[selected.Parent]...)
+	if len(visibleChildIDs(m.items, selected.Parent, ids)) < 2 {
+		m.err = fmt.Errorf("parent %q needs at least two visible subthreads to reorder", selected.Parent)
+		return m, nil
+	}
+	m.childMoveMode = true
+	m.childMoveParent = selected.Parent
+	m.childMoveBase = append([]string(nil), ids...)
+	m.childMoveOrder = append([]string(nil), ids...)
+	m.childMoveConflict = false
+	m.backlogMoveMode = false
+	m.backlogMoveOrder = nil
+	m.focus = focusItemList
+	m.convSelection = -1
+	m.err = nil
+	return m, nil
+}
+
+func visibleChildIDs(items []models.Item, parentID string, order []string) []string {
+	visible := make(map[string]struct{})
+	for _, item := range items {
+		if item.Parent == parentID && !models.TerminalStatuses[item.Status] {
+			visible[item.ID] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(visible))
+	for _, id := range order {
+		if _, ok := visible[id]; ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func findItem(items []models.Item, id string) models.Item {
+	for _, item := range items {
+		if item.ID == id {
+			return item
+		}
+	}
+	return models.Item{}
+}
+
+func reconcileChildMoveOrder(preview, base, latest []string) (nextPreview, nextBase []string, conflict bool) {
+	baseSeen := make(map[string]struct{}, len(base))
+	latestSeen := make(map[string]struct{}, len(latest))
+	for _, id := range base {
+		baseSeen[id] = struct{}{}
+	}
+	for _, id := range latest {
+		latestSeen[id] = struct{}{}
+	}
+	sharedBase := make([]string, 0)
+	sharedLatest := make([]string, 0)
+	newLatest := make([]string, 0)
+	for _, id := range base {
+		if _, ok := latestSeen[id]; ok {
+			sharedBase = append(sharedBase, id)
+		}
+	}
+	for _, id := range latest {
+		if _, ok := baseSeen[id]; ok {
+			sharedLatest = append(sharedLatest, id)
+		} else {
+			newLatest = append(newLatest, id)
+		}
+	}
+	appendOnly := append(append([]string(nil), sharedLatest...), newLatest...)
+	conflict = !equalIDs(sharedBase, sharedLatest) || !equalIDs(latest, appendOnly)
+	nextPreview = rebaseBacklogMoveOrder(preview, latest)
+	if conflict {
+		nextBase = append([]string(nil), base...)
+	} else {
+		nextBase = append([]string(nil), latest...)
+	}
+	return nextPreview, nextBase, conflict
+}
+
+func (m model) moveChild(delta int) (tea.Model, tea.Cmd) {
+	selectedID := m.selectedID()
+	active := visibleChildIDs(m.items, m.childMoveParent, m.childMoveOrder)
+	index := -1
+	for i, id := range active {
+		if id == selectedID {
+			index = i
+			break
+		}
+	}
+	target := index + delta
+	if index < 0 || target < 0 || target >= len(active) || delta == 0 {
+		return m, nil
+	}
+	first, second := active[index], active[target]
+	firstPos, secondPos := -1, -1
+	for i, id := range m.childMoveOrder {
+		if id == first {
+			firstPos = i
+		}
+		if id == second {
+			secondPos = i
+		}
+	}
+	if firstPos < 0 || secondPos < 0 {
+		return m, nil
+	}
+	m.childMoveOrder[firstPos], m.childMoveOrder[secondPos] = m.childMoveOrder[secondPos], m.childMoveOrder[firstPos]
+	m.err = nil
+	m.items, m.hiddenBacklog = m.prepareVisibleItems(m.allItems)
+	m.restoreSelection(selectedID)
+	return m, nil
+}
+
+func (m model) finishChildMove(commit bool) (tea.Model, tea.Cmd) {
+	selectedID := m.selectedID()
+	var saveErr error
+	if commit && !equalIDs(m.childMoveOrder, m.childMoveBase) {
+		if m.childMoveConflict {
+			saveErr = fmt.Errorf("subthread order changed elsewhere; refresh and start the move again")
+		} else if m.store == nil {
+			saveErr = fmt.Errorf("cannot save subthread order without a store")
+		} else {
+			saveErr = m.store.SetChildOrder(m.childMoveParent, m.childMoveBase, m.childMoveOrder)
+		}
+	}
+	parentID := m.childMoveParent
+	if commit && saveErr == nil && !equalIDs(m.childMoveOrder, m.childMoveBase) {
+		if m.childOrders == nil {
+			m.childOrders = make(map[string][]string)
+		}
+		m.childOrders[parentID] = append([]string(nil), m.childMoveOrder...)
+	}
+	m.closeChildMove()
+	m.err = saveErr
+	m.items, m.hiddenBacklog = m.prepareVisibleItems(m.allItems)
+	m.restoreSelection(selectedID)
+	if m.selectedID() != m.convItemID {
+		m.updateConv()
+	}
+	if saveErr != nil {
+		return m.requestItemsLoad(m.view, m.showBacklog)
+	}
+	return m, nil
+}
+
+func (m *model) closeChildMove() {
+	m.childMoveMode = false
+	m.childMoveParent = ""
+	m.childMoveBase = nil
+	m.childMoveOrder = nil
+	m.childMoveConflict = false
 }
 
 func (m model) selectedBacklogRoot() (string, bool) {
@@ -2487,12 +2701,30 @@ func (m *model) reload() {
 		m.err = err
 		return
 	}
+	childOrders, err := m.store.ChildOrdersFor(items)
+	if err != nil {
+		m.err = err
+		return
+	}
+	if m.childMoveMode {
+		current := findItem(items, m.selectedID())
+		if current.ID == "" || current.Parent != m.childMoveParent || models.TerminalStatuses[current.Status] {
+			m.closeChildMove()
+		} else {
+			var conflict bool
+			m.childMoveOrder, m.childMoveBase, conflict = reconcileChildMoveOrder(
+				m.childMoveOrder, m.childMoveBase, childOrders[m.childMoveParent],
+			)
+			m.childMoveConflict = m.childMoveConflict || conflict
+		}
+	}
 	m.allItems = items
 	m.familySummaries = summarizeFamilies(items)
 	if m.backlogMoveMode {
 		m.backlogMoveOrder = rebaseBacklogMoveOrder(m.backlogMoveOrder, backlogOrder)
 	}
 	m.backlogOrder = backlogOrder
+	m.childOrders = childOrders
 	m.searchIndex = buildItemSearchIndex(items)
 	m.items, m.hiddenBacklog = m.prepareVisibleItems(items)
 }
@@ -2932,8 +3164,16 @@ func (m model) prepareVisibleItems(all []models.Item) ([]models.Item, int) {
 	if m.backlogMoveMode {
 		order = m.backlogMoveOrder
 	}
+	childOrders := m.childOrders
+	if m.childMoveMode {
+		childOrders = make(map[string][]string, len(m.childOrders)+1)
+		for parentID, ids := range m.childOrders {
+			childOrders[parentID] = ids
+		}
+		childOrders[m.childMoveParent] = m.childMoveOrder
+	}
 	filtered := filterItemsIndexed(all, m.filterQuery, m.searchIndex)
-	return m.view.prepareGroupedWithOrderAndContext(filtered, all, m.showBacklog, m.collapsed, order)
+	return m.view.prepareGroupedWithOrdersAndContext(filtered, all, m.showBacklog, m.collapsed, order, childOrders)
 }
 
 // applyListFilter reapplies the current query synchronously. Search changes
@@ -3140,7 +3380,7 @@ func shortcutHelpContent(width int) string {
 			{"m", "Move the item under another item; f in the picker also moves its children."},
 			{"g", "Edit the selected item's group."},
 			{"b", "Show or hide backlog items."},
-			{"v", "Reorder the selected backlog family; j/k preview, Enter commits, Esc cancels."},
+			{"v", "Reorder a selected child among its siblings, or a backlog family; j/k previews, Enter commits, Esc cancels."},
 			{"r", "Refresh the current view."},
 			{"q", "Quit; confirm if a turn is running."},
 			{"Ctrl+C", "Interrupt all running turns; otherwise quit."},
@@ -3768,18 +4008,22 @@ func (m model) renderFooter() string {
 			text = "←/→/h/l pane  j/k versions  f copy view  tab switch document  e edit  ctrl+c interrupt/quit  1-3 view  q quit  ? help"
 			break
 		}
+		if m.childMoveMode {
+			text = "j/k preview sibling order  enter/v commit  esc cancel  ? help"
+			break
+		}
 		if m.backlogMoveMode {
 			text = "j/k preview move  enter/v commit  esc cancel  ? help"
 			break
 		}
-		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
+		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 		}
 		if m.showBacklog {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b hide backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
+				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b hide backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 			}
 		}
 	}
@@ -3971,7 +4215,7 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 		var rowLineSty, metaSty lipgloss.Style
 		if isSelected {
 			rowLineSty = lipgloss.NewStyle().Width(colW).Background(selectedBg).Bold(true)
-			if m.backlogMoveMode {
+			if m.backlogMoveMode || m.childMoveMode {
 				rowLineSty = rowLineSty.Foreground(reorderFg)
 			}
 			metaSty = lipgloss.NewStyle().Width(colW).Background(selectedBg).Foreground(lipgloss.Color("245"))
@@ -3986,7 +4230,7 @@ func (m model) renderList(availH int) (content, scrollbar string) {
 			if j == 0 && hasIndicator {
 				prefix = indent + indicator + " "
 				if isSelected {
-					if m.backlogMoveMode {
+					if m.backlogMoveMode || m.childMoveMode {
 						// Keep the item's status dot in its status colour while the
 						// selected title uses the reorder-mode accent.
 						prefixWidth := lipgloss.Width(prefix)

@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -77,6 +78,28 @@ func (s *Store) ReparentItemBy(itemID, newRootID string, flattenChildren bool, a
 			}
 		}
 	}
+	childOrders, err := s.ChildOrdersFor(items)
+	if err != nil {
+		return models.Item{}, err
+	}
+	childPositions := make(map[string]int, len(childOrders[item.ID]))
+	for i, id := range childOrders[item.ID] {
+		childPositions[id] = i
+	}
+	sort.SliceStable(children, func(i, j int) bool {
+		pi, iok := childPositions[children[i].ID]
+		pj, jok := childPositions[children[j].ID]
+		if iok && jok && pi != pj {
+			return pi < pj
+		}
+		if iok != jok {
+			return iok
+		}
+		if !children[i].Created.Equal(children[j].Created) {
+			return children[i].Created.Before(children[j].Created)
+		}
+		return children[i].ID < children[j].ID
+	})
 	itemBefore := item
 
 	type change struct {
@@ -158,6 +181,17 @@ func (s *Store) ReparentItemBy(itemID, newRootID string, flattenChildren bool, a
 		newJournal.after = append(newJournal.after, movedActivity(changed.after, changed.oldRoot, newRoot.ID, actor))
 		journals[newRoot.ID] = newJournal
 	}
+	incomingIDs := make([]string, 0, len(children)+1)
+	incomingIDs = append(incomingIDs, item.ID)
+	for _, child := range children {
+		incomingIDs = append(incomingIDs, child.ID)
+	}
+	childOrderSnapshot, updatedChildOrders, err := s.prepareChildOrdersForReparent(
+		items, item.ID, itemBefore.Parent, newRoot.ID, incomingIDs,
+	)
+	if err != nil {
+		return models.Item{}, err
+	}
 
 	written := 0
 	for _, changed := range changes {
@@ -184,6 +218,20 @@ func (s *Store) ReparentItemBy(itemID, newRootID string, flattenChildren bool, a
 			}
 			return models.Item{}, fmt.Errorf("record reparenting activity: %w", err)
 		}
+	}
+	if err := s.writeChildOrders(updatedChildOrders); err != nil {
+		for _, changed := range changes {
+			_ = WriteItem(changed.before, changed.path)
+		}
+		for restoreID, restore := range journals {
+			if restore.exists {
+				_ = writeJSONAtomic(s.activityPath(restoreID), restore.before)
+			} else {
+				_ = os.Remove(s.activityPath(restoreID))
+			}
+		}
+		_ = s.restoreChildOrders(childOrderSnapshot)
+		return models.Item{}, fmt.Errorf("persist subthread order after reparenting: %w", err)
 	}
 	if itemBefore.Parent == "" {
 		// Reparenting turns a root into a child. Its family can no longer be

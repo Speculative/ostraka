@@ -138,6 +138,10 @@ func (v listView) prepareGroupedWithOrder(all []models.Item, showBacklog bool, c
 // prepareGroupedWithOrderAndContext lets a filtered list use the full snapshot
 // to decide whether a backlog child belongs under a non-backlog parent.
 func (v listView) prepareGroupedWithOrderAndContext(all, contextItems []models.Item, showBacklog bool, collapsed map[string]bool, backlogOrder []string) ([]models.Item, int) {
+	return v.prepareGroupedWithOrdersAndContext(all, contextItems, showBacklog, collapsed, backlogOrder, nil)
+}
+
+func (v listView) prepareGroupedWithOrdersAndContext(all, contextItems []models.Item, showBacklog bool, collapsed map[string]bool, backlogOrder []string, childOrders map[string][]string) ([]models.Item, int) {
 	// Unit-level view tests and a partially written legacy file may have no
 	// stable ID. Grouping such rows would merge unrelated roots under the empty
 	// map key, so retain the old flat behavior until IDs are available.
@@ -260,7 +264,30 @@ func (v listView) prepareGroupedWithOrderAndContext(all, contextItems []models.I
 	out := make([]models.Item, 0, len(visible))
 	for _, family := range families {
 		members := append([]models.Item(nil), family.members...)
+		positions := make(map[string]int)
+		if !v.archive {
+			order := childOrders[family.key]
+			for i, id := range order {
+				positions[id] = i
+			}
+		}
 		sort.SliceStable(members, func(i, j int) bool {
+			if family.rootVisible {
+				if members[i].ID == family.root.ID && members[j].ID != family.root.ID {
+					return true
+				}
+				if members[j].ID == family.root.ID && members[i].ID != family.root.ID {
+					return false
+				}
+			}
+			pi, iok := positions[members[i].ID]
+			pj, jok := positions[members[j].ID]
+			if iok && jok && pi != pj {
+				return pi < pj
+			}
+			if iok != jok {
+				return iok
+			}
 			if !members[i].Created.Equal(members[j].Created) {
 				return members[i].Created.Before(members[j].Created)
 			}

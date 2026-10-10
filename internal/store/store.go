@@ -448,6 +448,9 @@ func (s *Store) CreateItemWithGroupBy(channel models.Channel, title, body string
 		}
 	}
 	if parent != "" {
+		if err := s.appendChildOrderIfPresent(parent, item.ID); err != nil {
+			return models.Item{}, err
+		}
 		if err := s.addSubthreadActivity(parentItem, item, ActivitySubthreadCreated, "", actor); err != nil {
 			return models.Item{}, err
 		}
