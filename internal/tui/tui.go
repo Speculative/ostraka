@@ -1429,10 +1429,8 @@ func (m model) beginGroupEdit() (tea.Model, tea.Cmd) {
 	m.groupError = nil
 	m.closeMentionPicker()
 	m.input.Reset()
-	m.input.Placeholder = "group slug or none…"
-	m.input.SetValue(item.Group)
-	m.input.CursorEnd()
-	m.openGroupPicker(item.Group)
+	m.input.Placeholder = ""
+	m.openGroupPicker()
 	m = m.recalcLayout()
 	return m, m.input.Focus()
 }
@@ -1453,14 +1451,12 @@ func (m model) handleGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.groupPicker.selected--
 			}
 			return m, nil
-		case "enter", "tab":
+		case "tab":
 			if len(m.groupPicker.groups) > 0 {
 				return m.chooseGroup()
 			}
-			if msg.String() == "tab" {
-				m.closeGroupPicker()
-				return m, nil
-			}
+			m.closeGroupPicker()
+			return m, nil
 		}
 	}
 	switch msg.String() {
@@ -1478,6 +1474,11 @@ func (m model) handleGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.input, cmd = m.input.Update(msg)
 	if m.groupError != nil {
 		m.groupError = nil
+	}
+	if isSpaceKey(msg) {
+		m.closeGroupPicker()
+	} else if !m.groupPicker.open && (msg.Type == tea.KeyBackspace || msg.String() == "backspace" || msg.String() == "alt+backspace") {
+		m.openGroupPicker()
 	}
 	m.refreshGroupPicker()
 	if nextH := m.currentInputHeight(); nextH != prevH {
@@ -3416,7 +3417,8 @@ func shortcutHelpContent(width int) string {
 			{"Ctrl+S", "Submit a turn, create an item, or save the current edit."},
 			{"Ctrl+N", "Start a related item from the turn editor."},
 			{"@", "Search for and insert an item mention in an editor."},
-			{"Tab / Enter", "Insert a highlighted match in a mention or group picker."},
+			{"Tab", "Complete the highlighted group suggestion."},
+			{"Enter", "Apply the group text as entered, or insert a highlighted mention match."},
 			{"Enter", "Move from a new item's title to its body."},
 			{"Esc / Ctrl+C", "Close an editor; Ctrl+C discards an unfinished new item."},
 			{"Ctrl+←/→, Alt+←/→", "Move by word in text editors."},
@@ -4040,9 +4042,9 @@ func (m model) renderFooter() string {
 		}
 	case modeGroup:
 		if m.groupPicker.open {
-			text = "↑/↓ select group  enter/tab insert  ctrl+s apply  esc close"
+			text = "↑/↓ select  tab complete  space hide  enter/ctrl+s apply  esc close"
 		} else {
-			text = "ctrl+s/enter apply group  esc cancel"
+			text = "backspace show suggestions  enter/ctrl+s apply  esc cancel"
 		}
 		if m.groupError != nil {
 			text = "invalid group: " + m.groupError.Error() + "  ctrl+s retry  esc cancel"

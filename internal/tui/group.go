@@ -99,21 +99,9 @@ func rankGroupCandidates(query string, groups []string) []string {
 	return result
 }
 
-func (m *model) openGroupPicker(current string) {
-	groups := groupNames(m.groupSourceItems())
-	selected := 0
-	current = strings.TrimSpace(current)
-	for i, group := range groups {
-		if group == current {
-			selected = i
-			break
-		}
-	}
-	m.groupPicker = groupPickerState{
-		open:     true,
-		groups:   groups,
-		selected: selected,
-	}
+func (m *model) openGroupPicker() {
+	m.groupPicker = groupPickerState{open: true}
+	m.refreshGroupPicker()
 }
 
 func (m *model) refreshGroupPicker() {

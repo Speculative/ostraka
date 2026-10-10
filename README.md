@@ -28,8 +28,9 @@ Roots can be assigned one optional lowercase group slug. Use
 and `ostraka item list --group <group|none>` to organize and filter complete
 item families. In the TUI, select an item and press `g` to edit its group in
 the bottom composer; existing group names appear in a floating autocomplete
-and typing filters them. Press Enter to select a suggestion, `ctrl+s` to apply,
-or use `none`/an empty value to clear it.
+and typing filters them. The input starts empty; use up/down to choose a
+suggestion and Tab to complete it. Enter or `ctrl+s` applies the text as typed,
+and `none`/an empty value clears the group.
 
 Run `ostraka preamble` when an agent needs the static orientation and final
 reply guidance. Normal dispatched sessions receive the same guidance directly

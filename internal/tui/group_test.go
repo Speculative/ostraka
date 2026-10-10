@@ -18,34 +18,35 @@ func TestRankGroupCandidates(t *testing.T) {
 	}
 }
 
-func TestGroupPickerStartsOpenAndSelectsExistingGroup(t *testing.T) {
+func TestGroupPickerStartsOpenWithoutPrefillingAndTabSelectsGroup(t *testing.T) {
 	m := newModel(nil, nil, nil)
 	m.mode = modeGroup
 	m.groupItemID = "item-1"
-	m.input.SetValue("v1")
-	m.input.CursorEnd()
 	m.allItems = []models.Item{
 		{ID: "root-v1", Group: "v1"},
 		{ID: "root-post", Group: "post-v1"},
 		{ID: "child", Parent: "root-v1", Group: "v1"},
 	}
-	m.openGroupPicker("v1")
+	m.openGroupPicker()
 	if !m.groupPicker.open || len(m.groupPicker.groups) != 2 {
 		t.Fatalf("picker = %#v, want two groups open", m.groupPicker)
 	}
-	if got := m.groupPicker.groups[m.groupPicker.selected]; got != "v1" {
-		t.Fatalf("initial selection = %q, want current group v1", got)
+	if got := m.input.Value(); got != "" {
+		t.Fatalf("initial input = %q, want empty", got)
+	}
+	if got := m.groupPicker.groups[m.groupPicker.selected]; got != "post-v1" {
+		t.Fatalf("initial selection = %q, want first suggestion post-v1", got)
 	}
 
-	next, _ := m.handleGroupKey(tea.KeyMsg{Type: tea.KeyUp})
+	next, _ := m.handleGroupKey(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(model)
-	next, _ = m.handleGroupKey(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.handleGroupKey(tea.KeyMsg{Type: tea.KeyTab})
 	m = next.(model)
 	if m.groupPicker.open {
 		t.Fatal("picker remained open after choosing a group")
 	}
-	if got := m.input.Value(); got != "post-v1" {
-		t.Fatalf("chosen group = %q, want post-v1", got)
+	if got := m.input.Value(); got != "v1" {
+		t.Fatalf("chosen group = %q, want v1", got)
 	}
 }
 
@@ -59,7 +60,7 @@ func TestGroupPickerFiltersAfterEditing(t *testing.T) {
 		{ID: "root-v1", Group: "v1"},
 		{ID: "root-post", Group: "post-v1"},
 	}
-	m.openGroupPicker("")
+	m.openGroupPicker()
 	m.refreshGroupPicker()
 	if got, want := m.groupPicker.groups, []string{"post-v1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("filtered groups = %v, want %v", got, want)
