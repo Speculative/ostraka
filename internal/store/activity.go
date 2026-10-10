@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,20 +57,26 @@ func (s *Store) ListActivities(rootID string) ([]models.Activity, error) {
 // to the current root goal. Reading does not consume notifications: failed or
 // reply-less dispatches must leave them available for retry.
 func (s *Store) PendingActivities(rootID string) ([]models.Activity, error) {
+	unlock, err := s.lockItems()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	all, err := s.ListActivities(rootID)
 	if err != nil {
 		return nil, err
 	}
+	owner, err := s.GetItem(rootID)
+	if err != nil {
+		return nil, err
+	}
+	all, err = s.recoverGoalChildTurns(owner, all)
+	if err != nil {
+		return nil, err
+	}
 	var pending []models.Activity
-	var owner models.Item
 	for _, activity := range all {
 		if activity.Type == ActivitySubthreadTurn {
-			if owner.ID == "" {
-				owner, err = s.GetItem(rootID)
-				if err != nil {
-					return nil, err
-				}
-			}
 			if !activity.Handled && owner.Parent == "" && owner.Mode == models.AgentModeGoal && owner.Goal != nil && owner.Goal.StartedAt.Equal(activity.GoalStartedAt) {
 				pending = append(pending, activity)
 			}
@@ -213,4 +220,56 @@ func (s *Store) recordGoalChildTurn(child models.Item) error {
 		Actor: turn.Actor, Timestamp: turn.Timestamp, TurnContent: turn.Content,
 		GoalStartedAt: owner.Goal.StartedAt,
 	})
+}
+
+// recoverGoalChildTurns repairs a crash between persisting a child reply and
+// appending its notification. The item turns are authoritative. Both handled
+// and pending journal entries count as delivered/recorded, so recovery never
+// recreates a consumed notification. Caller holds the item mutation lock.
+func (s *Store) recoverGoalChildTurns(owner models.Item, activities []models.Activity) ([]models.Activity, error) {
+	if owner.Parent != "" || owner.Mode != models.AgentModeGoal || owner.Goal == nil {
+		return activities, nil
+	}
+	type turnKey struct {
+		child     string
+		timestamp time.Time
+		actor     models.Actor
+	}
+	seen := make(map[turnKey]bool)
+	for _, a := range activities {
+		if a.Type == ActivitySubthreadTurn && a.GoalStartedAt.Equal(owner.Goal.StartedAt) {
+			seen[turnKey{a.ChildID, a.Timestamp.UTC(), a.Actor}] = true
+		}
+	}
+	items, err := s.ListItems(ListOpts{})
+	if err != nil {
+		return nil, err
+	}
+	changed := false
+	for _, child := range items {
+		if child.Parent != owner.ID {
+			continue
+		}
+		for _, turn := range child.Turns {
+			key := turnKey{child.ID, turn.Timestamp.UTC(), turn.Actor}
+			if turn.Timestamp.Before(owner.Goal.StartedAt) || seen[key] {
+				continue
+			}
+			activities = append(activities, models.Activity{
+				ID: activityID(turn.Timestamp), Type: ActivitySubthreadTurn,
+				ChildID: child.ID, ChildTitle: child.Title,
+				Actor: turn.Actor, Timestamp: turn.Timestamp,
+				TurnContent: turn.Content, GoalStartedAt: owner.Goal.StartedAt,
+			})
+			seen[key] = true
+			changed = true
+		}
+	}
+	if changed {
+		sort.SliceStable(activities, func(i, j int) bool { return activities[i].Timestamp.Before(activities[j].Timestamp) })
+		if err := writeJSONAtomic(s.activityPath(owner.ID), activities); err != nil {
+			return nil, err
+		}
+	}
+	return activities, nil
 }

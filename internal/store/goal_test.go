@@ -314,3 +314,105 @@ func TestChildOwnedGoalDoesNotNotifyItsParent(t *testing.T) {
 		}
 	}
 }
+
+func TestGoalRecoversChildTurnWrittenBeforeNotification(t *testing.T) {
+	s := goalStore(t)
+	root := goalTestItem(t, s, "")
+	if _, err := s.SetMode(root.ID, models.AgentModeGoal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTurn(root.ID, models.ActorUser, "recover replies"); err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.CreateItemWithGroupBy(models.ChannelInbox, "child", "body", models.TypeThread, models.StatusPendingUser, root.ID, "", models.ActorAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Inject the exact on-disk state at the crash boundary: the child turn
+	// write completed but the notification write has not happened.
+	child.Turns = append(child.Turns, models.Turn{
+		Actor: models.ActorAgent, Timestamp: time.Now().UTC(), Content: "surviving reply",
+	})
+	if err := WriteItem(child, s.itemPath(child)); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen the store as a new process would; recover without any in-memory
+	// state from the writer. Include archived direct children in recovery.
+	if _, err := s.SetStatusBy(child.ID, models.StatusArchived, models.ActorAgent); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewStore(s.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := reopened.PendingActivities(root.ID)
+	if err != nil || len(pending) != 1 || pending[0].TurnContent != "surviving reply" {
+		t.Fatalf("recovered batch = %+v, %v", pending, err)
+	}
+	id := pending[0].ID
+	again, err := reopened.PendingActivities(root.ID)
+	if err != nil || len(again) != 1 || again[0].ID != id {
+		t.Fatalf("recovery duplicated notification: %+v, %v", again, err)
+	}
+	if err := reopened.MarkActivitiesHandled(root.ID, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err = NewStore(s.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err = reopened.PendingActivities(root.ID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("handled notification replayed after restart: %+v, %v", pending, err)
+	}
+}
+
+func TestGoalCancellationRacesChildTurnAndRejectsOldAdmission(t *testing.T) {
+	s := goalStore(t)
+	root := goalTestItem(t, s, "")
+	child := goalTestItem(t, s, root.ID)
+	if _, err := s.SetMode(root.ID, models.AgentModeGoal); err != nil {
+		t.Fatal(err)
+	}
+	root, err := s.AddTurn(root.ID, models.ActorUser, "old goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := root.Goal.StartedAt
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	go func() {
+		<-start
+		_, err := s.AddTurn(child.ID, models.ActorAgent, "racing old reply")
+		results <- err
+	}()
+	go func() {
+		<-start
+		_, err := s.EndGoal(root.ID)
+		results <- err
+	}()
+	close(start)
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.SetMode(root.ID, models.AgentModeGoal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTurn(root.ID, models.ActorUser, "replacement goal"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.AcknowledgeDispatch(root.ID, old); err != nil || ok {
+		t.Fatalf("old admission accepted: %v, %v", ok, err)
+	}
+	pending, err := s.PendingActivities(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range pending {
+		if a.Type == ActivitySubthreadTurn {
+			t.Fatalf("old child reply entered replacement goal: %+v", a)
+		}
+	}
+}

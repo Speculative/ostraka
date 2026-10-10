@@ -51,6 +51,9 @@ During an active root goal, new direct-child turns (user or agent) appear in
 the parent's next dispatch with their child ID, actor, timestamp, and content.
 They are batched and consumed only after a successful parent dispatch that
 posts a reply. Turns arriving during that dispatch remain for the next one.
+If a crash persists a child turn but not its notification, the next pending
+activity scan reconstructs it from the child's saved turns. Handled
+notifications are retained so recovery does not replay consumed turns.
 Ending or replacing the goal prevents old notifications from being delivered
 to a later goal or ordinary CODE dispatch. The parent's own child closures
 remain suppressed.

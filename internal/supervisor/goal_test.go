@@ -331,3 +331,151 @@ func TestGoalChildTurnsBatchRetryAndArriveDuringParentDispatch(t *testing.T) {
 	}
 	close(fourth.release)
 }
+
+func TestGoalNormalPauseFinishesTurnAndResumesChildren(t *testing.T) {
+	h := &goalHarness{calls: make(chan goalCall, 8)}
+	s, st := newStoreBackedSupervisor(t, h)
+	owner, _ := st.CreateItem(models.ChannelInbox, "goal", "body", models.TypeThread, models.StatusActive, "")
+	owner = armGoal(t, st, owner)
+	s.Start()
+	defer s.Shutdown()
+	first := nextGoalCall(t, h)
+	if !s.ToggleDispatchPause() {
+		t.Fatal("pause was not enabled")
+	}
+	child, err := st.CreateSubthreadBy(owner.ID, "delegate", "body", models.TypeThread, models.StatusActive, models.ActorAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pausing leaves the provider context alive and permits a normal reply.
+	if _, err := st.AddTurn(owner.ID, models.ActorAgent, "finished while paused"); err != nil {
+		t.Fatal(err)
+	}
+	close(first.release)
+	select {
+	case call := <-h.calls:
+		t.Fatalf("dispatch while paused: %s", call.id)
+	case <-time.After(650 * time.Millisecond):
+	}
+	item, err := st.GetItem(owner.ID)
+	if err != nil || item.Goal == nil || item.Status != models.StatusPendingUser {
+		t.Fatalf("running turn did not finish normally: %+v, %v", item, err)
+	}
+	if s.ToggleDispatchPause() {
+		t.Fatal("resume did not clear pause")
+	}
+	delegated := nextGoalCall(t, h)
+	if delegated.id != child.ID {
+		t.Fatalf("resume skipped queued child: %s", delegated.id)
+	}
+	if _, err := st.AddTurn(child.ID, models.ActorAgent, "paused delegate result"); err != nil {
+		t.Fatal(err)
+	}
+	close(delegated.release)
+	continued := nextGoalCall(t, h)
+	if continued.id != owner.ID || !strings.Contains(continued.prompt, "paused delegate result") || !strings.Contains(continued.prompt, owner.Goal.Prompt) {
+		t.Fatalf("resume lost progress or goal: %+v", continued)
+	}
+	if _, err := st.EndGoal(owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddTurn(owner.ID, models.ActorAgent, "done"); err != nil {
+		t.Fatal(err)
+	}
+	close(continued.release)
+	select {
+	case call := <-h.calls:
+		t.Fatalf("extra dispatch after end: %s", call.id)
+	case <-time.After(650 * time.Millisecond):
+	}
+}
+
+type postedReplyFailureHarness struct {
+	noModelDiscovery
+	store   *store.Store
+	ownerID string
+}
+
+func (h *postedReplyFailureHarness) RunTurn(context.Context, string, string, string, string, func(string)) (TurnResult, error) {
+	if _, err := h.store.AddTurn(h.ownerID, models.ActorAgent, "reply before provider failure"); err != nil {
+		return TurnResult{}, err
+	}
+	return TurnResult{}, fmt.Errorf("provider failed after posting reply")
+}
+
+func TestGoalFailedProviderAfterReplyRetainsNotificationsAcrossRestart(t *testing.T) {
+	failing := &postedReplyFailureHarness{}
+	s, st := newStoreBackedSupervisor(t, failing)
+	owner, _ := st.CreateItem(models.ChannelInbox, "goal", "body", models.TypeThread, models.StatusActive, "")
+	owner = armGoal(t, st, owner)
+	child, err := st.CreateSubthreadBy(owner.ID, "child", "body", models.TypeThread, models.StatusPendingUser, models.ActorAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddTurn(child.ID, models.ActorAgent, "unconsumed-child-result"); err != nil {
+		t.Fatal(err)
+	}
+	failing.store, failing.ownerID = st, owner.ID
+	s.dispatch(enqueueMsg{itemID: owner.ID, mode: models.AgentModeGoal, goalStartedAt: owner.Goal.StartedAt})
+	if !s.DispatchesPaused() {
+		t.Fatal("provider failure did not pause")
+	}
+	pending, err := st.PendingActivities(owner.ID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("failure consumed notifications: %+v, %v", pending, err)
+	}
+	// Construct a new supervisor/store from the same disk state.
+	h := &goalHarness{calls: make(chan goalCall, 8)}
+	restarted := New(st.Root)
+	restarted.harness = h
+	restarted.Start()
+	defer restarted.Shutdown()
+	call := nextGoalCall(t, h)
+	if call.id != owner.ID || !strings.Contains(call.prompt, "unconsumed-child-result") {
+		t.Fatalf("restart lost child result: %+v", call)
+	}
+	if _, err := st.AddTurn(owner.ID, models.ActorAgent, "successfully incorporated"); err != nil {
+		t.Fatal(err)
+	}
+	close(call.release)
+	next := nextGoalCall(t, h)
+	if strings.Contains(next.prompt, "unconsumed-child-result") {
+		t.Fatal("successful retry repeated handled notification")
+	}
+	if _, err := st.EndGoal(owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(next.release)
+}
+
+func TestGoalChildTurnsDoNotQueueIndependentParentWake(t *testing.T) {
+	s, st := newStoreBackedSupervisor(t, &goalHarness{calls: make(chan goalCall, 8)})
+	owner, _ := st.CreateItem(models.ChannelInbox, "goal", "body", models.TypeThread, models.StatusActive, "")
+	owner = armGoal(t, st, owner)
+	child, err := st.CreateSubthreadBy(owner.ID, "child", "body", models.TypeThread, models.StatusPendingUser, models.ActorAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.seedTurnCounts()
+	for _, actor := range []models.Actor{models.ActorAgent, models.ActorUser} {
+		if _, err := st.AddTurn(child.ID, actor, "new child turn"); err != nil {
+			t.Fatal(err)
+		}
+		s.EnqueuePendingActivityRoots()
+		for {
+			select {
+			case msg := <-s.queue:
+				if msg.itemID == owner.ID {
+					t.Fatalf("child turn queued a separate parent wake: %+v", msg)
+				}
+			default:
+				goto drained
+			}
+		}
+	drained:
+	}
+	pending, err := st.PendingActivities(owner.ID)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("notifications unavailable for normal goal continuation: %+v, %v", pending, err)
+	}
+}
