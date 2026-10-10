@@ -19,6 +19,7 @@ const activityDir = "ACTIVITY"
 // small protocol boundary shared by the store, TUI, and supervisor.
 const (
 	ActivitySubthreadCreated               = "subthread.created"
+	ActivitySubthreadTurn                  = "subthread.turn"
 	ActivitySubthreadClosed                = "subthread.closed"
 	ActivitySubthreadMoved                 = "subthread.moved"
 	ActivitySubthreadUnparented            = "subthread.unparented"
@@ -51,18 +52,29 @@ func (s *Store) ListActivities(rootID string) ([]models.Activity, error) {
 	return activities, nil
 }
 
-// PendingActivities returns user-authored events which have not yet been
-// included in a successful root dispatch. Agent-authored events are already
-// known to their author and never become root work. It deliberately does not
-// mark pending user events while reading: a provider run may fail or may
-// finish without posting its final item turn.
+// PendingActivities returns unhandled user activity and child turns belonging
+// to the current root goal. Reading does not consume notifications: failed or
+// reply-less dispatches must leave them available for retry.
 func (s *Store) PendingActivities(rootID string) ([]models.Activity, error) {
 	all, err := s.ListActivities(rootID)
 	if err != nil {
 		return nil, err
 	}
 	var pending []models.Activity
+	var owner models.Item
 	for _, activity := range all {
+		if activity.Type == ActivitySubthreadTurn {
+			if owner.ID == "" {
+				owner, err = s.GetItem(rootID)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if !activity.Handled && owner.Parent == "" && owner.Mode == models.AgentModeGoal && owner.Goal != nil && owner.Goal.StartedAt.Equal(activity.GoalStartedAt) {
+				pending = append(pending, activity)
+			}
+			continue
+		}
 		if !activity.Handled && activity.Actor != models.ActorAgent {
 			pending = append(pending, activity)
 		}
@@ -146,7 +158,7 @@ func activityID(now time.Time) string {
 }
 
 func (s *Store) appendActivity(rootID string, activity models.Activity) error {
-	if activity.Actor == models.ActorAgent {
+	if activity.Actor == models.ActorAgent && activity.Type != ActivitySubthreadTurn {
 		// The agent already knows about changes made during its own dispatch.
 		// Keep them in the timeline, but do not feed them back as root work.
 		activity.Handled = true
@@ -179,5 +191,26 @@ func (s *Store) addSubthreadActivity(root models.Item, child models.Item, kind, 
 		Result:     result,
 		Actor:      actor,
 		Timestamp:  time.Now().UTC(),
+	})
+}
+
+// recordGoalChildTurn runs under the item mutation lock. Only turns written
+// during an active root goal create notifications; rearming cannot replay them.
+func (s *Store) recordGoalChildTurn(child models.Item) error {
+	if child.Parent == "" {
+		return nil
+	}
+	owner, err := s.GetItem(child.Parent)
+	if err != nil {
+		return err
+	}
+	if owner.Parent != "" || owner.Mode != models.AgentModeGoal || owner.Goal == nil {
+		return nil
+	}
+	turn := child.Turns[len(child.Turns)-1]
+	return s.appendActivity(owner.ID, models.Activity{
+		Type: ActivitySubthreadTurn, ChildID: child.ID, ChildTitle: child.Title,
+		Actor: turn.Actor, Timestamp: turn.Timestamp, TurnContent: turn.Content,
+		GoalStartedAt: owner.Goal.StartedAt,
 	})
 }

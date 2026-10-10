@@ -3942,11 +3942,8 @@ func (m model) renderHeader() string {
 			Render("  ⏸ dispatches paused  ")
 		row = lipgloss.JoinHorizontal(lipgloss.Top, row, paused)
 	}
-	if goal, found := m.goalItem(); found {
+	if goal, found := m.goalItem(); found && goal.Goal != nil {
 		label := "goal active: " + goal.ID
-		if goal.Goal == nil {
-			label = "goal armed: " + goal.ID
-		}
 		badge := lipgloss.NewStyle().Bold(true).Foreground(goalFg).Background(headerBg).Render("  " + label + "  ")
 		if m.width > 0 {
 			badge = ansi.Truncate(badge, m.width, "")

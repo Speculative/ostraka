@@ -3,8 +3,9 @@
 On a live item, Shift+Tab cycles **CHAT → CODE → GOAL → CHAT**.
 Selecting GOAL arms it; the next user turn supplies the goal and starts work.
 Only one item can be armed or running in goal mode in a project. Its status
-marker is blue, and the navigation bar shows the owner's ID and whether the
-goal is armed or active, even when the item is hidden by the current view.
+marker is blue. Once the initiating user turn starts the goal, the navigation
+bar shows `goal active:` and the owner's ID, even when the item is hidden by
+the current view. Selecting GOAL alone does not show a navigation badge.
 
 The initiating user turn is saved with the item and repeated in every fresh
 or resumed dispatch, independently of conversation-history limits. Later
@@ -45,6 +46,20 @@ parent continuations. A child with `--status pending-user` stays idle as a
 question for the user. User-authored child closures appear in subsequent
 parent nudges through the existing activity mechanism. Children do not
 inherit the parent's continuous loop.
+
+During an active root goal, new direct-child turns (user or agent) appear in
+the parent's next dispatch with their child ID, actor, timestamp, and content.
+They are batched and consumed only after a successful parent dispatch that
+posts a reply. Turns arriving during that dispatch remain for the next one.
+Ending or replacing the goal prevents old notifications from being delivered
+to a later goal or ordinary CODE dispatch. The parent's own child closures
+remain suppressed.
+
+Only child turns are included, without provider traces or investigation
+history. Each turn excerpt is limited to 4,000 Unicode characters and the
+batch to 12,000 characters of turn content; truncated turns point back to the
+child for the full text. Child-owned goals do not notify their parent.
+Outside active root goals, child turns do not create parent notifications.
 
 `P` pauses/resumes new dispatches. Ctrl+C during an active goal pauses new
 dispatches before interrupting active turns, preventing immediate relaunch.

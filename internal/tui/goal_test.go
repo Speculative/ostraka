@@ -22,7 +22,7 @@ func TestShiftTabGoalCycleAndExclusiveOwner(t *testing.T) {
 	m.selected = 0
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	m = next.(model)
-	if m.items[0].Mode != models.AgentModeGoal || !strings.Contains(ansi.Strip(m.renderHeader()), "goal armed: "+first.ID) {
+	if m.items[0].Mode != models.AgentModeGoal || strings.Contains(ansi.Strip(m.renderHeader()), "goal ") {
 		t.Fatal("CODE did not become armed GOAL")
 	}
 	m.selected = 1

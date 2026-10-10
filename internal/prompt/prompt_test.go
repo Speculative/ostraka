@@ -368,3 +368,25 @@ func TestGoalGuidanceRepeatsDurableGoalAndExactEndCommand(t *testing.T) {
 		t.Fatal("child goal was given root delegation scope")
 	}
 }
+
+func TestGoalChildTurnExcerptsBoundUnicodeAndBatchContent(t *testing.T) {
+	var activities []models.Activity
+	for i := 0; i < 4; i++ {
+		activities = append(activities, models.Activity{
+			Type: "subthread.turn", ChildID: fmt.Sprintf("child-%d", i),
+			Actor: models.ActorAgent, TurnContent: strings.Repeat("界", 5000),
+		})
+	}
+	got := activitySection(activities, false)
+	if strings.Count(got, "界") != 12000 || strings.Count(got, "Excerpt truncated") != 4 {
+		t.Fatalf("excerpt limits: runes=%d truncations=%d", strings.Count(got, "界"), strings.Count(got, "Excerpt truncated"))
+	}
+	for i := 0; i < 4; i++ {
+		if !strings.Contains(got, fmt.Sprintf("child-%d", i)) {
+			t.Fatal("batch lost a child's notification")
+		}
+	}
+	if !strings.Contains(got, "actor=agent") || !strings.Contains(got, "Child turn at") {
+		t.Fatal("missing turn provenance")
+	}
+}

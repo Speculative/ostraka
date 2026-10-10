@@ -774,6 +774,9 @@ func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.I
 			return models.Item{}, err
 		}
 	}
+	if err := s.recordGoalChildTurn(item); err != nil {
+		return models.Item{}, err
+	}
 	return item, nil
 }
 

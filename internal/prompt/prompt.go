@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/Speculative/ostraka/internal/models"
 )
@@ -71,7 +72,9 @@ them. Then send one substantive Ostraka item reply; it ends this dispatch.`
 
 const activitySectionText = `--- unhandled activity ---
 {{range .Activities}}{{.Type}}: {{.Title}} ({{.SubjectID}}{{if .FromRootID}}, from={{.FromRootID}}{{end}}{{if .ToRootID}}, to={{.ToRootID}}{{end}}{{if .PreviousTitle}}, previous-title={{.PreviousTitle}}{{end}}, result={{.Result}}, actor={{.Actor}})
-{{end}}`
+{{if .TurnTimestamp}}Child turn at {{.TurnTimestamp}}:
+{{.TurnContent}}
+{{end}}{{end}}`
 
 const activityReviewGuidance = `Consider the activity lines as one batch. Read
 every distinct affected child before consolidating: inspect its status and
@@ -198,6 +201,8 @@ type activitySectionData struct {
 }
 
 type activityData struct {
+	TurnContent   string
+	TurnTimestamp string
 	Type          string
 	Title         string
 	SubjectID     string
@@ -336,6 +341,7 @@ func activitySection(activities []models.Activity, hasUserTurns bool) string {
 		return ""
 	}
 	data := activitySectionData{Activities: make([]activityData, 0, len(activities))}
+	remainingTurnRunes := 12000
 	for _, activity := range activities {
 		title := activity.ItemTitle
 		if title == "" {
@@ -351,7 +357,21 @@ func activitySection(activities []models.Activity, hasUserTurns bool) string {
 		if subjectID == "" {
 			subjectID = activity.ChildID
 		}
+		content, timestamp := "", ""
+		if activity.Type == "subthread.turn" {
+			timestamp = activity.Timestamp.UTC().Format(time.RFC3339Nano)
+			runes := []rune(activity.TurnContent)
+			limit := min(4000, remainingTurnRunes)
+			if len(runes) > limit {
+				content = string(runes[:limit]) + "\n[Excerpt truncated; read the child item for the full turn.]"
+				remainingTurnRunes -= limit
+			} else {
+				content = activity.TurnContent
+				remainingTurnRunes -= len(runes)
+			}
+		}
 		data.Activities = append(data.Activities, activityData{
+			TurnContent: content, TurnTimestamp: timestamp,
 			Type:          activity.Type,
 			Title:         title,
 			SubjectID:     subjectID,

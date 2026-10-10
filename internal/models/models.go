@@ -139,6 +139,8 @@ type Activity struct {
 	Actor         Actor     `json:"actor"`
 	Timestamp     time.Time `json:"timestamp"`
 	Handled       bool      `json:"handled"`
+	TurnContent   string    `json:"turn_content,omitempty"`
+	GoalStartedAt time.Time `json:"goal_started_at,omitempty"`
 }
 
 // Goal records the initiating user turn independently of bounded prompt history.

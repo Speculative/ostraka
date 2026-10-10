@@ -69,10 +69,14 @@ func activityJSON(activity models.Activity) map[string]any {
 		"group":          activity.Group, "previous_group": activity.PreviousGroup,
 		"from_root_id": activity.FromRootID, "to_root_id": activity.ToRootID,
 		"model": activity.Model, "effort": activity.Effort,
+		"turn_content": activity.TurnContent,
 	} {
 		if value != "" {
 			out[key] = value
 		}
+	}
+	if !activity.GoalStartedAt.IsZero() {
+		out["goal_started_at"] = activity.GoalStartedAt.Format(time.RFC3339Nano)
 	}
 	if activity.Type == store.ActivityAgentSessionStarted {
 		out["provider"] = activity.Result

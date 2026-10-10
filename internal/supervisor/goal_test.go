@@ -131,7 +131,7 @@ func TestRootGoalDelegatesBeforeContinuingAndIncludesUserClosure(t *testing.T) {
 	}
 	close(delegated.release)
 	continued := nextGoalCall(t, h)
-	if continued.id != owner.ID || !strings.Contains(continued.prompt, "subthread.closed") || !strings.Contains(continued.prompt, decision.ID) {
+	if continued.id != owner.ID || !strings.Contains(continued.prompt, "subthread.closed") || !strings.Contains(continued.prompt, decision.ID) || !strings.Contains(continued.prompt, "delegated work done") || !strings.Contains(continued.prompt, "Choose A") {
 		t.Fatalf("closure missing from continuation: %+v", continued)
 	}
 	if _, err := st.EndGoal(owner.ID); err != nil {
@@ -277,4 +277,57 @@ func TestEndedGoalFailureDoesNotPauseUnrelatedWork(t *testing.T) {
 	if s.DispatchesPaused() {
 		t.Fatal("an ended goal paused unrelated work")
 	}
+}
+
+func TestGoalChildTurnsBatchRetryAndArriveDuringParentDispatch(t *testing.T) {
+	h := &goalHarness{calls: make(chan goalCall, 8)}
+	s, st := newStoreBackedSupervisor(t, h)
+	owner, _ := st.CreateItem(models.ChannelInbox, "goal", "body", models.TypeThread, models.StatusActive, "")
+	owner = armGoal(t, st, owner)
+	a, err := st.CreateSubthreadBy(owner.ID, "a", "body", models.TypeThread, models.StatusPendingUser, models.ActorAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := st.CreateSubthreadBy(owner.ID, "b", "body", models.TypeThread, models.StatusPendingUser, models.ActorAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Start()
+	defer s.Shutdown()
+	first := nextGoalCall(t, h)
+	for _, child := range []models.Item{a, b} {
+		if _, err := st.AddTurn(child.ID, models.ActorAgent, "result-"+child.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(first.release)
+	second := nextGoalCall(t, h)
+	for _, child := range []models.Item{a, b} {
+		if !strings.Contains(second.prompt, "result-"+child.ID) {
+			t.Fatalf("missing child result in prompt: %s", second.prompt)
+		}
+	}
+	close(second.release) // No item reply: notifications must survive.
+	third := nextGoalCall(t, h)
+	if !strings.Contains(third.prompt, "result-"+a.ID) || !strings.Contains(third.prompt, "result-"+b.ID) {
+		t.Fatal("reply-less dispatch consumed child turns")
+	}
+	if _, err := st.AddTurn(a.ID, models.ActorAgent, "late-child-result"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddTurn(owner.ID, models.ActorAgent, "incorporated captured results"); err != nil {
+		t.Fatal(err)
+	}
+	close(third.release)
+	fourth := nextGoalCall(t, h)
+	if !strings.Contains(fourth.prompt, "late-child-result") || strings.Contains(fourth.prompt, "result-"+a.ID) || strings.Contains(fourth.prompt, "result-"+b.ID) {
+		t.Fatalf("wrong next batch: %s", fourth.prompt)
+	}
+	if _, err := st.EndGoal(owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddTurn(owner.ID, models.ActorAgent, "done"); err != nil {
+		t.Fatal(err)
+	}
+	close(fourth.release)
 }

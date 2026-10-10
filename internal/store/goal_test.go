@@ -201,3 +201,116 @@ func TestConcurrentGoalActivityWritesPreserveDecisions(t *testing.T) {
 		t.Fatalf("pending decisions = %d, %v", len(pending), err)
 	}
 }
+
+func TestGoalChildTurnNotificationsAreScopedAndConsumedByID(t *testing.T) {
+	s := goalStore(t)
+	root := goalTestItem(t, s, "")
+	child := goalTestItem(t, s, root.ID)
+	if _, err := s.AddTurn(child.ID, models.ActorAgent, "before goal"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetMode(root.ID, models.AgentModeGoal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTurn(child.ID, models.ActorAgent, "armed only"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTurn(root.ID, models.ActorUser, "goal one"); err != nil {
+		t.Fatal(err)
+	}
+	for _, actor := range []models.Actor{models.ActorAgent, models.ActorUser} {
+		if _, err := s.AddTurn(child.ID, actor, string(actor)+" result"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := s.PendingActivities(root.ID)
+	if err != nil || len(pending) != 3 { // user child creation plus two turns
+		t.Fatalf("pending = %+v, %v", pending, err)
+	}
+	var turns []models.Activity
+	for _, a := range pending {
+		if a.Type == ActivitySubthreadTurn {
+			turns = append(turns, a)
+		}
+	}
+	if len(turns) != 2 || turns[0].TurnContent != "agent result" || turns[1].TurnContent != "user result" {
+		t.Fatalf("turns = %+v", turns)
+	}
+	if err := s.MarkActivitiesHandled(root.ID, []string{turns[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	// A turn arriving after the captured batch must remain unhandled.
+	if _, err := s.AddTurn(child.ID, models.ActorAgent, "late result"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = s.PendingActivities(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, a := range pending {
+		if a.Type == ActivitySubthreadTurn {
+			count++
+			if a.ID == turns[0].ID {
+				t.Fatal("consumed turn reappeared")
+			}
+		}
+	}
+	if count != 2 {
+		t.Fatalf("remaining turns = %d", count)
+	}
+	if _, err := s.EndGoal(root.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetMode(root.ID, models.AgentModeGoal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTurn(root.ID, models.ActorUser, "goal two"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = s.PendingActivities(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range pending {
+		if a.Type == ActivitySubthreadTurn {
+			t.Fatal("previous goal turn leaked into new goal")
+		}
+	}
+	if _, err := s.SetStatusBy(child.ID, models.StatusArchived, models.ActorAgent); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = s.PendingActivities(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range pending {
+		if a.Type == ActivitySubthreadClosed {
+			t.Fatal("agent closure became pending")
+		}
+	}
+}
+
+func TestChildOwnedGoalDoesNotNotifyItsParent(t *testing.T) {
+	s := goalStore(t)
+	root := goalTestItem(t, s, "")
+	child := goalTestItem(t, s, root.ID)
+	if _, err := s.SetMode(child.ID, models.AgentModeGoal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTurn(child.ID, models.ActorUser, "isolated goal"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTurn(child.ID, models.ActorAgent, "result"); err != nil {
+		t.Fatal(err)
+	}
+	activities, err := s.ListActivities(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range activities {
+		if a.Type == ActivitySubthreadTurn {
+			t.Fatal("isolated goal turn notified parent")
+		}
+	}
+}
