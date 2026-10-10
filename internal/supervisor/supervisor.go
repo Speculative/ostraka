@@ -187,6 +187,7 @@ type enqueueMsg struct {
 	itemID   string
 	activity bool
 	pending  bool
+	control  bool
 	mode     models.AgentMode
 }
 
@@ -220,6 +221,9 @@ type Supervisor struct {
 	activityQueued map[string]bool
 	activityBusy   map[string]bool
 	pendingQueued  map[string]bool
+
+	pauseMu        sync.Mutex
+	dispatchPaused bool
 	turnMu         sync.Mutex
 	turnCounts     map[string]int
 }
@@ -251,6 +255,30 @@ func (s *Supervisor) Busy() (string, bool) {
 		return itemID, true
 	}
 	return "", false
+}
+
+// DispatchesPaused reports whether the scheduler is holding queued dispatches.
+// A pause is process-local and does not interrupt provider turns already in
+// progress.
+func (s *Supervisor) DispatchesPaused() bool {
+	s.pauseMu.Lock()
+	defer s.pauseMu.Unlock()
+	return s.dispatchPaused
+}
+
+// ToggleDispatchPause pauses or resumes new dispatches and returns the new
+// state. A small control message wakes the scheduler if it is waiting for work;
+// if the queue is full, its existing messages will wake the same loop.
+func (s *Supervisor) ToggleDispatchPause() bool {
+	s.pauseMu.Lock()
+	s.dispatchPaused = !s.dispatchPaused
+	paused := s.dispatchPaused
+	s.pauseMu.Unlock()
+	select {
+	case s.queue <- enqueueMsg{control: true}:
+	default:
+	}
+	return paused
 }
 
 func (s *Supervisor) setBusy(itemID string, busy bool) {
@@ -755,17 +783,21 @@ func (s *Supervisor) run() {
 		}
 
 		started := false
-		for i, msg := range pending {
-			// Do not run two sessions for one item at once. Chat work can proceed
-			// while code is active; code work only waits for another code dispatch.
-			if activeItems[msg.itemID] || (msg.mode == models.AgentModeCode && codeActive) {
-				continue
+		s.pauseMu.Lock()
+		if !s.dispatchPaused {
+			for i, msg := range pending {
+				// Do not run two sessions for one item at once. Chat work can proceed
+				// while code is active; code work only waits for another code dispatch.
+				if activeItems[msg.itemID] || (msg.mode == models.AgentModeCode && codeActive) {
+					continue
+				}
+				pending = append(pending[:i], pending[i+1:]...)
+				launch(msg)
+				started = true
+				break
 			}
-			pending = append(pending[:i], pending[i+1:]...)
-			launch(msg)
-			started = true
-			break
 		}
+		s.pauseMu.Unlock()
 		if started {
 			continue
 		}
@@ -778,6 +810,9 @@ func (s *Supervisor) run() {
 		case msg, ok := <-s.queue:
 			if !ok {
 				return
+			}
+			if msg.control {
+				continue
 			}
 			if msg.activity {
 				s.queueMu.Lock()

@@ -89,6 +89,11 @@ type activityWaker interface {
 	EnqueuePendingActivityRoots()
 }
 
+type dispatchPauseController interface {
+	DispatchesPaused() bool
+	ToggleDispatchPause() bool
+}
+
 // ── styles ───────────────────────────────────────────────────────────────────
 
 var (
@@ -1093,6 +1098,12 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "?" {
 		m.mode = modeHelp
 		m.shortcuts.GotoTop()
+		return m, nil
+	}
+	if msg.String() == "P" {
+		if controller, ok := m.sup.(dispatchPauseController); ok {
+			controller.ToggleDispatchPause()
+		}
 		return m, nil
 	}
 	if msg.String() == "ctrl+c" {
@@ -3123,6 +3134,7 @@ func shortcutHelpContent(width int) string {
 			{"c", "Create a subthread under the selected item."},
 			{"t / Enter", "Write a turn on the selected item, or reopen its draft."},
 			{"s", "Change status; on a proposed item, start it."},
+			{"P", "Pause queued dispatches while batching item changes; active turns continue."},
 			{"Shift+Tab", "Toggle the selected item's Chat (read-only) or Code execution mode."},
 			{"S", "Choose a fresh agent session, model, and effort."},
 			{"m", "Move the item under another item; f in the picker also moves its children."},
@@ -3667,11 +3679,21 @@ func (m model) renderHeader() string {
 		tabs = append(tabs, headerTabStyle.Render(project))
 	}
 	row := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	if m.dispatchesPaused() {
+		paused := lipgloss.NewStyle().Bold(true).Foreground(pendingFg).Background(headerBg).
+			Render("  ⏸ dispatches paused  ")
+		row = lipgloss.JoinHorizontal(lipgloss.Top, row, paused)
+	}
 	pad := m.width - lipgloss.Width(row)
 	if pad > 0 {
 		row += lipgloss.NewStyle().Background(headerBg).Render(strings.Repeat(" ", pad))
 	}
 	return row
+}
+
+func (m model) dispatchesPaused() bool {
+	controller, ok := m.sup.(dispatchPauseController)
+	return ok && controller.DispatchesPaused()
 }
 
 func (m model) renderFilterRow(width int) string {
@@ -3759,6 +3781,14 @@ func (m model) renderFooter() string {
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
 				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b hide backlog  v prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 			}
+		}
+	}
+
+	if _, ok := m.sup.(dispatchPauseController); ok && m.mode == modeNav {
+		if m.dispatchesPaused() {
+			text = "P resume · " + text
+		} else {
+			text = "P pause · " + text
 		}
 	}
 
