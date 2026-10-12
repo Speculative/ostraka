@@ -73,7 +73,8 @@ func FindRoot(start string) (string, error) {
 }
 
 func NewStore(root string) (*Store, error) {
-	for _, sub := range append(append(append(dirValues(), archiveDir), activityDir), partialTraceDir) {
+	subdirs := append(dirValues(), archiveDir, activityDir, partialTraceDir, reviewDir)
+	for _, sub := range subdirs {
 		if err := os.MkdirAll(filepath.Join(root, sub), 0755); err != nil {
 			return nil, err
 		}
@@ -721,6 +722,13 @@ func (s *Store) AddTurn(id string, actor models.Actor, content string) (models.I
 		return models.Item{}, err
 	}
 	defer unlock()
+	return s.addTurnLocked(id, actor, content)
+}
+
+// addTurnLocked appends a turn while the caller owns the item mutation lock.
+// Review operations use the same transition after taking the review lock first
+// so their durable receipt and the corresponding item turn can be reconciled.
+func (s *Store) addTurnLocked(id string, actor models.Actor, content string) (models.Item, error) {
 	path, err := s.pathForID(id)
 	if err != nil {
 		return models.Item{}, err

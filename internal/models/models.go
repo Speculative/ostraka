@@ -105,6 +105,68 @@ type Turn struct {
 	Content   string
 }
 
+// ReviewAnchor identifies the selected code context for a review thread. The
+// excerpt is copied into durable item turns when the discussion is submitted.
+// Review anchors describe the current attachment; individual messages may
+// retain their own earlier anchor as discussion context.
+type ReviewAnchor struct {
+	File      string `json:"file"`
+	Side      string `json:"side"` // old or new
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+	Excerpt   string `json:"excerpt"`
+}
+
+// ReviewMessage is a comment, reply, or agent-authored attachment note.
+// Submitted user messages have already been copied into an item user turn;
+// Recorded agent messages have been copied into an item agent turn.
+type ReviewMessage struct {
+	ID          string        `json:"id"`
+	Actor       Actor         `json:"actor"`
+	Kind        string        `json:"kind,omitempty"` // comment or attachment
+	Content     string        `json:"content"`
+	Anchor      *ReviewAnchor `json:"anchor,omitempty"`
+	CreatedAt   time.Time     `json:"created_at"`
+	Submitted   bool          `json:"submitted,omitempty"`
+	SubmittedAt time.Time     `json:"submitted_at,omitempty"`
+	Recorded    bool          `json:"recorded,omitempty"`
+}
+
+// ReviewThread has a review-scoped, stable number. Numbers are allocated
+// monotonically and are never reused, including after a thread is detached.
+type ReviewThread struct {
+	Number   int             `json:"number"`
+	Anchor   *ReviewAnchor   `json:"anchor,omitempty"`
+	Messages []ReviewMessage `json:"messages"`
+}
+
+// ReviewBatch is a recoverable user submission. Its receipt marker makes a
+// retry safe if the item turn was written immediately before a process crash.
+type ReviewBatch struct {
+	ID          string    `json:"id"`
+	MessageIDs  []string  `json:"message_ids"`
+	Content     string    `json:"content"`
+	CreatedAt   time.Time `json:"created_at"`
+	Submitted   bool      `json:"submitted,omitempty"`
+	SubmittedAt time.Time `json:"submitted_at,omitempty"`
+}
+
+// Review is an active discussion attached to exactly one Ostraka item.
+// Finishing removes the review object after all drafts and replies are durable
+// in that item's turns.
+type Review struct {
+	CommitRequested  bool           `json:"commit_requested,omitempty"`
+	CommitBaseHead   string         `json:"commit_base_head,omitempty"`
+	CompletionCommit string         `json:"completion_commit,omitempty"`
+	ID               string         `json:"id"`
+	ItemID           string         `json:"item_id"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	NextThreadNumber int            `json:"next_thread_number"`
+	Threads          []ReviewThread `json:"threads"`
+	Batches          []ReviewBatch  `json:"batches,omitempty"`
+}
+
 // PartialTrace is the provider output captured while an agent turn was in
 // flight. It is deliberately separate from Turn: a provider can emit useful
 // work and then be interrupted (or fail) before it posts a substantive turn.

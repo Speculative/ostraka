@@ -192,3 +192,36 @@ func TestRenderMarkdownUsesPaneWidthAfterRemovingDocumentMargin(t *testing.T) {
 		t.Fatalf("rendered prose did not use the pane width: %q", plain)
 	}
 }
+
+func TestTaggedSourceHasTokenColorsBeyondPlainCode(t *testing.T) {
+	source := "func main() { println(42) }"
+	tagged := renderMarkdown("```go\n"+source+"\n```", 80)
+	plain := renderMarkdown("```text\n"+source+"\n```", 80)
+	if ansi.Strip(tagged) != ansi.Strip(plain) {
+		t.Fatal("language tag changed visible source")
+	}
+	if tagged == plain {
+		t.Fatal("Go tokens were not syntax highlighted")
+	}
+}
+
+func TestMarkdownDashDisplayPreservesLiteralCodeAndLinks(t *testing.T) {
+	input := "before—after and 1–2\n\n`literal—code–text`\n\n```text\nfenced—code–text\n```\n\n[label—text](https://example.com/a—b)"
+	prepared := strings.ReplaceAll(protectMarkdownHyphens(input, 80), string(protectedHyphen), "-")
+	for _, want := range []string{"before--after and 1-2", "`literal—code–text`", "fenced—code–text", "[label--text](https://example.com/a—b)"} {
+		if !strings.Contains(prepared, want) {
+			t.Errorf("display preparation missing %q: %q", want, prepared)
+		}
+	}
+	plain := ansi.Strip(renderMarkdown(input, 80))
+	for _, want := range []string{"before--after and 1-2", "literal—code–text", "fenced—code–text"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("rendered display missing %q: %q", want, plain)
+		}
+	}
+	for _, row := range strings.Split(renderMarkdown("one—two three—four five—six", 12), "\n") {
+		if lipgloss.Width(row) > 12 {
+			t.Errorf("ASCII dash conversion overflowed viewport: %q", row)
+		}
+	}
+}

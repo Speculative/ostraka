@@ -108,6 +108,25 @@ activity, mention child content only where it justifies a conclusion, citing
 its ID instead of recapping it. If the batch changes nothing, say so in one
 sentence.`
 
+// Review instructions belong to dispatch prompts, not the durable review turn.
+const reviewDispatchGuidance = `For an active code review, inspect current threads with ostraka review list
+and ostraka review show <review-id>. Use ostraka review reply <review-id>
+<thread-number> --content-stdin to answer each requested thread. Review
+operations update review objects without posting item turns; post one final
+item turn after the dispatch work is done. That turn automatically includes
+outstanding review replies, excerpts, and attachment changes exactly once.
+After edits, reattach affected threads with ostraka review attach or detach
+them with ostraka review detach and reply explaining why the old code no
+longer applies. Start new explanation threads only when requested. Do not
+post a separate item turn for each review thread.`
+
+const reviewCommitGuidance = `When the user requests finishing a review (LGTM, please commit), that
+authorizes committing the reviewed changes. Follow project commit instructions. If checks or the commit fail, keep the review open and report
+what needs intervention. After a successful commit, run ostraka review finish
+<review-id> --commit <commit-hash> before posting your final item turn. This
+verifies the new commit and defers review cleanup until that final turn has
+preserved pending review replies. Do not close the review on failure.`
+
 const agentOrientationText = `Ostraka items are durable work cards. Turns are their conversations; direct
 subthreads carry parallel work. Your normal harness progress is visible to the
 user, so use it for concise updates. A retained provider trace is captured
@@ -140,6 +159,8 @@ Replace it
 completely, preserve useful existing facts, and keep it within 6000
 characters. Keep current work, decisions, plans, and item-specific findings on
 items. Link dependent items when narrower knowledge must persist.
+
+` + reviewDispatchGuidance + "\n\n" + reviewCommitGuidance + `
 
 When finished, send one substantive final reply with the exact command below.
 It hands the item back and ends this dispatch. Pass real multiline content
@@ -263,6 +284,18 @@ func NudgeForMode(itemID string, mode models.AgentMode, userTurns []string, acti
 		base = renderPrompt(continuationWithoutTurnTemplate, continuationWithoutTurnData{
 			ItemID: itemID,
 		})
+	}
+	for _, content := range userTurns {
+		if strings.Contains(content, "<!-- ostraka-review-batch:") || strings.Contains(content, "<!-- ostraka-review-finish:") {
+			base += "\n\n" + reviewDispatchGuidance
+			break
+		}
+	}
+	for _, content := range userTurns {
+		if strings.Contains(content, "<!-- ostraka-review-finish:") {
+			base += "\n\n" + reviewCommitGuidance
+			break
+		}
 	}
 	return executionModeGuidance(mode) + "\n\n" + base + dispatchLengthGuidance + activitySection(activities, len(userTurns) > 0)
 }

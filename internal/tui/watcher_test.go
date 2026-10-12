@@ -29,3 +29,22 @@ func TestStartWatcherSignalsForLiveProgress(t *testing.T) {
 		t.Fatal("watcher did not signal for a live progress write")
 	}
 }
+
+func TestStartWatcherSignalsForReviewReply(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "REVIEWS"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	watchCh, err := startWatcher(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "REVIEWS", "review.json"), []byte(`{"reply":"answer"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-watchCh:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not signal for review-only update")
+	}
+}

@@ -390,3 +390,36 @@ func TestGoalChildTurnExcerptsBoundUnicodeAndBatchContent(t *testing.T) {
 		t.Fatal("missing turn provenance")
 	}
 }
+
+func TestReviewNudgeInstructionsStayOutsideUserTurns(t *testing.T) {
+	turn := "## Review questions\n\nWhy is this removed?\n\n<!-- ostraka-review-batch:rvw-one:batch-one -->"
+	got := Nudge("item-1", []string{turn, turn}, nil)
+	boundary := strings.Index(got, "--- end unseen user turns ---")
+	instructions := strings.Index(got, reviewDispatchGuidance)
+	if boundary < 0 || instructions <= boundary {
+		t.Fatalf("review instructions must follow user turns: %q", got)
+	}
+	if strings.Count(got, reviewDispatchGuidance) != 1 {
+		t.Fatalf("batched review submissions should include instructions once: %q", got)
+	}
+	if !strings.Contains(got, turn) {
+		t.Fatal("review turn content was changed")
+	}
+	ordinary := Nudge("item-1", []string{"Please implement this."}, nil)
+	if strings.Contains(ordinary, reviewDispatchGuidance) {
+		t.Fatal("ordinary nudge contains review-specific instructions")
+	}
+	fresh := Bootstrap("item-1", "", "", turn, "ostraka item turn item-1 --actor agent --content-stdin", nil)
+	if !strings.Contains(fresh, reviewDispatchGuidance) {
+		t.Fatal("fresh dispatch omitted review instructions")
+	}
+}
+
+func TestFinishNudgeContainsCommitWorkflowOutsideUserTurn(t *testing.T) {
+	turn := "LGTM, please commit.\n<!-- ostraka-review-finish:rvw-one -->"
+	got := Nudge("item-1", []string{turn}, nil)
+	boundary := strings.Index(got, "--- end unseen user turns ---")
+	if strings.Index(got, reviewCommitGuidance) <= boundary {
+		t.Fatal("commit workflow instructions missing outside user turn")
+	}
+}

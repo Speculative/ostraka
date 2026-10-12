@@ -56,7 +56,7 @@ func TestRenderListShowsGroupInItemMetadata(t *testing.T) {
 	}
 }
 
-func TestGroupShortcutOpensTheComposerWithCurrentGroup(t *testing.T) {
+func TestGroupShortcutOpensTheComposerWithGroupPicker(t *testing.T) {
 	st, err := store.NewStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -80,8 +80,11 @@ func TestGroupShortcutOpensTheComposerWithCurrentGroup(t *testing.T) {
 	if got.modalVisible() || !got.composerVisible() {
 		t.Fatal("group editor did not use the composer slot")
 	}
-	if got.groupItemID != item.ID || got.input.Value() != "post-v1" {
-		t.Fatalf("group editor target/value = %q/%q, want %q/post-v1", got.groupItemID, got.input.Value(), item.ID)
+	if got.groupItemID != item.ID || got.input.Value() != "" {
+		t.Fatalf("group editor target/value = %q/%q, want %q/empty", got.groupItemID, got.input.Value(), item.ID)
+	}
+	if !got.groupPicker.open || len(got.groupPicker.groups) != 1 || got.groupPicker.groups[0] != "post-v1" {
+		t.Fatalf("group picker = %#v, want current group as a suggestion", got.groupPicker)
 	}
 	if plain := ansi.Strip(got.View()); !strings.Contains(plain, "ctrl+s apply") {
 		t.Fatalf("group editor footer missing from composer flow: %q", plain)
@@ -257,7 +260,7 @@ func TestConversationColorsUserAndAgentNames(t *testing.T) {
 	m.convSelection = 0
 	m.updateConv()
 	selected := m.conv.View()
-	if !strings.Contains(selected, "\x1b[1;93;48;5;237muser") || !strings.Contains(selected, "48;5;237") {
+	if !strings.Contains(selected, "\x1b[1;93m\x1b[48;5;237muser") || !strings.Contains(selected, "48;5;237") {
 		t.Fatalf("selected user turn did not retain its actor color and selection background: %q", selected)
 	}
 }
@@ -894,15 +897,15 @@ func TestNewModelUsesALegibleDraftPlaceholder(t *testing.T) {
 	}
 }
 
-func TestFooterUsesThreeViewKeyRange(t *testing.T) {
+func TestFooterUsesFourViewKeyRange(t *testing.T) {
 	m := newModel(nil, nil, nil)
 	m.width = 200
 	got := m.renderFooter()
-	if !strings.Contains(got, "1-3 view") {
-		t.Errorf("footer does not advertise the three-view key range: %q", got)
+	if !strings.Contains(got, "1-4 view") {
+		t.Errorf("footer does not advertise the four-view key range: %q", got)
 	}
-	if strings.Contains(got, "1-4") {
-		t.Errorf("footer still advertises the removed fourth view: %q", got)
+	if strings.Contains(got, "1-3 view") {
+		t.Errorf("footer still advertises only three views: %q", got)
 	}
 	if !strings.Contains(got, "? help") {
 		t.Errorf("full navigation footer does not advertise shortcut help: %q", got)
@@ -939,6 +942,11 @@ func TestProjectContextUsesTheThirdViewKey(t *testing.T) {
 	next, _ = got.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
 	if next.(model).projectPane != 1 {
 		t.Error("removed key 5 still changed the project context")
+	}
+
+	next, cmd := got.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	if next.(model).projectPane != reviewProjectPane || cmd == nil {
+		t.Error("key 4 did not open Review changes from Project Context")
 	}
 }
 

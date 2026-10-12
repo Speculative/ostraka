@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	"github.com/Speculative/ostraka/internal/models"
+	"github.com/Speculative/ostraka/internal/reviewdiff"
 	"github.com/Speculative/ostraka/internal/store"
 	"github.com/Speculative/ostraka/internal/supervisor"
 
@@ -57,6 +58,12 @@ type conversationScrollMsg struct {
 	now        time.Time
 	duration   time.Duration
 	generation uint64
+}
+
+type reviewDiffLoadedMsg struct {
+	diff       reviewdiff.Diff
+	generation uint64
+	err        error
 }
 
 // modelsLoadedMsg carries the result of fetching a provider's AvailableModels
@@ -165,7 +172,7 @@ func startWatcher(root string) (<-chan struct{}, error) {
 	// reading pane stale until another action happens to trigger a reload. Legacy channel
 	// directories may remain on disk, but they are no longer part of the store
 	// schema or TUI.
-	for _, name := range []string{"INBOX", "ARCHIVE", "ACTIVITY", "PARTIALS", "supervisor"} {
+	for _, name := range []string{"INBOX", "ARCHIVE", "ACTIVITY", "PARTIALS", "REVIEWS", "supervisor"} {
 		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
 			w.Add(filepath.Join(root, name))
 		}
@@ -322,8 +329,8 @@ type model struct {
 	// pending, so the row index alone cannot restore the prior selection.
 	selectedByView map[listView]string
 	focus          paneFocus
-	// copyMode gives the reading pane the whole terminal, without any UI
-	// chrome. Terminal mouse selection is rectangular across screen rows, so
+	// copyMode gives the reading pane the whole terminal. Review mode keeps
+	// its question controls; other views omit all UI chrome. Terminal mouse selection is rectangular across screen rows, so
 	// merely focusing the pane still copies the list and divider on every
 	// selected line. copyReturnFocus restores keyboard navigation on exit.
 	copyMode        bool
@@ -445,25 +452,72 @@ type model struct {
 	conversationScrollTarget     int
 	conversationScrollActive     bool
 	conversationSelectionMovedAt time.Time
-	// projectPane is 0 for item views, 1 for user instructions, and 2 for the
-	// agent-curated brief. Project documents use the existing reader/editor,
-	// while the brief also exposes its immutable history in the list pane.
+	// projectPane is 0 for item views, 1 for user instructions, 2 for the
+	// agent-curated brief, and 3 for the working-tree review browser.
 	projectPane    int
 	projectEntries []projectEntry
 	editingProject bool
 	projectPreview bool
 	projectCursor  int
+	// Review changes is a live, in-memory view of the working tree. The cursor
+	// indexes reviewdiff.File.Lines; reviewAnchor and reviewSelecting describe
+	// the code range currently exposed to the question/thread UI.
+	reviewDiff           reviewdiff.Diff
+	reviewSyntax         map[string]reviewSyntax
+	reviewDiffGeneration uint64
+	reviewLoading        bool
+	reviewCursor         int
+	reviewAnchor         int
+	reviewSelecting      bool
+	reviewSide           string
+	reviewFullContext    bool
+	reviewSplit          bool
+	reviewSearching      bool
+	reviewSearchQuery    string
+	reviewSearchFiles    bool
+	reviewLineOffsets    []int
+	reviewThreadsMode    bool
+	reviewReviews        []models.Review
+	reviewSelectedID     string
+	reviewSavedPath      string
+	reviewThreadCursor   int
+	reviewThreadOffsets  []int
+	reviewThreadEnds     []int
+	reviewCodeMarkers    map[reviewCodeLocation][]reviewThreadRef
+	reviewDestinationID  string
+	reviewID             string
+	reviewComposer       reviewComposerState
 
 	width  int
 	height int
 	err    error
 }
 
+const reviewProjectPane = 3
+
+// ReviewViewState is the browser context needed by sibling review workflows.
+// It intentionally contains no persisted snapshot or agent-generated text.
+type ReviewViewState struct {
+	Active    bool
+	Loading   bool
+	Root      string
+	Head      string
+	FilePath  string
+	FileIndex int
+	LineIndex int
+	Side      string
+	Selecting bool
+	HasRange  bool
+}
+
 type projectEntry struct {
-	title    string
-	meta     string
-	content  string
-	editable bool
+	title       string
+	meta        string
+	content     string
+	editable    bool
+	statusColor lipgloss.Color
+	threadBadge string
+	threadNew   bool
 }
 
 const (
@@ -585,6 +639,7 @@ func newModel(s *store.Store, watchCh <-chan struct{}, sup supervisorClient) mod
 		selectedByView: make(map[listView]string),
 		convSelection:  -1,
 		traceExpanded:  make(map[string]bool),
+		reviewAnchor:   -1,
 	}
 	if s != nil {
 		m.restoreNewItemDraft()
@@ -832,6 +887,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case reviewDiffLoadedMsg:
+		m.acceptReviewDiff(msg)
+		return m, nil
+
 	case statusSavedMsg:
 		if msg.err != nil {
 			m.err = msg.err
@@ -854,6 +913,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Re-arm the watcher and refresh project documents too: the CLI can
 		// replace the brief while the TUI is open.
+		if m.projectPane == reviewProjectPane {
+			m.refreshReviewList()
+			m.updateConv()
+			return m, waitForWatch(m.watchCh)
+		}
 		if m.projectPane != 0 {
 			if !m.editingProject {
 				m.showProjectContext()
@@ -912,7 +976,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.sequence == m.draftSequence {
 			if m.editingNewItemDraft() {
 				m.checkpointNewItemDraft()
-			} else if m.mode == modeCompose && !m.editingProject {
+			} else if m.mode == modeCompose && !m.editingProject && !m.reviewComposer.active {
 				m.checkpointTurnDraft()
 			}
 		}
@@ -923,7 +987,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.checkpointNewItemDraft()
 			return m, draftSafetyCheckpoint()
 		}
-		if m.mode == modeCompose && !m.editingProject {
+		if m.mode == modeCompose && !m.editingProject && !m.reviewComposer.active {
 			m.checkpointTurnDraft()
 			return m, draftSafetyCheckpoint()
 		}
@@ -980,7 +1044,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.copyMode {
+		if m.copyMode && m.mode == modeNav {
 			return m.handleCopyKey(msg)
 		}
 		if m.modalVisible() {
@@ -1050,6 +1114,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			prevLines := m.currentInputHeight()
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
+			if m.reviewComposer.active && m.reviewComposer.selectingDestination {
+				m.refreshMentionPicker()
+			}
 			cmds = append(cmds, cmd)
 			if m.currentInputHeight() != prevLines {
 				m = m.recalcLayout()
@@ -1123,6 +1190,9 @@ func (m model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.projectPane == reviewProjectPane && m.reviewSearching {
+		return m.handleReviewSearchKey(msg)
+	}
 	if msg.String() == "?" {
 		m.mode = modeHelp
 		m.shortcuts.GotoTop()
@@ -1142,6 +1212,9 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = m.sup.Interrupt()
 			return m, nil
 		}
+	}
+	if m.projectPane == reviewProjectPane {
+		return m.handleReviewKey(msg)
 	}
 	if m.childMoveMode {
 		switch {
@@ -1241,6 +1314,8 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "3":
 			return m, nil
+		case "4":
+			return m.openReviewChanges()
 		case "tab":
 			m.projectPane = 3 - m.projectPane
 			m.showProjectContext()
@@ -1306,6 +1381,8 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = focusItemList
 		m.projectPane = 1
 		m.showProjectContext()
+	case "4":
+		return m.openReviewChanges()
 	case "b":
 		// Backlog is hidden by default, so this is also the only way back to an
 		// item parked there — it must stay reachable, not just tidy.
@@ -2030,6 +2107,9 @@ func (m model) enterCopyMode() model {
 	m.copyMode = true
 	m.copyReturnFocus = m.focus
 	m.focus = focusItemList
+	if m.projectPane == reviewProjectPane {
+		m.focus = focusReadingPane
+	}
 	return m.recalcLayout()
 }
 
@@ -2037,6 +2117,30 @@ func (m model) enterCopyMode() model {
 // keys either scroll the document or leave the mode. Item and lifecycle
 // actions are unavailable while their surrounding UI is hidden.
 func (m model) handleCopyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.projectPane == reviewProjectPane {
+		if m.reviewSearching {
+			return m.handleReviewSearchKey(msg)
+		}
+		if msg.String() == "1" || msg.String() == "2" || msg.String() == "3" {
+			m.copyMode = false
+			m.focus = m.copyReturnFocus
+			m = m.recalcLayout()
+			return m.handleReviewKey(msg)
+		}
+		if m.reviewThreadsMode && (msg.String() == "h" || msg.String() == "left") {
+			return m.handleReviewThreadsKey(msg)
+		}
+		if msg.String() == "f" || msg.String() == "q" || msg.String() == "h" || msg.String() == "left" || (msg.String() == "esc" && m.reviewAnchor < 0 && !m.reviewSearching) {
+			m.copyMode = false
+			m.focus = m.copyReturnFocus
+			return m.recalcLayout(), nil
+		}
+		// The full-screen review keeps its cursor and selection controls.
+		if msg.String() == "?" {
+			return m, nil
+		}
+		return m.handleReviewKey(msg)
+	}
 	switch msg.String() {
 	case "f", "esc", "q", "left", "shift+left", "h":
 		m.copyMode = false
@@ -2793,6 +2897,9 @@ func (m model) chooseMention() (tea.Model, tea.Cmd) {
 	}
 	selected := clampMentionOffset(m.mentionPicker.selected, len(m.mentionPicker.items)-1)
 	item := m.mentionPicker.items[selected]
+	if m.reviewComposer.active && m.reviewComposer.selectingDestination {
+		return m.chooseReviewDestination(item)
+	}
 	oldHeight := m.currentInputHeight()
 	content, cursor := replaceMention(m.input.Value(), m.mentionPicker.start, m.mentionPicker.end, item.ID)
 	m.input.SetValue(content)
@@ -2805,6 +2912,9 @@ func (m model) chooseMention() (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.reviewComposer.active {
+		return m.handleReviewComposerKey(msg)
+	}
 	if m.editingProject && m.projectPreview {
 		switch msg.String() {
 		case "ctrl+o":
@@ -3232,6 +3342,9 @@ func (m model) View() string {
 	if m.width == 0 {
 		return "loading…"
 	}
+	if m.copyMode && m.projectPane == reviewProjectPane {
+		return m.renderFullScreenReview()
+	}
 	if m.copyMode {
 		// Bypass renderConv as well as the outer frame: its transient
 		// "new messages below" overlay is useful UI, but not copyable content.
@@ -3242,8 +3355,13 @@ func (m model) View() string {
 	footer := m.renderFooter()
 
 	listW := m.listWidth()
-	listPanel := m.listPanelView()
-	convAreaW := m.width - (listW + 1)
+	threadReader := m.projectPane == reviewProjectPane && m.reviewThreadsMode
+	listPanel := ""
+	convAreaW := m.width
+	if !threadReader {
+		listPanel = m.listPanelView()
+		convAreaW -= listW + 1
+	}
 	convScrollbar := renderScrollbar(m.conv.Height, m.conv.TotalLineCount(), m.conv.YOffset)
 	convWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, m.renderConv(), convScrollbar)
 	var convPanel string
@@ -3304,7 +3422,10 @@ func (m model) View() string {
 	} else {
 		convPanel = lipgloss.NewStyle().Padding(1, 0, 1, 1).Render(convWithScrollbar)
 	}
-	mainRow := lipgloss.JoinHorizontal(lipgloss.Top, listPanel, convPanel)
+	mainRow := convPanel
+	if !threadReader {
+		mainRow = lipgloss.JoinHorizontal(lipgloss.Top, listPanel, convPanel)
+	}
 
 	frame := lipgloss.JoinVertical(lipgloss.Left, header, mainRow, footer)
 	if m.mode == modeQuit {
@@ -3408,8 +3529,11 @@ func shortcutHelpContent(width int) string {
 			{"Ctrl+C", "Interrupt all running turns; otherwise quit."},
 		}},
 		{title: "Views", rows: []shortcutHelpRow{
-			{"1 / 2 / 3", "Open Inbox, Archive, or Project Context."},
+			{"1 / 2 / 3 / 4", "Open Inbox, Archive, Project Context, or Review changes."},
 			{"Tab", "In Project Context, switch between instructions and brief."},
+			{"Review changes", "Browse current changes; / searches files/code, n/N repeats; c toggles full context; d toggles side-by-side; [ and ] move between hunks; v selects; s chooses old/new attachment side; r refreshes."},
+			{"Review questions", "a asks about selected code or the whole item; @ chooses a destination; b submits all drafts in one turn."},
+			{"Review threads", "Tab switches code/threads; l focuses the first thread or opens the thread at a code marker; j/k select whole threads; t replies; h returns to code; x discards an unsent message; F finishes after merge."},
 			{"e", "Edit the selected project document."},
 			{"Ctrl+O", "Toggle between the project document editor and Markdown preview."},
 		}},
@@ -3691,6 +3815,9 @@ func (m model) overlayMentionPickerAtCursor(panel string) string {
 	// The composer layout is: one top padding row, the conversation viewport,
 	// one separator row, then the textarea block.
 	inputTop := m.conv.Height + 2
+	if m.copyMode && m.projectPane == reviewProjectPane {
+		inputTop--
+	}
 	visualRow, column := textareaVisualPosition(m.input, m.mentionPicker.start)
 	textareaViewportOffset := textareaViewport(&m.input).YOffset
 	row := inputTop + visualRow - textareaViewportOffset
@@ -3933,13 +4060,20 @@ func (m model) renderHeader() string {
 		}
 	}
 	project := "  Project Context  "
-	if m.projectPane != 0 {
+	if m.projectPane == 1 || m.projectPane == 2 {
 		project = " [Project Context] "
 	}
-	if m.projectPane != 0 {
+	if m.projectPane == 1 || m.projectPane == 2 {
 		tabs = append(tabs, headerTabActiveStyle.Render(project))
 	} else {
 		tabs = append(tabs, headerTabStyle.Render(project))
+	}
+	review := "  Review changes  "
+	if m.projectPane == reviewProjectPane {
+		review = " [Review changes] "
+		tabs = append(tabs, headerTabActiveStyle.Render(review))
+	} else {
+		tabs = append(tabs, headerTabStyle.Render(review))
 	}
 	row := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
 	if m.dispatchesPaused() {
@@ -3999,7 +4133,19 @@ func (m model) renderFooter() string {
 	case modeFilter:
 		text = "enter apply  esc cancel"
 	case modeCompose:
-		if m.mentionPicker.open {
+		if m.reviewComposer.active && m.reviewComposer.selectingDestination {
+			if m.mentionPicker.open {
+				text = "↑/↓ choose destination  enter select  esc close picker"
+			} else {
+				text = "type @item-id or title  enter/tab choose destination  esc cancel"
+			}
+		} else if m.reviewComposer.active {
+			anchor := "item-wide"
+			if m.reviewComposer.anchor != nil {
+				anchor = fmt.Sprintf("%s:%d-%d %s", m.reviewComposer.anchor.File, m.reviewComposer.anchor.StartLine, m.reviewComposer.anchor.EndLine, m.reviewComposer.anchor.Side)
+			}
+			text = fmt.Sprintf("question for @%s · %s  ctrl+s save draft  esc cancel  pgup/pgdn scroll", m.reviewComposer.itemID, anchor)
+		} else if m.mentionPicker.open {
 			text = "↑/↓ select  enter/tab insert  shift+tab mode  esc close"
 		} else {
 			text = "ctrl+s submit  shift+tab mode  ctrl+n related item  esc cancel  pgup/pgdn scroll"
@@ -4051,7 +4197,24 @@ func (m model) renderFooter() string {
 		}
 	default:
 		if m.projectPane != 0 {
-			text = "←/→/h/l pane  j/k versions  f copy view  tab switch document  e edit  ctrl+c interrupt/quit  1-3 view  q quit  ? help"
+			if m.projectPane == reviewProjectPane {
+				if m.reviewThreadsMode {
+					text = "tab diff  l first thread  j/k threads  h code  a comment  t reply  x discard draft  b submit batch  F request commit  @ destination  r refresh  f copy  pgup/pgdn scroll  q quit"
+				} else {
+					text = "←/→ focus  j/k files or lines  / search  n/N match  c full context  d side-by-side  [/] hunks  v select range  s old/new side  enter finish  a ask  @ destination  tab threads  l open marked thread  b submit batch  F commit  esc clear  r refresh  f copy  1-4 view  q quit  ? help"
+				}
+				if !m.reviewThreadsMode && m.reviewAnchor >= 0 {
+					if selection, _, err := m.ReviewSelection(); err != nil {
+						text = "selection: " + err.Error() + "  · " + text
+					} else {
+						text = fmt.Sprintf("%s:%d-%d (%s)  ·  %s", selection.Path, selection.StartLine, selection.EndLine, selection.Side, text)
+					}
+				} else if !m.reviewThreadsMode && m.reviewLoading {
+					text = "reading working-tree diff…  ·  " + text
+				}
+			} else {
+				text = "←/→/h/l pane  j/k versions  f copy view  tab switch document  e edit  ctrl+c interrupt/quit  1-4 view  q quit  ? help"
+			}
 			break
 		}
 		if m.childMoveMode {
@@ -4062,14 +4225,14 @@ func (m model) renderFooter() string {
 			text = "j/k preview move  enter/v commit  esc cancel  ? help"
 			break
 		}
-		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
+		text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-4 view  g group  b backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 		if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-4 view  g group  b backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 		}
 		if m.showBacklog {
-			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-3 view  g group  b hide backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
+			text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S session  t turn  1-4 view  g group  b hide backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 			if itemID := m.selectedID(); itemID != "" && m.sup.SessionIsStale(itemID) {
-				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-3 view  g group  b hide backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
+				text = "←/→/h/l focus  ↑/↓/j/k select  f copy view  q quit  ctrl+c interrupt  a add  c subthread  m move  s status  S fresh context recommended  t turn  1-4 view  g group  b hide backlog  v reorder/prioritize  space fold  pgup/pgdn scroll  r refresh  ? help"
 			}
 		}
 	}
@@ -4096,10 +4259,20 @@ func (m model) renderFooter() string {
 	if lipgloss.Width(text)+lipgloss.Width(right) > m.width {
 		if m.mode == modeHelp {
 			text = "esc/q/? close"
+		} else if m.projectPane == reviewProjectPane && m.reviewThreadsMode {
+			text = "tab diff · l first thread · j/k threads · h code · a ask · t reply · x discard · b batch · F commit · @ target · r refresh"
+		} else if m.projectPane == reviewProjectPane {
+			text = "h/l focus · j/k move · / search · c context · d split · v range · s side · a ask · @ target · tab threads · b batch · F commit · r refresh"
 		} else {
-			text = "? help  ←/→ focus  f copy  1-3 views"
+			text = "? help  ←/→ focus  f copy  1-4 views"
 		}
 	}
+	if m.reviewSearching {
+		m.filterInput.Width = max(1, m.width-20)
+		text = "Search: " + m.filterInput.View()
+		right = "enter find · esc cancel"
+	}
+
 	if lipgloss.Width(right) > m.width {
 		right = ansi.Truncate(right, max(1, m.width), "…")
 		text = ""
@@ -4336,9 +4509,32 @@ func (m model) renderProjectList(availH int) (content, scrollbar string) {
 			if j == 0 {
 				prefix = "● "
 			}
-			parts = append(parts, rowStyle.Render(prefix+line))
+			if j == 0 && entry.statusColor != "" {
+				dotStyle := lipgloss.NewStyle().Foreground(entry.statusColor)
+				if selected {
+					dotStyle = dotStyle.Background(selectedBg).Bold(true)
+				}
+				parts = append(parts, dotStyle.Render(prefix)+rowStyle.Width(max(1, colW-2)).Render(line))
+			} else {
+				parts = append(parts, rowStyle.Render(prefix+line))
+			}
 		}
-		parts = append(parts, metaStyle.Render("  "+entry.meta))
+		badgeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+		if entry.threadNew {
+			badgeStyle = badgeStyle.Foreground(lipgloss.Color("81"))
+		}
+		if selected {
+			badgeStyle = badgeStyle.Background(selectedBg).Bold(true)
+		}
+		metaText := "  " + entry.meta
+		badge := strings.TrimSpace(entry.threadBadge)
+		if badge != "" {
+			metaText += " "
+		}
+		// Render sibling spans independently: nesting a badge's ANSI reset
+		// inside the status style can reset the selected row's background.
+		padding := max(0, colW-lipgloss.Width(metaText)-lipgloss.Width(badge))
+		parts = append(parts, metaStyle.UnsetWidth().Render(metaText)+badgeStyle.Render(badge)+metaStyle.UnsetWidth().Render(strings.Repeat(" ", padding)))
 		rows[i] = strings.Join(parts, "\n")
 	}
 	window, offset, total := windowListRows(rows, m.listOffset, m.selected, availH)
@@ -5024,6 +5220,10 @@ func (m *model) updateConv() {
 	// so queued ticks must never survive across SetContent.
 	m.stopConversationScroll()
 	if m.projectPane != 0 {
+		if m.projectPane == reviewProjectPane {
+			m.updateReviewConv()
+			return
+		}
 		m.updateProjectConv()
 		return
 	}
@@ -5465,26 +5665,7 @@ func renderConversationParts(parts []conversationPart, selected bool, width int)
 		return strings.Join(rendered, "\n\n")
 	}
 
-	style := lipgloss.NewStyle().Background(selectedBg).Bold(true)
-	mutedStyle := style.Foreground(dimFg)
-	lines := make([]string, 0)
-	for i, part := range parts {
-		if i > 0 {
-			lines = append(lines, style.Width(max(1, width)).Render(""))
-		}
-		lineStyle := style
-		if part.muted {
-			lineStyle = mutedStyle
-		}
-		for lineIndex, line := range strings.Split(ansi.Strip(part.content), "\n") {
-			if lineIndex == 0 && part.actor != "" {
-				lines = append(lines, renderSelectedActorHeader(line, part.actor, width, lineStyle))
-				continue
-			}
-			lines = append(lines, lineStyle.Width(max(1, width)).Render(line))
-		}
-	}
-	return strings.Join(lines, "\n")
+	return selectedBackground(renderConversationParts(parts, false, width), max(1, width))
 }
 
 func actorHeaderStyle(actor models.Actor) (lipgloss.Style, bool) {
@@ -5505,21 +5686,6 @@ func renderActorHeader(header string, actor models.Actor) string {
 		return header
 	}
 	return style.Render(name) + header[len(name):]
-}
-
-func renderSelectedActorHeader(header string, actor models.Actor, width int, base lipgloss.Style) string {
-	name := string(actor)
-	actorStyle, ok := actorHeaderStyle(actor)
-	if !ok || (header != name && !strings.HasPrefix(header, name+"  ")) {
-		return base.Width(max(1, width)).Render(header)
-	}
-	nameWidth := lipgloss.Width(name)
-	if width <= nameWidth {
-		return base.Foreground(actorStyle.GetForeground()).Width(max(1, width)).Render(header)
-	}
-	coloredName := base.Foreground(actorStyle.GetForeground()).Render(name)
-	rest := base.Width(width - nameWidth).Render(header[len(name):])
-	return coloredName + rest
 }
 
 func (m *model) updateProjectConv() {
@@ -5720,6 +5886,9 @@ func (m model) recalcLayout() model {
 	listPanelTotal := m.listWidth() + 1 // +1 for border-right
 	m.filterInput.Width = max(1, m.listWidth()-2-lipgloss.Width(m.filterInput.Prompt))
 	convAreaW := m.width - listPanelTotal
+	if m.projectPane == reviewProjectPane && m.reviewThreadsMode {
+		convAreaW = m.width
+	}
 	convW := convAreaW - 2 // 1-unit padding each side
 	if m.copyMode {
 		// No padding or scrollbar is rendered in copy mode, so all columns are
@@ -5732,7 +5901,11 @@ func (m model) recalcLayout() model {
 	// Set the input width first: its visual row count is width-dependent.
 	// currentInputHeight then reads the textarea's wrapped viewport rather than
 	// the number of physical newline-delimited lines.
-	m.input.SetWidth(convW)
+	inputWidth := convW
+	if m.copyMode && m.projectPane == reviewProjectPane {
+		inputWidth = max(1, convW-1)
+	}
+	m.input.SetWidth(inputWidth)
 	inputH := m.currentInputHeight()
 	if m.composerVisible() && m.mode != modeCompose {
 		// A saved draft is a collapsed preview in navigation mode. Its full
@@ -5743,6 +5916,9 @@ func (m model) recalcLayout() model {
 	mainH := m.height - 2 // subtract header and footer
 	if m.copyMode {
 		mainH = m.height
+		if m.projectPane == reviewProjectPane {
+			mainH--
+		}
 	}
 	if m.editingProject && !m.projectPreview {
 		// The full-pane editor sits inside the reader's one-row top and bottom
@@ -5762,6 +5938,9 @@ func (m model) recalcLayout() model {
 	var convH int
 	if m.copyMode {
 		convH = mainH
+		if m.projectPane == reviewProjectPane && m.reviewComposer.active {
+			convH -= slotH + 1
+		}
 	} else if m.composerSlotVisible() {
 		// Both the textarea and modal use the same right-pane flow:
 		// viewport top padding + conversation + separator + slot block.

@@ -31,7 +31,7 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd, preambleCmd, goalCmd)
+	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd, preambleCmd, goalCmd, reviewCmd)
 	goalCmd.AddCommand(goalStartCmd, goalEndCmd)
 	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRenameCmd, itemRmCmd, itemReparentCmd, itemUnparentCmd, itemGroupCmd)
 	rootCmd.AddCommand(projectCmd)
@@ -742,8 +742,13 @@ var itemTurnCmd = &cobra.Command{
 		if itemCommandActor() == models.ActorAgent {
 			actor = models.ActorAgent
 		}
-		if _, err := s.AddTurn(args[0], actor, content); err != nil {
-			die(err)
+		if actor == models.ActorAgent {
+			_, err = s.AddAgentTurnWithReview(args[0], content)
+		} else {
+			_, err = s.AddTurn(args[0], actor, content)
+		}
+		if err != nil {
+			return err
 		}
 		return nil
 	},

@@ -79,6 +79,9 @@ func renderMarkdown(markdown string, width int) string {
 	// preformatted. Run one ANSI-aware final pass so those decorations cannot
 	// make a viewport row wider than the pane, including for wide Unicode
 	// graphemes.
+	// The viewport expands tabs to four spaces. Do that before wrapping so
+	// indented code and its selection padding use the same cell widths.
+	rendered = strings.ReplaceAll(rendered, "\t", strings.Repeat(" ", lipgloss.NewStyle().GetTabWidth()))
 	rendered = ansi.Wrap(rendered, width, " ,.;-+|")
 	return strings.Trim(strings.ReplaceAll(rendered, string(protectedHyphen), "-"), "\n")
 }
@@ -88,8 +91,10 @@ func renderMarkdown(markdown string, width int) string {
 // markers, thematic breaks, and table separators—is left untouched. Fenced
 // code and link destinations are also left alone because changing their
 // source before parsing could change Markdown semantics or syntax highlighting.
+// Prose em/en dashes become ASCII here too, before wrapping, to avoid glyphs
+// that overlap adjacent terminal cells. Stored text and literal code stay intact.
 func protectMarkdownHyphens(markdown string, width int) string {
-	if width <= 0 || !strings.Contains(markdown, "-") {
+	if width <= 0 || !strings.ContainsAny(markdown, "-—–") {
 		return markdown
 	}
 
@@ -203,6 +208,19 @@ func protectMarkdownLine(line string, width int) string {
 				end += i + 1
 				out.WriteString(line[i : end+1])
 				i = end + 1
+				continue
+			}
+		}
+
+		if codeTicks == 0 {
+			if strings.HasPrefix(line[i:], "—") {
+				out.WriteString("--")
+				i += len("—")
+				continue
+			}
+			if strings.HasPrefix(line[i:], "–") {
+				out.WriteByte('-')
+				i += len("–")
 				continue
 			}
 		}

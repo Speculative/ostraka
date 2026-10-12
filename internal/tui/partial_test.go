@@ -291,7 +291,7 @@ func TestSpaceExpandsTraceAttachedToSelectedTurn(t *testing.T) {
 			t.Fatalf("selected turn rectangle has an unhighlighted line: %q", line)
 		}
 	}
-	if !strings.Contains(m.conv.View(), "38;5;245;") {
+	if !strings.Contains(m.conv.View(), "38;5;245m") {
 		t.Fatalf("expanded trace is not muted: %q", m.conv.View())
 	}
 }
