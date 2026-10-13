@@ -98,6 +98,28 @@ func TestParseWithTurns(t *testing.T) {
 	}
 }
 
+func TestParseTurnsWithEmptyBody(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	item := models.Item{
+		ID: "empty-body", Channel: models.ChannelInbox, Created: now,
+		Turns: []models.Turn{
+			{Actor: models.ActorUser, Timestamp: now, Content: "LGTM, please commit"},
+			{Actor: models.ActorAgent, Timestamp: now.Add(time.Minute), Content: "Committed."},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "item.md")
+	if err := store.WriteItem(item, path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ParseItem(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Body != "" || !reflect.DeepEqual(got.Turns, item.Turns) {
+		t.Fatalf("empty-body conversation did not round trip: body=%q turns=%#v", got.Body, got.Turns)
+	}
+}
+
 func TestParseMentionsFromBodyAndTurns(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	item := models.Item{

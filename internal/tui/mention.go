@@ -139,8 +139,8 @@ func mentionBoundaryRune(r rune) bool {
 
 // rankMentionCandidates filters and ranks items for query. IDs are matched
 // before titles: exact ID, ID prefix, title word-prefix, then title substring.
-// Live/archive status is only consulted after that relevance class, as a
-// tie-breaker. The final title/ID order makes otherwise equal results stable.
+// Within each relevance class, live items come first, then most recent
+// activity. The final title/ID order makes otherwise equal results stable.
 func rankMentionCandidates(query string, items []models.Item) []models.Item {
 	query = strings.ToLower(query)
 	candidates := make([]mentionCandidate, 0, len(items))
@@ -166,6 +166,11 @@ func rankMentionCandidates(query string, items []models.Item) []models.Item {
 		jLive := !models.TerminalStatuses[candidates[j].item.Status]
 		if iLive != jLive {
 			return iLive
+		}
+		iActivity := lastActivity(candidates[i].item)
+		jActivity := lastActivity(candidates[j].item)
+		if !iActivity.Equal(jActivity) {
+			return iActivity.After(jActivity)
 		}
 		iTitle := strings.ToLower(candidates[i].item.Title)
 		jTitle := strings.ToLower(candidates[j].item.Title)

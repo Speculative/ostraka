@@ -471,7 +471,7 @@ func TestFinishRequestsCommitAndKeepsReview(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(item.Turns) != 1 || !strings.Contains(item.Turns[0].Content, "LGTM, please commit") || item.Status != models.StatusPendingAgent {
+			if len(item.Turns) != 2 || !strings.Contains(item.Turns[1].Content, "LGTM, please commit") || item.Status != models.StatusPendingAgent {
 				t.Fatalf("Finish did not queue approval: %#v", item)
 			}
 			if len(sup.enqueued) != 1 || sup.enqueued[0] != item.ID {
@@ -500,4 +500,141 @@ func TestFinishFromFilesWithMultipleReviewsDoesNotGuessDestination(t *testing.T)
 			t.Fatal("Finish approved an ambiguous destination")
 		}
 	}
+}
+
+func TestFinishWithoutReviewSelectsSessionAndDispatches(t *testing.T) {
+	for _, name := range []string{"files", "threads", "fullscreen", "chat", "backlog"} {
+		t.Run(name, func(t *testing.T) {
+			m, target, sup := finishWithoutReviewModel(t)
+			if name == "chat" {
+				if _, err := m.store.SetMode(target.ID, models.AgentModeChat); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if name == "backlog" {
+				if _, err := m.store.SetStatus(target.ID, models.StatusBacklog); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if name == "threads" {
+				m.openReviewThreads()
+			}
+			if name == "fullscreen" {
+				m = m.enterCopyMode()
+			}
+			// Even a remembered destination must be explicitly selected.
+			m.reviewDestinationID = target.ID
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("F")})
+			m = next.(model)
+			if m.err != nil || !m.reviewComposer.commitOnSelection || !m.mentionPicker.open {
+				t.Fatalf("Finish did not prompt for a session: %#v, err=%v", m.reviewComposer, m.err)
+			}
+			before, err := m.store.GetItem(target.ID)
+			if err != nil || len(before.Turns) != 0 || len(sup.enqueued) != 0 {
+				t.Fatal("Finish dispatched before a session was selected")
+			}
+			next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = next.(model)
+			if m.err != nil {
+				t.Fatal(m.err)
+			}
+			item, err := m.store.GetItem(target.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(item.Turns) != 1 || item.Turns[0].Actor != models.ActorUser || item.Turns[0].Content != "LGTM, please commit" || item.Status != models.StatusPendingAgent || item.Mode != models.AgentModeCode {
+				t.Fatalf("selection did not immediately queue LGTM: %#v", item)
+			}
+			if len(sup.enqueued) != 1 || sup.enqueued[0] != target.ID {
+				t.Fatalf("queued items = %#v", sup.enqueued)
+			}
+			if m.projectPane != 0 || m.copyMode || m.reviewComposer.active || m.selectedID() != target.ID || !strings.Contains(ansi.Strip(m.conv.View()), "LGTM, please commit") {
+				t.Fatal("selection did not reveal LGTM on the destination session")
+			}
+			reviews, err := m.store.ListReviews()
+			if err != nil || len(reviews) != 0 {
+				t.Fatal("LGTM created a review")
+			}
+		})
+	}
+}
+
+func TestFinishWithoutReviewCancelAndArchivedDestination(t *testing.T) {
+	for _, name := range []string{"cancel", "archived"} {
+		t.Run(name, func(t *testing.T) {
+			m, target, sup := finishWithoutReviewModel(t)
+			m = reviewKey(m, "F")
+			if name == "cancel" {
+				next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+				m = next.(model)
+				if m.mode != modeNav || m.reviewComposer.active || m.mentionPicker.open {
+					t.Fatal("Escape did not cancel session selection")
+				}
+			} else {
+				// Recheck durable status rather than trusting the picker snapshot.
+				if _, err := m.store.SetStatus(target.ID, models.StatusArchived); err != nil {
+					t.Fatal(err)
+				}
+				next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				m = next.(model)
+				if m.err == nil || !strings.Contains(m.err.Error(), "reopen") {
+					t.Fatal("archived session was not rejected")
+				}
+			}
+			item, err := m.store.GetItem(target.ID)
+			if err != nil || len(item.Turns) != 0 || len(sup.enqueued) != 0 {
+				t.Fatal("cancelled or rejected approval posted a turn or dispatched")
+			}
+		})
+	}
+}
+
+func TestFinishWithoutReviewTabDispatchesMostRecentSession(t *testing.T) {
+	m, target, sup := finishWithoutReviewModel(t)
+	other, err := m.store.CreateItem(models.ChannelInbox, "A newer session", "", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.store.AddTurn(target.ID, models.ActorAgent, "Ready for review."); err != nil {
+		t.Fatal(err)
+	}
+	m = reviewKey(m, "F")
+	if len(m.mentionPicker.items) != 2 || m.mentionPicker.items[0].ID != target.ID || m.mentionPicker.selected != 0 {
+		t.Fatal("most recently active session was not the default suggestion")
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(model)
+	if m.err != nil {
+		t.Fatal(m.err)
+	}
+	updated, err := m.store.GetItem(target.ID)
+	if err != nil || len(updated.Turns) != 2 || updated.Turns[1].Content != "LGTM, please commit" {
+		t.Fatal("Tab did not post LGTM to the most recently active session")
+	}
+	if len(sup.enqueued) != 1 || sup.enqueued[0] != target.ID {
+		t.Fatalf("Tab queued items = %#v", sup.enqueued)
+	}
+	untouched, err := m.store.GetItem(other.ID)
+	if err != nil || len(untouched.Turns) != 0 {
+		t.Fatal("Tab posted to the wrong session")
+	}
+}
+
+func finishWithoutReviewModel(t *testing.T) (model, models.Item, *fakeSupervisor) {
+	t.Helper()
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := s.CreateItem(models.ChannelInbox, "commit session", "", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup := &fakeSupervisor{}
+	m := newModel(s, nil, sup)
+	m.width, m.height = 110, 30
+	m.projectPane = reviewProjectPane
+	m.conv.Width, m.conv.Height = 75, 14
+	m = m.recalcLayout()
+	return m, target, sup
 }

@@ -141,7 +141,9 @@ func ParseItem(path string) (models.Item, error) {
 	}
 
 	yamlBlock := rest[:end]
-	body := strings.TrimSpace(rest[end+5:])
+	// Preserve the leading separator when an item has turns but no body.
+	// Trim each body/turn only after splitting, or the first turn becomes body.
+	body := rest[end+5:]
 
 	var fm frontmatter
 	if err := yaml.Unmarshal([]byte(yamlBlock), &fm); err != nil {

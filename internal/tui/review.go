@@ -27,6 +27,7 @@ var (
 type reviewComposerState struct {
 	active               bool
 	selectingDestination bool
+	commitOnSelection    bool
 	itemID               string
 	reviewID             string
 	threadNumber         int

@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Speculative/ostraka/internal/models"
 	"github.com/Speculative/ostraka/internal/store"
@@ -56,6 +57,29 @@ func TestRankMentionCandidates(t *testing.T) {
 	got = rankMentionCandidates("target", items)
 	if ids := mentionIDs(got); !strings.EqualFold(strings.Join(ids, ","), "target,live-one,zzzz-aaaa,old-one") {
 		t.Fatalf("title ranking = %v", ids)
+	}
+}
+
+func TestRankMentionCandidatesByRecentActivity(t *testing.T) {
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	items := []models.Item{
+		{ID: "older", Title: "A target", Status: models.StatusActive, Created: now},
+		{ID: "new", Title: "New target", Status: models.StatusActive, Created: now.Add(time.Hour)},
+		{ID: "recent-agent", Title: "Z target", Status: models.StatusActive, Created: now,
+			Turns: []models.Turn{{Actor: models.ActorAgent, Timestamp: now.Add(3 * time.Hour)}}},
+		{ID: "recent-user", Title: "Y target", Status: models.StatusPendingUser, Created: now,
+			Turns: []models.Turn{{Actor: models.ActorUser, Timestamp: now.Add(2 * time.Hour)}}},
+		{ID: "archived", Title: "Archived target", Status: models.StatusArchived, Created: now.Add(4 * time.Hour)},
+	}
+	for _, query := range []string{"", "target"} {
+		if got := strings.Join(mentionIDs(rankMentionCandidates(query, items)), ","); got != "recent-agent,recent-user,new,older,archived" {
+			t.Fatalf("ranking for %q = %s", query, got)
+		}
+	}
+	// An exact ID still takes priority when searching for a specific item.
+	items[0].ID = "target"
+	if got := rankMentionCandidates("target", items)[0].ID; got != "target" {
+		t.Fatalf("exact ID lost priority: first result = %s", got)
 	}
 }
 

@@ -323,6 +323,15 @@ func (m model) openReviewDestinationPicker(anchor *models.ReviewAnchor) (tea.Mod
 }
 
 func (m model) chooseReviewDestination(item models.Item) (tea.Model, tea.Cmd) {
+	if m.reviewComposer.commitOnSelection {
+		m.refreshReviewList()
+		if index := reviewIndexByItemID(m.reviewReviews, item.ID); index >= 0 {
+			m = m.closeReviewComposerModel()
+			m.reviewID, m.reviewDestinationID = m.reviewReviews[index].ID, item.ID
+			return m.finishCurrentReview()
+		}
+		return m.requestCommitWithoutReview(item.ID)
+	}
 	m.closeMentionPicker()
 	var reviewID string
 	index := reviewIndexByItemID(m.reviewReviews, item.ID)
@@ -361,6 +370,9 @@ func (m model) handleReviewComposerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.reviewComposer.selectingDestination && m.mentionPicker.open {
 		switch {
 		case msg.String() == "esc":
+			if m.reviewComposer.commitOnSelection {
+				return m.closeReviewComposerModel(), nil
+			}
 			m.closeMentionPicker()
 			return m, nil
 		case msg.Type == tea.KeyUp || msg.String() == "up":
@@ -548,7 +560,10 @@ func (m model) finishCurrentReview() (tea.Model, tea.Cmd) {
 			m.openReviewThreads()
 			m.err = fmt.Errorf("multiple active reviews; choose the destination with j/k, then press F")
 		} else {
-			m.err = fmt.Errorf("no active review; press a to start a review comment")
+			next, cmd := m.openReviewDestinationPicker(nil)
+			m = next.(model)
+			m.reviewComposer.commitOnSelection = true
+			return m, cmd
 		}
 		return m, nil
 	}
@@ -557,6 +572,30 @@ func (m model) finishCurrentReview() (tea.Model, tea.Cmd) {
 		m.err = err
 		return m, nil
 	}
+	return m.dispatchCommitRequest(item)
+}
+
+func (m model) requestCommitWithoutReview(itemID string) (tea.Model, tea.Cmd) {
+	item, err := m.store.GetItem(itemID)
+	if err != nil {
+		m.err = err
+		return m, nil
+	}
+	if models.TerminalStatuses[item.Status] {
+		m.err = fmt.Errorf("reopen the destination item before requesting a commit")
+		return m, nil
+	}
+	item, err = m.store.AddTurn(itemID, models.ActorUser, "LGTM, please commit")
+	if err != nil {
+		m.err = err
+		return m, nil
+	}
+	m = m.closeReviewComposerModel()
+	return m.dispatchCommitRequest(item)
+}
+
+func (m model) dispatchCommitRequest(item models.Item) (tea.Model, tea.Cmd) {
+	var err error
 	if item.Mode == models.AgentModeChat {
 		item, err = m.store.SetMode(item.ID, models.AgentModeCode)
 		if err != nil {

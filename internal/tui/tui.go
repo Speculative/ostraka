@@ -4185,7 +4185,9 @@ func (m model) renderFooter() string {
 		text = "enter apply  esc cancel"
 	case modeCompose:
 		if m.reviewComposer.active && m.reviewComposer.selectingDestination {
-			if m.mentionPicker.open {
+			if m.reviewComposer.commitOnSelection {
+				text = "choose session for LGTM · ↑/↓ select  enter/tab send and dispatch  esc cancel"
+			} else if m.mentionPicker.open {
 				text = "↑/↓ choose destination  enter select  esc close picker"
 			} else {
 				text = "type @item-id or title  enter/tab choose destination  esc cancel"

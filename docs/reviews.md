@@ -106,6 +106,13 @@ control; `x` discards the latest unsent message in the selected thread.
 agent. It works from the file list, code, and thread views. If there is only
 one active review, it is selected automatically; with multiple reviews and no
 current destination, Finish opens the thread reader to choose before sending.
+With no active review, Finish prompts for a destination session; selecting it
+immediately sends “LGTM, please commit” and queues the agent without creating
+a review.
+Destination suggestions show live items first, ordered by most recent turn
+(or creation time for items without turns), so Tab usually selects the session
+just worked on. Typing an ID or title narrows the list, with closer matches
+ranked first.
 After sending, it opens the destination item at the newest content so the
 submitted commit prompt is visible immediately, including from full-screen
 review. It leaves the review and its threads intact. Chat destinations switch
