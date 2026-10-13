@@ -129,8 +129,7 @@ func (v listView) prepareGrouped(all []models.Item, showBacklog bool, collapsed 
 }
 
 // prepareGroupedWithOrder is the family sorter used by the live TUI. Explicit
-// backlog positions only break ties between families whose effective attention
-// rank is backlog; an urgent child still promotes its family above parked work.
+// backlog positions order parked roots, regardless of their children's status.
 func (v listView) prepareGroupedWithOrder(all []models.Item, showBacklog bool, collapsed map[string]bool, backlogOrder []string) ([]models.Item, int) {
 	return v.prepareGroupedWithOrderAndContext(all, all, showBacklog, collapsed, backlogOrder)
 }
@@ -208,6 +207,9 @@ func (v listView) prepareGroupedWithOrdersAndContext(all, contextItems []models.
 	sortInfo := make(map[string]familySortInfo, len(families))
 	for _, family := range families {
 		info := familySortInfo{rank: rankOf(family.root.Status), activity: lastActivity(family.root)}
+		if parent, ok := byID[family.key]; !v.archive && ok && parent.Status == models.StatusBacklog {
+			info.rank = rankOf(models.StatusBacklog)
+		}
 		if v.archive {
 			info.rank = memberRank(family.members)
 			info.activity = time.Time{}
@@ -229,8 +231,10 @@ func (v listView) prepareGroupedWithOrdersAndContext(all, contextItems []models.
 			if !ok {
 				continue
 			}
-			if rank := rankOf(item.Status); rank < info.rank {
-				info.rank = rank
+			if parent, ok := byID[key]; !ok || parent.Status != models.StatusBacklog {
+				if rank := rankOf(item.Status); rank < info.rank {
+					info.rank = rank
+				}
 			}
 			if activity := lastActivity(item); activity.After(info.activity) {
 				info.activity = activity
@@ -336,6 +340,9 @@ func (v listView) familyCollapsed(root models.Item, collapsed map[string]bool) b
 func (v listView) familyRank(key string, root models.Item, visible, all []models.Item) int {
 	if v.archive {
 		return memberRank(visible)
+	}
+	if root.Status == models.StatusBacklog {
+		return rankOf(models.StatusBacklog)
 	}
 	rank := rankOf(root.Status)
 	for _, item := range all {

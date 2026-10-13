@@ -31,6 +31,35 @@ func TestPrepareGroupedSortsByFamilyAttentionAndFoldsPerRoot(t *testing.T) {
 	}
 }
 
+func TestPrepareGroupedKeepsBacklogParentsBelowLiveFamilies(t *testing.T) {
+	for _, status := range []models.Status{
+		models.StatusAgentAcknowledged, models.StatusPendingAgent,
+		models.StatusPendingUser, models.StatusActive, models.StatusProposed,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			root := mkItem("parked", models.StatusBacklog)
+			child := mkItem("child", status)
+			child.Parent = root.ID
+			child.Created = root.Created.Add(time.Hour)
+			live := mkItem("live", models.StatusProposed)
+			all := []models.Item{root, child, live}
+			view := channelView(models.ChannelInbox)
+			items, hidden := view.prepareGrouped(all, true, nil)
+			if hidden != 0 || strings.Join(itemIDs(items), ",") != "live,parked,child" {
+				t.Fatalf("items=%v hidden=%d, want live,parked,child", itemIDs(items), hidden)
+			}
+			items, _ = view.prepareGrouped(all, true, map[string]bool{root.ID: true})
+			if strings.Join(itemIDs(items), ",") != "live,parked" {
+				t.Fatalf("folded families=%v, want live,parked", itemIDs(items))
+			}
+			items, _ = view.prepareGroupedWithOrderAndContext([]models.Item{child, live}, all, true, nil, nil)
+			if strings.Join(itemIDs(items), ",") != "live,child" {
+				t.Fatalf("filtered families=%v, want live,child", itemIDs(items))
+			}
+		})
+	}
+}
+
 func TestPrepareGroupedShowsBacklogChildrenOfLiveParents(t *testing.T) {
 	root := models.Item{ID: "root", Channel: models.ChannelInbox, Status: models.StatusActive, Created: time.Now(), Title: "Root"}
 	child := models.Item{ID: "child", Parent: root.ID, Channel: models.ChannelInbox, Status: models.StatusBacklog, Created: root.Created.Add(time.Minute), Title: "Backlog child"}

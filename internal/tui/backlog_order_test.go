@@ -30,6 +30,12 @@ func TestPrepareGroupedUsesExplicitBacklogOrderOnlyForParkedFamilies(t *testing.
 	if ids := itemIDs(got); !reflect.DeepEqual(ids, []string{"a", "a-child", "c", "b"}) {
 		t.Fatalf("urgent child ignored explicit backlog order = %v", ids)
 	}
+
+	items[0].Status = models.StatusBacklog
+	got, _ = channelView(models.ChannelInbox).prepareGroupedWithOrder(items, true, nil, []string{"c", "a", "b"})
+	if ids := itemIDs(got); !reflect.DeepEqual(ids, []string{"c", "a", "a-child", "b"}) {
+		t.Fatalf("backlog parent with urgent child = %v, want c,a,a-child,b", ids)
+	}
 }
 
 func TestBacklogMoveModePersistsFamilyPriority(t *testing.T) {
@@ -101,7 +107,7 @@ func TestBacklogMoveModePersistsFamilyPriority(t *testing.T) {
 	}
 }
 
-func TestBacklogMoveModeRejectsFamilyPromotedByChildAttention(t *testing.T) {
+func TestBacklogMoveModeAllowsBacklogParentWithUrgentChild(t *testing.T) {
 	s, err := store.NewStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -130,11 +136,11 @@ func TestBacklogMoveModeRejectsFamilyPromotedByChildAttention(t *testing.T) {
 
 	next, _ := m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
 	got := next.(model)
-	if got.backlogMoveMode {
-		t.Fatal("v entered move mode for a family promoted by child attention")
+	if !got.backlogMoveMode {
+		t.Fatal("v did not enter move mode for a backlog parent with an urgent child")
 	}
-	if got.err == nil {
-		t.Fatal("v did not explain why the promoted family could not be prioritized")
+	if got.err != nil {
+		t.Fatalf("v failed for a backlog parent: %v", got.err)
 	}
 }
 
