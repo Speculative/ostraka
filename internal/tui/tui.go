@@ -350,6 +350,7 @@ type model struct {
 
 	conv                   viewport.Model
 	input                  textarea.Model
+	vim                    vimEditor
 	title                  textinput.Model
 	filterInput            textinput.Model
 	filterQuery            string
@@ -2284,6 +2285,7 @@ func sessionProviderIndex(provider supervisor.Provider) int {
 // openComposer focuses the turn textarea for the selected item.
 func (m model) openComposer() (tea.Model, tea.Cmd) {
 	m.mode = modeCompose
+	m.vim = vimEditor{register: m.vim.register, linewise: m.vim.linewise}
 	m.closeMentionPicker()
 	m.draftItemID = m.selectedID()
 	m.input.Reset()
@@ -2520,6 +2522,7 @@ func (m model) closeNewItemDraft() model {
 }
 
 func (m model) restoreRelatedComposer(createdID string) model {
+	m.vim = vimEditor{register: m.vim.register, linewise: m.vim.linewise}
 	m.draft = false
 	m.draftSelected = false
 	m.draftBodyStarted = false
@@ -2912,6 +2915,13 @@ func (m model) chooseMention() (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	vimBefore := m.vimSnapshot()
+	if m.vimTurnEditor() && !m.vim.normal && m.vim.insertBefore == nil {
+		m.vim.insertBefore = &vimBefore
+	}
+	if m.vimTurnEditor() && !m.vim.normal && m.vim.insertBase == nil {
+		m.vim.insertBase = &vimBefore
+	}
 	if m.reviewComposer.active {
 		return m.handleReviewComposerKey(msg)
 	}
@@ -2973,6 +2983,13 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input.Blur()
 		m = m.recalcLayout()
 		return m, nil
+	}
+	if m.vimTurnEditor() {
+		next, cmd, handled := m.handleVimKey(msg)
+		if handled {
+			return next, cmd
+		}
+		m = next
 	}
 	switch msg.String() {
 	case "ctrl+n":
@@ -3141,6 +3158,16 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.refreshMentionPicker()
+	if m.vimTurnEditor() && m.vim.normal {
+		if msg.Paste {
+			m.vimRemember(vimBefore)
+			if !m.vim.replaying && m.input.Value() != vimBefore.text {
+				m.vim.lastKeys, m.vim.lastPatch = vimCopyKeys([]tea.KeyMsg{msg}), nil
+			}
+		}
+		m.closeMentionPicker()
+		setTextareaCursorOffset(&m.input, vimNormalCursor([]rune(m.input.Value()), textareaCursorOffset(m.input)))
+	}
 	if m.editingNewItemDraft() || !m.editingProject {
 		m.draftSequence++
 		sequence := m.draftSequence
@@ -3399,7 +3426,7 @@ func (m model) View() string {
 		} else {
 			// Render textarea first (its View() updates the shared viewport via the
 			// internal *viewport.Model pointer), then read the live TotalLineCount.
-			taView := m.input.View()
+			taView := m.turnTextareaView()
 			tvp := textareaViewport(&m.input)
 			// Use the textarea's actual viewport height. In navigation mode a saved
 			// draft is deliberately collapsed to inputMinHeight even when its body
@@ -3538,18 +3565,31 @@ func shortcutHelpContent(width int) string {
 			{"Ctrl+O", "Toggle between the project document editor and Markdown preview."},
 		}},
 		{title: "Writing and selection", rows: []shortcutHelpRow{
-			{"Ctrl+S", "Submit a turn, create an item, or save the current edit."},
+			{"Ctrl+S", "Submit a turn in either editor mode, create an item, or save the current edit."},
 			{"Ctrl+N", "Start a related item from the turn editor."},
 			{"@", "Search for and insert an item mention in an editor."},
 			{"Tab", "Complete the highlighted group suggestion."},
 			{"Enter", "Apply the group text as entered, or insert a highlighted mention match."},
 			{"Enter", "Move from a new item's title to its body."},
-			{"Esc / Ctrl+C", "Close an editor; Ctrl+C discards an unfinished new item."},
+			{"Esc", "In turn insert mode, enter normal mode; dismiss an open mention picker first. In normal mode, retain the draft and leave the editor. In visual mode, cancel the selection."},
+			{"Ctrl+C", "Discard the current turn draft or unfinished new item."},
 			{"Ctrl+←/→, Alt+←/→", "Move by word in text editors."},
 			{"Ctrl+W, Alt+Backspace", "Delete the previous word in text editors."},
 			{"↑/↓, j/k", "Move through choices in dialogs; Enter selects and Esc goes back."},
 			{"k / s / x", "On a proposed item, keep for later, start now, or reject."},
 			{"g / G, Home / End", "In copy view, jump to the top or bottom; f, Esc, or q returns."},
+		}},
+		{title: "Turn editor (Vim)", rows: []shortcutHelpRow{
+			{"i/a/I/A/o/O", "Enter insert mode at/beyond the cursor, at line start/end, or on a new line below/above."},
+			{"h/j/k/l, arrows", "Move by character or logical line; gj/gk move through wrapped rows."},
+			{"w/b/e, W/B/E", "Move by word or whitespace-delimited word; 0/^/$ select line start/first nonblank/end."},
+			{"gg/G, %", "Go to the first/last or counted line; % matches parentheses, brackets, or braces."},
+			{"f/F/t/T, ;/,", "Find or approach a character on the current line; repeat forward/backward."},
+			{"d/c/y + motion", "Delete, change, or yank; repeat the operator for whole lines, or use iw/aw for a word."},
+			{"x/X/r/s/S/D/C", "Delete a character, replace, substitute a character/line, or delete/change through line end."},
+			{"p/P, v/V", "Put the unnamed register after/before the cursor; select characters/lines for d/c/y."},
+			{"u, Ctrl+R, .", "Undo, redo, or repeat the last change. Insert sessions undo as one unit."},
+			{"Counts", "Prefix movements, operators, insert commands, or repeat with a number; counts are bounded at 10,000."},
 		}},
 	}
 
@@ -4149,6 +4189,23 @@ func (m model) renderFooter() string {
 			text = "↑/↓ select  enter/tab insert  shift+tab mode  esc close"
 		} else {
 			text = "ctrl+s submit  shift+tab mode  ctrl+n related item  esc cancel  pgup/pgdn scroll"
+		}
+		if m.vimTurnEditor() {
+			if m.vim.normal {
+				text = "NORMAL  i/a insert  h/j/k/l move  ctrl+s submit  shift+tab mode  esc keep draft  pgup/pgdn scroll"
+				if m.vim.visual {
+					label := "VISUAL"
+					if m.vim.visualLine {
+						label = "VISUAL LINE"
+					}
+					text = label + "  d/c/y selection  esc normal  ctrl+s submit  shift+tab mode  pgup/pgdn scroll"
+				}
+			} else {
+				text = "INSERT  " + text
+				if !m.mentionPicker.open {
+					text = strings.Replace(text, "esc cancel", "esc normal", 1)
+				}
+			}
 		}
 		if m.editingProject {
 			text = "ctrl+o preview  ctrl+s save project document  esc cancel"

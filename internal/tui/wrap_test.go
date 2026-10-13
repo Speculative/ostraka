@@ -268,6 +268,11 @@ func TestEscapeCheckpointsTurnDraft(t *testing.T) {
 	got.input.SetValue("keep this")
 	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	got = next.(model)
+	if got.mode != modeCompose || !got.vim.normal || got.input.Value() != "keep this" {
+		t.Fatal("first escape must enter normal mode and retain the focused draft")
+	}
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got = next.(model)
 	if got.mode != modeNav {
 		t.Errorf("mode after esc = %v, want navigation", got.mode)
 	}
@@ -331,6 +336,8 @@ func TestEscapeLeavesTurnDraftComposerCollapsed(t *testing.T) {
 	m.input.SetValue("keep this draft")
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = next.(model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
 
 	if m.mode != modeNav {
 		t.Fatalf("mode after esc = %v, want navigation", m.mode)
@@ -364,6 +371,8 @@ func TestDismissingTallTurnDraftKeepsFrameHeight(t *testing.T) {
 		t.Fatalf("active tall composer height = %d, want %d", got, inputMaxHeight)
 	}
 
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = next.(model)
 	if got := m.input.Height(); got != inputMinHeight {

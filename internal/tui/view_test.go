@@ -1155,6 +1155,19 @@ func TestPageKeysScrollConversationByHalfAPane(t *testing.T) {
 				return next.(model), cmd
 			},
 		},
+		{
+			name: "normal turn composer",
+			page: func(m model, key tea.KeyMsg) (model, tea.Cmd) {
+				m.mode = modeCompose
+				m.vim.normal = true
+				next, cmd := m.handleInputKey(key)
+				nm := next.(model)
+				if !nm.vim.normal {
+					t.Fatal("page key changed editing mode")
+				}
+				return nm, cmd
+			},
+		},
 	}
 
 	for _, tt := range tests {
