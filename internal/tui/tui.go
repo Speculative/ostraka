@@ -491,7 +491,9 @@ type model struct {
 
 	width  int
 	height int
-	err    error
+	// listWidthOffset adjusts the default split for every view in this TUI.
+	listWidthOffset int
+	err             error
 }
 
 const reviewProjectPane = 3
@@ -684,7 +686,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			nm.listOffset = nm.ensureListOffsetVisible()
 		}
 	}
-	if _, resized := msg.(tea.WindowSizeMsg); resized {
+	if _, resized := msg.(tea.WindowSizeMsg); resized || nm.listWidth() != m.listWidth() {
 		nm.modalListPanelCacheValid = false
 	}
 	if !nm.reusesListPanel() {
@@ -1044,6 +1046,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.scheduleDraftCheckpoint(cmd)
 			}
 			return m, nil
+		}
+		if (m.mode == modeNav || m.mode == modeHelp) && !m.reviewSearching {
+			switch msg.String() {
+			case "<":
+				return m.resizeList(-2), nil
+			case ">":
+				return m.resizeList(2), nil
+			}
 		}
 		if m.copyMode && m.mode == modeNav {
 			return m.handleCopyKey(msg)
@@ -3533,6 +3543,7 @@ func shortcutHelpContent(width int) string {
 		{title: "Navigation", rows: []shortcutHelpRow{
 			{"?", "Open or close this shortcut guide."},
 			{"← / h, → / l", "Move focus between the item list and reading pane."},
+			{"< / >", "Narrow or widen the left pane by two columns across all views."},
 			{"↑ / k, ↓ / j", "Move through items, or select conversation entries when the reading pane has focus."},
 			{"Space", "Fold an item family in the list; expand or collapse a selected partial trace in the reader."},
 			{"PgUp / PgDn", "Scroll the reading pane by half a screen."},
@@ -5817,11 +5828,16 @@ func (m model) titleWidth() int {
 }
 
 func (m model) listWidth() int {
-	w := m.width * 30 / 100
-	if w < 24 {
-		w = 24
+	return max(24, min(max(24, m.width-4), max(24, m.width*30/100)+m.listWidthOffset))
+}
+
+func (m model) resizeList(delta int) model {
+	w := max(24, min(max(24, m.width-4), m.listWidth()+delta))
+	if w == m.listWidth() {
+		return m
 	}
-	return w
+	m.listWidthOffset = w - max(24, m.width*30/100)
+	return m.recalcLayout()
 }
 
 func (m model) currentInputHeight() int {
