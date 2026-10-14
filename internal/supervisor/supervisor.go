@@ -320,20 +320,36 @@ func (s *Supervisor) clearActiveTurn(turn *activeTurn) {
 // process cleanup without shutting down the supervisor itself. It is safe and
 // successful when idle.
 func (s *Supervisor) Interrupt() error {
-	if s.store != nil {
-		if goal, found, _ := s.store.GoalItem(); found && goal.Goal != nil {
-			s.pauseDispatches()
-		}
+	return s.interruptTurns("")
+}
+
+// InterruptItem stops only the active turn belonging to itemID. A stale or
+// idle selection does nothing, including leaving goal scheduling unchanged.
+func (s *Supervisor) InterruptItem(itemID string) error {
+	if itemID == "" {
+		return nil
 	}
+	return s.interruptTurns(itemID)
+}
+
+func (s *Supervisor) interruptTurns(itemID string) error {
 	s.active.mu.Lock()
 	turns := make([]*activeTurn, 0, len(s.active.turns))
 	for _, turn := range s.active.turns {
+		if itemID != "" && turn.itemID != itemID {
+			continue
+		}
 		turn.requested = true
 		turns = append(turns, turn)
 	}
 	s.active.mu.Unlock()
 	if len(turns) == 0 {
 		return nil
+	}
+	if s.store != nil {
+		if goal, found, _ := s.store.GoalItem(); found && goal.Goal != nil {
+			s.pauseDispatches()
+		}
 	}
 	for _, turn := range turns {
 		if turn.interrupt != nil {

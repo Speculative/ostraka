@@ -954,3 +954,31 @@ func (h *liveSpyHarness) RunTurn(_ context.Context, _ string, _ string, _ string
 	h.during = ReadLive(h.root, h.itemID)
 	return TurnResult{SessionID: "s", ResultText: "ok"}, nil
 }
+
+func TestInterruptItemTargetsOnlySelectedTurn(t *testing.T) {
+	s := &Supervisor{}
+	selectedCtx, cancelSelected := context.WithCancel(context.Background())
+	otherCtx, cancelOther := context.WithCancel(context.Background())
+	defer cancelSelected()
+	defer cancelOther()
+	selected := &activeTurn{itemID: "selected", cancel: cancelSelected}
+	other := &activeTurn{itemID: "other", cancel: cancelOther}
+	s.active.turns = map[string]*activeTurn{"selected": selected, "other": other}
+	for _, id := range []string{"", "idle"} {
+		if err := s.InterruptItem(id); err != nil {
+			t.Fatal(err)
+		}
+		if selectedCtx.Err() != nil || otherCtx.Err() != nil || selected.requested || other.requested {
+			t.Fatal("idle selection interrupted an active turn")
+		}
+	}
+	if err := s.InterruptItem("selected"); err != nil {
+		t.Fatal(err)
+	}
+	if selectedCtx.Err() == nil || !selected.requested {
+		t.Fatal("selected turn was not interrupted")
+	}
+	if otherCtx.Err() != nil || other.requested {
+		t.Fatal("other turn was interrupted")
+	}
+}

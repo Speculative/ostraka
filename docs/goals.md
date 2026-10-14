@@ -68,8 +68,11 @@ batch to 12,000 characters of turn content; truncated turns point back to the
 child for the full text. Child-owned goals do not notify their parent.
 Outside active root goals, child turns do not create parent notifications.
 
-`P` pauses/resumes new dispatches. Ctrl+C during an active goal pauses new
-dispatches before interrupting active turns, preventing immediate relaunch.
+`P` pauses/resumes new dispatches. Ctrl+C interrupts only the selected item.
+While other items are running, Ctrl+C on an idle item or in a project/review
+view does nothing. Interrupting a running item during an active goal pauses
+new dispatches, preventing immediate relaunch. When no turns are running,
+Ctrl+C quits.
 A goal provider failure also pauses dispatches to avoid an error loop; inspect
 the existing warning, recover, then resume with `P`. Pausing is process-local.
 The durable goal survives supervisor shutdown and resumes when Ostraka next

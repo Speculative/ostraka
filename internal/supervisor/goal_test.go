@@ -174,7 +174,13 @@ func TestGoalInterruptPausesUntilExplicitResume(t *testing.T) {
 	s.Start()
 	defer s.Shutdown()
 	_ = nextGoalCall(t, h)
-	if err := s.Interrupt(); err != nil {
+	if err := s.InterruptItem("unrelated-item"); err != nil {
+		t.Fatal(err)
+	}
+	if s.DispatchesPaused() {
+		t.Fatal("unrelated selection paused the goal queue")
+	}
+	if err := s.InterruptItem(owner.ID); err != nil {
 		t.Fatal(err)
 	}
 	if !s.DispatchesPaused() {

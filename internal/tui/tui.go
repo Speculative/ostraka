@@ -90,7 +90,7 @@ type supervisorClient interface {
 	StartNewSession(string, supervisor.Provider, string, string) error
 	AvailableModels(context.Context, supervisor.Provider) ([]supervisor.ModelOption, error)
 	Busy() (string, bool)
-	Interrupt() error
+	InterruptItem(string) error
 }
 
 type activityWaker interface {
@@ -1216,13 +1216,7 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if msg.String() == "ctrl+c" {
-		if _, busy := m.busyDispatch(); busy {
-			// Interrupt is deliberately fire-and-observe: the provider finishes
-			// unwinding asynchronously, and the watcher will refresh the item
-			// back to pending-agent once dispatch recovery persists.
-			_ = m.sup.Interrupt()
-			return m, nil
-		}
+		return m.handleInterruptKey()
 	}
 	if m.projectPane == reviewProjectPane {
 		return m.handleReviewKey(msg)
@@ -3572,7 +3566,7 @@ func shortcutHelpContent(width int) string {
 			{"v", "Reorder a selected child among its siblings, or a backlog family; j/k previews, Enter commits, Esc cancels."},
 			{"r", "Refresh the current view."},
 			{"q", "Quit; confirm if a turn is running."},
-			{"Ctrl+C", "Interrupt all running turns; otherwise quit."},
+			{"Ctrl+C", "Interrupt the selected item; quit when no turns are running."},
 		}},
 		{title: "Views", rows: []shortcutHelpRow{
 			{"1 / 2 / 3 / 4", "Open Inbox, Archive, Project Context, or Review changes."},
@@ -3933,6 +3927,19 @@ func setTextareaLogicalCursor(ta *textarea.Model, offset int) {
 	if !setTextareaCursorOffsetRaw(ta, row, offset-lineStart) {
 		ta.CursorEnd()
 	}
+}
+
+// handleInterruptKey consumes Ctrl+C while any work is running. Only an item
+// selected in an item view can be interrupted; project and review selections
+// do not identify a provider turn.
+func (m model) handleInterruptKey() (tea.Model, tea.Cmd) {
+	if _, busy := m.busyDispatch(); !busy {
+		return m, tea.Quit
+	}
+	if m.projectPane == 0 && m.selected >= 0 && m.selected < len(m.items) {
+		_ = m.sup.InterruptItem(m.items[m.selected].ID)
+	}
+	return m, nil
 }
 
 // busyDispatch reports the item being worked on right now. Tests build models

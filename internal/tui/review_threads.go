@@ -22,11 +22,7 @@ func (m model) handleReviewThreadsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "ctrl+c":
-		if _, busy := m.busyDispatch(); busy {
-			_ = m.sup.Interrupt()
-			return m, nil
-		}
-		return m, tea.Quit
+		return m.handleInterruptKey()
 	case "q":
 		if _, busy := m.busyDispatch(); busy {
 			m.mode = modeQuit

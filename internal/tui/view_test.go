@@ -279,6 +279,57 @@ func TestCtrlCStopsTheActiveDispatch(t *testing.T) {
 	}
 }
 
+func TestCtrlCDoesNotInterruptOtherItems(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		pane     int
+		selected int
+		threads  bool
+	}{
+		{"other item", 0, 1, false},
+		{"no selection", 0, -1, false},
+		{"instructions", 1, 0, false},
+		{"brief", 2, 0, false},
+		{"review", reviewProjectPane, 0, false},
+		{"review threads", reviewProjectPane, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sup := &fakeSupervisor{busyID: "running"}
+			m := newModel(nil, nil, sup)
+			m.items = []models.Item{{ID: "running"}, {ID: "idle"}}
+			m.selected, m.projectPane = tc.selected, tc.pane
+			m.reviewThreadsMode = tc.threads
+			for range 3 {
+				var next tea.Model
+				var cmd tea.Cmd
+				if tc.threads {
+					next, cmd = m.handleReviewThreadsKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+				} else {
+					next, cmd = m.handleNavKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+				}
+				m = next.(model)
+				if cmd != nil || m.mode != modeNav {
+					t.Fatal("Ctrl+C quit or opened a modal while another item was running")
+				}
+			}
+			if sup.interrupts != 0 {
+				t.Fatalf("interrupted unrelated turn %d times", sup.interrupts)
+			}
+		})
+	}
+}
+
+func TestCtrlCQuitsWhenIdle(t *testing.T) {
+	m := newModel(nil, nil, &fakeSupervisor{})
+	_, cmd := m.handleNavKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("idle Ctrl+C did not quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("idle Ctrl+C returned something other than quit")
+	}
+}
+
 func TestEscDoesNotStopTheActiveDispatch(t *testing.T) {
 	sup := &fakeSupervisor{busyID: "item-1"}
 	m := newModel(nil, nil, sup)
