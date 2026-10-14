@@ -1,6 +1,7 @@
 # Goal mode
 
 Shift+Tab cycles **CHAT → CODE → GOAL → CHAT**, including on backlogged items.
+When another item owns GOAL (armed or active), the cycle skips GOAL.
 Selecting GOAL arms it; the next user turn supplies the goal and starts work.
 Submitting that turn requires a live item; backlogged, proposed, and archived
 items reject goal submissions. In the TUI, a rejected turn stays in the composer

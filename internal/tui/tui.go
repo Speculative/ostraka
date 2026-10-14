@@ -1482,6 +1482,14 @@ func (m model) toggleSelectedAgentMode() (tea.Model, tea.Cmd) {
 	next := models.AgentModeCode
 	if current == models.AgentModeCode {
 		next = models.AgentModeGoal
+		goal, found, err := m.store.GoalItem()
+		if err != nil {
+			m.err = fmt.Errorf("change item mode: %w", err)
+			return m, nil
+		}
+		if found && goal.ID != itemID {
+			next = models.AgentModeChat
+		}
 	} else if current == models.AgentModeGoal {
 		next = models.AgentModeChat
 	}

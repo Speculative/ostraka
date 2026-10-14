@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -28,8 +29,8 @@ func TestShiftTabGoalCycleAndExclusiveOwner(t *testing.T) {
 	m.selected = 1
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	m = next.(model)
-	if m.err == nil || m.items[1].Mode == models.AgentModeGoal {
-		t.Fatal("second goal was accepted")
+	if m.err != nil || m.items[1].Mode != models.AgentModeChat {
+		t.Fatalf("occupied GOAL was not skipped: mode=%s error=%v", m.items[1].Mode, m.err)
 	}
 	m.selected = 0
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
@@ -41,6 +42,61 @@ func TestShiftTabGoalCycleAndExclusiveOwner(t *testing.T) {
 	m = next.(model)
 	if m.items[0].Mode != models.AgentModeCode {
 		t.Fatal("CHAT did not become CODE")
+	}
+}
+
+func TestShiftTabSkipsOccupiedGoal(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		for _, composing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("active=%v/composing=%v", active, composing), func(t *testing.T) {
+				s, err := store.NewStore(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				owner, err := s.CreateItem(models.ChannelInbox, "owner", "body", models.TypeThread, models.StatusActive, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				item, err := s.CreateItem(models.ChannelInbox, "work", "body", models.TypeThread, models.StatusActive, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				m := newModel(s, nil, nil)
+				// Keep the owner out of the view and arm it after the UI snapshot.
+				m.items, m.allItems = []models.Item{item}, []models.Item{item}
+				if _, err := s.SetMode(owner.ID, models.AgentModeGoal); err != nil {
+					t.Fatal(err)
+				}
+				if active {
+					if _, err := s.AddTurn(owner.ID, models.ActorUser, "keep working"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if composing {
+					next, _ := m.openComposer()
+					m = next.(model)
+					m.input.SetValue("unsent turn")
+				}
+				for _, want := range []models.AgentMode{models.AgentModeChat, models.AgentModeCode, models.AgentModeChat} {
+					next, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+					m = next.(model)
+					stored, err := s.GetItem(item.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if m.err != nil || stored.Mode != want || m.items[0].Mode != want || m.allItems[0].Mode != want {
+						t.Fatalf("want %s: stored=%s visible=%s all=%s error=%v", want, stored.Mode, m.items[0].Mode, m.allItems[0].Mode, m.err)
+					}
+					if composing && (m.mode != modeCompose || m.input.Value() != "unsent turn") {
+						t.Fatal("mode cycle did not preserve composed turn")
+					}
+				}
+				goal, found, err := s.GoalItem()
+				if err != nil || !found || goal.ID != owner.ID || (goal.Goal != nil) != active {
+					t.Fatalf("mode cycle changed goal owner: goal=%+v found=%v error=%v", goal, found, err)
+				}
+			})
+		}
 	}
 }
 
