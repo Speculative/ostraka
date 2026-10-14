@@ -106,6 +106,41 @@ func TestConcurrentGoalArmingHasOneOwner(t *testing.T) {
 	}
 }
 
+func TestGoalSubmissionRequiresLiveItem(t *testing.T) {
+	for _, status := range []models.Status{models.StatusBacklog, models.StatusProposed, models.StatusArchived} {
+		t.Run(string(status), func(t *testing.T) {
+			s := goalStore(t)
+			item, err := s.CreateItem(models.ChannelInbox, "parked", "body", models.TypeThread, status, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.SetMode(item.ID, models.AgentModeGoal); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddTurn(item.ID, models.ActorUser, "start work"); err == nil || !strings.Contains(err.Error(), "goal mode requires a live item") {
+				t.Fatalf("goal submission error = %v", err)
+			}
+			saved, err := s.GetItem(item.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if saved.Status != status || saved.Mode != models.AgentModeGoal || saved.Goal != nil || len(saved.Turns) != 0 {
+				t.Fatalf("rejected submission changed item: %+v", saved)
+			}
+			if _, err := s.SetStatus(item.ID, models.StatusActive); err != nil {
+				t.Fatal(err)
+			}
+			started, err := s.AddTurn(item.ID, models.ActorUser, "start work")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if started.Status != models.StatusPendingAgent || started.Goal == nil || started.Goal.Prompt != "start work" {
+				t.Fatalf("live item did not start goal: %+v", started)
+			}
+		})
+	}
+}
+
 func TestGoalDispatchMembershipAndDelegation(t *testing.T) {
 	s := goalStore(t)
 	root := goalTestItem(t, s, "")

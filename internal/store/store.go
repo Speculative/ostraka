@@ -361,9 +361,6 @@ func (s *Store) setMode(id string, mode models.AgentMode) (models.Item, error) {
 		return item, nil
 	}
 	if mode == models.AgentModeGoal {
-		if models.TerminalStatuses[item.Status] || item.Status == models.StatusBacklog || item.Status == models.StatusProposed {
-			return models.Item{}, fmt.Errorf("goal mode requires a live item")
-		}
 		goal, found, err := s.GoalItem()
 		if err != nil {
 			return models.Item{}, err
@@ -748,6 +745,9 @@ func (s *Store) addTurnLocked(id string, actor models.Actor, content string) (mo
 	})
 	item.Mentions = itemMentionIDs(item.Body, item.Turns)
 	if actor == models.ActorUser && item.Mode == models.AgentModeGoal && item.Goal == nil {
+		if models.TerminalStatuses[item.Status] || item.Status == models.StatusBacklog || item.Status == models.StatusProposed {
+			return models.Item{}, fmt.Errorf("goal mode requires a live item")
+		}
 		if strings.TrimSpace(content) == "" {
 			return models.Item{}, fmt.Errorf("goal must not be blank")
 		}

@@ -93,3 +93,62 @@ func TestGoalBlueIndicatorAndHeaderAcrossViews(t *testing.T) {
 		t.Fatal("goal hidden with its row filtered out")
 	}
 }
+
+func TestBacklogModeCycleRejectsGoalTurnAndPreservesDraft(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "parked", "body", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup := &fakeSupervisor{}
+	m := newModel(s, nil, sup)
+	m.items, m.allItems = []models.Item{item}, []models.Item{item}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = next.(model)
+	if m.err != nil || m.items[0].Mode != models.AgentModeGoal {
+		t.Fatalf("could not cycle backlog to GOAL: %v", m.err)
+	}
+
+	next, _ = m.openComposer()
+	m = next.(model)
+	m.input.SetValue("keep this turn")
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = next.(model)
+	if m.err == nil || !strings.Contains(m.err.Error(), "goal mode requires a live item") || m.mode != modeCompose || m.input.Value() != "keep this turn" {
+		t.Fatalf("goal submission did not preserve composer: error=%v mode=%v text=%q", m.err, m.mode, m.input.Value())
+	}
+	draft, err := s.LoadDraft(item.ID)
+	if err != nil || draft != "keep this turn" {
+		t.Fatalf("rejected turn draft = %q, %v", draft, err)
+	}
+	saved, err := s.GetItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status != models.StatusBacklog || saved.Goal != nil || len(saved.Turns) != 0 || len(sup.enqueued) != 0 {
+		t.Fatalf("goal submission changed backlog or queued work: %+v, %v", saved, sup.enqueued)
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = next.(model)
+	if m.err != nil || m.items[0].Mode != models.AgentModeChat || m.input.Value() != "keep this turn" {
+		t.Fatalf("could not cycle backlog to CHAT with draft intact: %v", m.err)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = next.(model)
+	saved, err = s.GetItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.err != nil || m.mode != modeNav || saved.Mode != models.AgentModeChat || saved.Status != models.StatusBacklog || len(saved.Turns) != 1 || saved.Turns[0].Content != "keep this turn" || len(sup.enqueued) != 0 {
+		t.Fatalf("chat turn was not saved without dispatch: error=%v item=%+v queued=%v", m.err, saved, sup.enqueued)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = next.(model)
+	if m.err != nil || m.items[0].Mode != models.AgentModeCode {
+		t.Fatalf("could not cycle backlog back to CODE: %v", m.err)
+	}
+}

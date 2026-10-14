@@ -1,7 +1,10 @@
 # Goal mode
 
-On a live item, Shift+Tab cycles **CHAT → CODE → GOAL → CHAT**.
+Shift+Tab cycles **CHAT → CODE → GOAL → CHAT**, including on backlogged items.
 Selecting GOAL arms it; the next user turn supplies the goal and starts work.
+Submitting that turn requires a live item; backlogged, proposed, and archived
+items reject goal submissions. In the TUI, a rejected turn stays in the composer
+so you can change modes or activate the item before retrying.
 Only one item can be armed or running in goal mode in a project. Its status
 marker is blue. Once the initiating user turn starts the goal, the navigation
 bar shows `goal active:` and the owner's ID, even when the item is hidden by
