@@ -31,7 +31,7 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd, preambleCmd, goalCmd, reviewCmd)
+	rootCmd.AddCommand(initCmd, tuiCmd, itemCmd, preambleCmd, goalCmd, reviewCmd, versionCmd)
 	goalCmd.AddCommand(goalStartCmd, goalEndCmd)
 	itemCmd.AddCommand(itemAddCmd, itemSuggestCmd, itemListCmd, itemShowCmd, itemTurnCmd, itemStatusCmd, itemRenameCmd, itemRmCmd, itemReparentCmd, itemUnparentCmd, itemGroupCmd)
 	rootCmd.AddCommand(projectCmd)

@@ -43,6 +43,30 @@ initialisation errors are reported without starting the TUI.
 The TUI's agent provider is separate: the `claude` and/or `codex` command must
 also be installed and authenticated for the provider the user selects.
 
+## Check the installed version
+
+```bash
+ostraka version
+```
+
+The command prints `ostraka v0.4.0`, for example, and works outside an
+initialized project. It reads Go's embedded build metadata, so versioned
+`go install` releases report their Git tag without a separate version file
+or special linker flags.
+
+With the supported Go toolchain, checkout builds also embed a version derived
+from Git: an exact release tag when built at that tag, or a Go pseudo-version
+identifying an untagged commit. Local changes add `+dirty`. Builds without
+version metadata (for example, `go build -buildvcs=false` from a checkout)
+report `ostraka (devel)`. Git is not needed when running the installed binary.
+
+Plain `go run ./cmd/ostraka version` also reports `ostraka (devel)` because
+`go run` omits Git metadata by default. To check the checkout version directly:
+
+```bash
+go run -buildvcs=true ./cmd/ostraka version
+```
+
 ## Install from a checkout
 
 For local development or before the first public release:
