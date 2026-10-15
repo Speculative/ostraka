@@ -41,7 +41,7 @@ var reviewAttachFlags struct {
 func init() {
 	reviewFinishCmd.Flags().StringVar(&reviewFinishCommit, "commit", "", "successful commit hash (agent completion)")
 	reviewCmd.AddCommand(reviewListCmd, reviewShowCmd, reviewCreateCmd, reviewThreadCmd,
-		reviewReplyCmd, reviewDetachCmd, reviewAttachCmd, reviewSubmitCmd, reviewFinishCmd)
+		reviewReplyCmd, reviewDetachCmd, reviewAttachCmd, reviewSubmitCmd, reviewFinishCmd, reviewDismissCmd)
 	reviewThreadCmd.AddCommand(reviewThreadListCmd, reviewThreadShowCmd, reviewThreadCreateCmd)
 	reviewCreateCmd.Flags().StringVar(&reviewCreateFlags.item, "item", "", "destination item ID; defaults to the current agent item")
 	threadCreateFlags := reviewThreadCreateCmd.Flags()
@@ -472,3 +472,19 @@ func validateAgentReviewDestination(actor models.Actor, itemID string) error {
 }
 
 func osAgentItemID() string { return os.Getenv("OSTRAKA_AGENT_ITEM_ID") }
+
+var reviewDismissCmd = &cobra.Command{
+	Use:   "dismiss <review-id>",
+	Short: "Dismiss an active review, retaining its discussion on disk",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if itemCommandActor() == models.ActorAgent {
+			return fmt.Errorf("only users can dismiss reviews")
+		}
+		if err := mustStore().DismissReview(args[0]); err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "review dismissed; discussion retained in REVIEWS/dismissed")
+		return nil
+	},
+}

@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,9 +64,7 @@ func TestReviewCommitFailureKeepsDiscussionAndSuccessClosesAfterFinalTurn(t *tes
 	if !strings.Contains(approval.Turns[len(approval.Turns)-1].Content, "LGTM, please commit") {
 		t.Fatal("missing commit approval")
 	}
-	if err := s.CompleteReviewCommit(review.ID, base); err == nil {
-		t.Fatal("old HEAD accepted as successful completion")
-	}
+
 	if err := os.WriteFile(path, []byte("after\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +90,9 @@ func TestReviewCommitFailureKeepsDiscussionAndSuccessClosesAfterFinalTurn(t *tes
 	}
 	git("commit", "--quiet", "-m", "complete")
 	commit := git("rev-parse", "HEAD")
+	if err := s.CompleteReviewCommit(review.ID, base); err == nil {
+		t.Fatal("non-HEAD commit accepted")
+	}
 	if err := os.WriteFile(path, []byte("later change\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -116,5 +118,73 @@ func TestReviewCommitFailureKeepsDiscussionAndSuccessClosesAfterFinalTurn(t *tes
 	}
 	if !strings.Contains(final.Turns[len(final.Turns)-1].Content, "commit succeeded") {
 		t.Fatal("cleanup lost pending reply")
+	}
+}
+
+func TestReviewCommitAcceptsOrdinaryAndLateApproval(t *testing.T) {
+	for _, lateApproval := range []bool{false, true} {
+		t.Run(fmt.Sprint(lateApproval), func(t *testing.T) {
+			s := newTestStore(t)
+			git := func(args ...string) string {
+				t.Helper()
+				out, err := exec.Command("git", append([]string{"-C", s.Root}, args...)...).CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %s: %v", args, out, err)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			git("init", "--quiet")
+			git("config", "user.name", "Review Test")
+			git("config", "user.email", "review@example.test")
+			git("config", "commit.gpgsign", "false")
+			git("config", "core.hooksPath", filepath.Join(s.Root, ".git", "hooks"))
+			if err := os.WriteFile(filepath.Join(s.Root, ".gitignore"), []byte("*\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			git("add", "-f", ".gitignore")
+			git("commit", "--quiet", "-m", "initial")
+			item, err := s.CreateItem(models.ChannelInbox, "target", "", models.TypeThread, models.StatusActive, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			review, err := s.CreateReview(item.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddTurn(item.ID, models.ActorUser, "Let's commit the change"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(s.Root, "code.txt"), []byte("reviewed work\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			git("add", "-f", "code.txt")
+			git("commit", "--quiet", "-m", "reviewed work")
+			commit := git("rev-parse", "HEAD")
+			if lateApproval {
+				if _, err := s.RequestReviewCommit(review.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			thread, err := s.CreateReviewThread(review.ID, nil, models.ActorAgent, "Completed work")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CompleteReviewCommit(review.ID, commit); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.GetReview(review.ID); err != nil {
+				t.Fatal("closed before final turn")
+			}
+			final, err := s.AddAgentTurnWithReview(item.ID, "Committed.")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.GetReview(review.ID); err == nil {
+				t.Fatal("review still active")
+			}
+			if !strings.Contains(final.Turns[len(final.Turns)-1].Content, thread.Messages[0].Content) {
+				t.Fatal("lost reply")
+			}
+		})
 	}
 }

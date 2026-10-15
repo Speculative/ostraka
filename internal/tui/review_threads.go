@@ -15,6 +15,9 @@ import (
 )
 
 func (m model) handleReviewThreadsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.reviewDismissID != "" {
+		return m.confirmReviewDismiss(msg)
+	}
 	switch msg.String() {
 	case "P":
 		if controller, ok := m.sup.(dispatchPauseController); ok {
@@ -52,6 +55,8 @@ func (m model) handleReviewThreadsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.beginReviewQuestion(true)
 	case "b":
 		return m.submitReviewBatch()
+	case "X":
+		return m.beginReviewDismiss()
 	case "F":
 		return m.finishCurrentReview()
 	case "x":
@@ -101,6 +106,8 @@ func (m *model) refreshReviewList() {
 	if m.reviewID != "" {
 		if _, ok := reviewByID(reviews, m.reviewID); !ok {
 			m.reviewID = ""
+			m.reviewDestinationID = ""
+			m.reviewSelectedID = ""
 		}
 	}
 	if m.reviewThreadsMode {
@@ -518,6 +525,7 @@ func replaceReview(reviews []models.Review, updated models.Review) []models.Revi
 }
 
 func (m model) submitReviewBatch() (tea.Model, tea.Cmd) {
+	m.refreshReviewList()
 	review, ok := m.currentReview()
 	if !ok {
 		m.err = fmt.Errorf("select or create a review before submitting a batch")
@@ -540,8 +548,7 @@ func (m model) submitReviewBatch() (tea.Model, tea.Cmd) {
 	}
 	m.replaceItemSnapshot(item)
 	m.refreshReviewList()
-	m.updateConv()
-	return m, nil
+	return m.focusReviewDestination(item)
 }
 
 func (m model) finishCurrentReview() (tea.Model, tea.Cmd) {
@@ -612,8 +619,10 @@ func (m model) dispatchCommitRequest(item models.Item) (tea.Model, tea.Cmd) {
 
 	m.replaceItemSnapshot(item)
 	m.refreshReviewList()
-	// Show the approval immediately, rather than leaving Finish looking like
-	// a no-op in the review browser while dispatch happens in the background.
+	return m.focusReviewDestination(item)
+}
+
+func (m model) focusReviewDestination(item models.Item) (tea.Model, tea.Cmd) {
 	m.copyMode = false
 	m.reviewThreadsMode = false
 	m.projectPane = 0
@@ -622,6 +631,9 @@ func (m model) dispatchCommitRequest(item models.Item) (tea.Model, tea.Cmd) {
 	m.filterQuery = ""
 	m.filterInput.SetValue("")
 	m.draftSelected = false
+	if item.Status == models.StatusBacklog {
+		m.showBacklog = true
+	}
 	if m.collapsed == nil {
 		m.collapsed = make(map[string]bool)
 	}
@@ -648,16 +660,14 @@ func (m *model) moveReviewThreadCursor(delta int) {
 	cursor := m.reviewThreadCursor + delta
 	if cursor < 0 || cursor >= len(review.Threads) {
 		// Without a review list, adjacent review groups are reached by the
-		// same next/previous-thread controls. Skip groups with no threads.
+		// same next/previous-thread controls, including empty reviews so they
+		// can be selected and dismissed.
 		index := reviewIndexByID(m.reviewReviews, review.ID)
 		for index += delta; index >= 0 && index < len(m.reviewReviews); index += delta {
-			if len(m.reviewReviews[index].Threads) == 0 {
-				continue
-			}
 			m.selected = index
 			m.selectReviewEntry()
 			cursor = 0
-			if delta < 0 {
+			if delta < 0 && len(m.reviewReviews[index].Threads) > 0 {
 				cursor = len(m.reviewReviews[index].Threads) - 1
 			}
 			m.reviewThreadCursor = cursor
@@ -821,4 +831,34 @@ func reviewAnchorMatchesDiff(diff reviewdiff.Diff, anchor *models.ReviewAnchor) 
 		return err == nil && selection.Excerpt == anchor.Excerpt
 	}
 	return false
+}
+
+func (m model) beginReviewDismiss() (tea.Model, tea.Cmd) {
+	m.refreshReviewList()
+	review, ok := m.currentReview()
+	if !ok {
+		m.openReviewThreads()
+		m.err = fmt.Errorf("select a review with j/k, then press X to dismiss it")
+		return m, nil
+	}
+	m.reviewDismissID = review.ID
+	m.err = nil
+	return m, nil
+}
+
+func (m model) confirmReviewDismiss(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		if err := m.store.DismissReview(m.reviewDismissID); err != nil {
+			m.err = err
+		} else {
+			m.reviewID, m.reviewDestinationID, m.reviewSelectedID = "", "", ""
+		}
+		m.reviewDismissID = ""
+		m.refreshReviewList()
+		m.updateConv()
+	case "n", "N", "esc", "ctrl+c":
+		m.reviewDismissID = ""
+	}
+	return m, nil
 }

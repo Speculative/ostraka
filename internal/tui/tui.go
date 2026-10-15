@@ -486,6 +486,7 @@ type model struct {
 	reviewThreadEnds     []int
 	reviewCodeMarkers    map[reviewCodeLocation][]reviewThreadRef
 	reviewDestinationID  string
+	reviewDismissID      string
 	reviewID             string
 	reviewComposer       reviewComposerState
 
@@ -2131,6 +2132,9 @@ func (m model) enterCopyMode() model {
 // actions are unavailable while their surrounding UI is hidden.
 func (m model) handleCopyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.projectPane == reviewProjectPane {
+		if m.reviewDismissID != "" {
+			return m.confirmReviewDismiss(msg)
+		}
 		if m.reviewSearching {
 			return m.handleReviewSearchKey(msg)
 		}
@@ -3573,7 +3577,7 @@ func shortcutHelpContent(width int) string {
 			{"Tab", "In Project Context, switch between instructions and brief."},
 			{"Review changes", "Browse current changes; / searches files/code, n/N repeats; c toggles full context; d toggles side-by-side; [ and ] move between hunks; v selects; s chooses old/new attachment side; r refreshes."},
 			{"Review questions", "a asks about selected code or the whole item; @ chooses a destination; b submits all drafts in one turn."},
-			{"Review threads", "Tab switches code/threads; l focuses the first thread or opens the thread at a code marker; j/k select whole threads; t replies; h returns to code; x discards an unsent message; F finishes after merge."},
+			{"Review threads", "Tab switches code/threads; l focuses the first thread or opens the thread at a code marker; j/k select whole threads; t replies; h returns to code; x discards an unsent message; F requests a commit; X dismisses a review and retains its discussion on disk."},
 			{"e", "Edit the selected project document."},
 			{"Ctrl+O", "Toggle between the project document editor and Markdown preview."},
 		}},
@@ -4284,9 +4288,9 @@ func (m model) renderFooter() string {
 		if m.projectPane != 0 {
 			if m.projectPane == reviewProjectPane {
 				if m.reviewThreadsMode {
-					text = "tab diff  l first thread  j/k threads  h code  a comment  t reply  x discard draft  b submit batch  F request commit  @ destination  r refresh  f copy  pgup/pgdn scroll  q quit"
+					text = "tab diff  l first thread  j/k threads  h code  a comment  t reply  x discard draft  b submit batch  F request commit  X dismiss review  @ destination  r refresh  f copy  pgup/pgdn scroll  q quit"
 				} else {
-					text = "←/→ focus  j/k files or lines  / search  n/N match  c full context  d side-by-side  [/] hunks  v select range  s old/new side  enter finish  a ask  @ destination  tab threads  l open marked thread  b submit batch  F commit  esc clear  r refresh  f copy  1-4 view  q quit  ? help"
+					text = "←/→ focus  j/k files or lines  / search  n/N match  c full context  d side-by-side  [/] hunks  v select range  s old/new side  enter finish  a ask  @ destination  tab threads  l open marked thread  b submit batch  F commit  X dismiss review  esc clear  r refresh  f copy  1-4 view  q quit  ? help"
 				}
 				if !m.reviewThreadsMode && m.reviewAnchor >= 0 {
 					if selection, _, err := m.ReviewSelection(); err != nil {
@@ -4345,12 +4349,15 @@ func (m model) renderFooter() string {
 		if m.mode == modeHelp {
 			text = "esc/q/? close"
 		} else if m.projectPane == reviewProjectPane && m.reviewThreadsMode {
-			text = "tab diff · l first thread · j/k threads · h code · a ask · t reply · x discard · b batch · F commit · @ target · r refresh"
+			text = "tab diff · l first thread · j/k threads · h code · a ask · t reply · x discard · b batch · F commit · X dismiss · @ target · r refresh"
 		} else if m.projectPane == reviewProjectPane {
-			text = "h/l focus · j/k move · / search · c context · d split · v range · s side · a ask · @ target · tab threads · b batch · F commit · r refresh"
+			text = "h/l focus · j/k move · / search · c context · d split · v range · s side · a ask · @ target · tab threads · b batch · F commit · X dismiss · r refresh"
 		} else {
 			text = "? help  ←/→ focus  f copy  1-4 views"
 		}
+	}
+	if m.reviewDismissID != "" {
+		text = "Dismiss review? y confirm · n/esc cancel · " + m.reviewDismissID
 	}
 	if m.reviewSearching {
 		m.filterInput.Width = max(1, m.width-20)

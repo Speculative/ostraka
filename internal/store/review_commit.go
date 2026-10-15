@@ -58,8 +58,11 @@ func (s *Store) RequestReviewCommit(reviewID string) (models.Item, error) {
 	return s.addTurnLocked(review.ItemID, models.ActorUser, content)
 }
 
-// CompleteReviewCommit verifies a new commit and defers cleanup to the final
+// CompleteReviewCommit verifies the supplied commit and defers cleanup to the final
 // agent turn, so pending replies are preserved before the review disappears.
+// Approval may have been given in an ordinary user turn rather than through F;
+// the dispatch follows that authorization, while this method verifies Git state.
+// A late F request must also accept an already completed commit at its base.
 func (s *Store) CompleteReviewCommit(reviewID, commit string) error {
 	unlock, err := s.lockReviews()
 	if err != nil {
@@ -69,9 +72,6 @@ func (s *Store) CompleteReviewCommit(reviewID, commit string) error {
 	review, err := s.loadReview(reviewID)
 	if err != nil {
 		return err
-	}
-	if !review.CommitRequested {
-		return fmt.Errorf("review has no user commit request")
 	}
 	if len(unsentReviewMessages(review)) > 0 {
 		return fmt.Errorf("review has unsent user drafts")
@@ -84,8 +84,8 @@ func (s *Store) CompleteReviewCommit(reviewID, commit string) error {
 	if err != nil {
 		return err
 	}
-	if resolved != head || head == review.CommitBaseHead {
-		return fmt.Errorf("completion requires a new commit at HEAD")
+	if resolved != head {
+		return fmt.Errorf("completion requires the commit at HEAD")
 	}
 	if review.CommitBaseHead != "" {
 		if _, err := s.reviewGit("merge-base", "--is-ancestor", review.CommitBaseHead, head); err != nil {

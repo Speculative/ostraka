@@ -475,3 +475,82 @@ func TestReviewNeedsReplyUsesSubmissionTime(t *testing.T) {
 		t.Fatal("follow-up was answered")
 	}
 }
+
+func TestDismissReviewRetainsEverythingWithoutChangingItem(t *testing.T) {
+	s := newTestStore(t)
+	item, err := s.CreateItem(models.ChannelInbox, "dismiss target", "", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := s.CreateReview(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateReviewThread(review.ID, nil, models.ActorUser, "unsent question"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateReviewThread(review.ID, nil, models.ActorAgent, "unrecorded reply"); err != nil {
+		t.Fatal(err)
+	}
+	// A legacy commit-requested review must also remain dismissible, including
+	// after its destination has been archived.
+	path := filepath.Join(s.Root, "REVIEWS", review.ID+".json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved models.Review
+	if err := json.Unmarshal(before, &saved); err != nil {
+		t.Fatal(err)
+	}
+	saved.CommitRequested = true
+	before, err = json.Marshal(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, before, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetStatus(item.ID, models.StatusArchived); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DismissReview(review.ID); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := os.ReadFile(filepath.Join(s.Root, "REVIEWS", "dismissed", review.ID+".json"))
+	if err != nil || string(retained) != string(before) {
+		t.Fatal("dismissal changed or lost discussion")
+	}
+	if reviews, err := s.ListReviews(); err != nil || len(reviews) != 0 {
+		t.Fatal("dismissed review still listed")
+	}
+	updated, err := s.GetItem(item.ID)
+	if err != nil || updated.Status != models.StatusArchived || len(updated.Turns) != 0 {
+		t.Fatal("dismissal changed item")
+	}
+}
+
+func TestReviewBatchRejectsArchivedDestination(t *testing.T) {
+	s := newTestStore(t)
+	item, err := s.CreateItem(models.ChannelInbox, "target", "", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := s.CreateReview(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateReviewThread(review.ID, nil, models.ActorUser, "question"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetStatus(item.ID, models.StatusArchived); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SubmitReviewBatch(review.ID); err == nil || !strings.Contains(err.Error(), "reopen") {
+		t.Fatal("batch accepted archived target")
+	}
+	updated, err := s.GetReview(review.ID)
+	if err != nil || updated.Threads[0].Messages[0].Submitted {
+		t.Fatal("rejected batch lost draft")
+	}
+}

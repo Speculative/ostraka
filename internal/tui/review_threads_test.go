@@ -678,3 +678,130 @@ func finishWithoutReviewModel(t *testing.T) (model, models.Item, *fakeSupervisor
 	m = m.recalcLayout()
 	return m, target, sup
 }
+
+func TestReviewBatchFocusesDestination(t *testing.T) {
+	for _, view := range []string{"files", "threads", "fullscreen", "backlog"} {
+		t.Run(view, func(t *testing.T) {
+			m := markerReviewModel(t)
+			review := m.reviewReviews[0]
+			m.reviewID, m.reviewDestinationID = review.ID, review.ItemID
+			item, err := m.store.GetItem(review.ItemID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if view == "backlog" {
+				item, err = m.store.SetStatus(item.ID, models.StatusBacklog)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			m.allItems = []models.Item{item}
+			if view == "threads" {
+				m.openReviewThreads()
+			}
+			if view == "fullscreen" {
+				m = m.enterCopyMode()
+			}
+			m.filterQuery = "unmatched filter"
+			m = reviewKey(m, "b")
+			if m.err != nil {
+				t.Fatal(m.err)
+			}
+			if m.projectPane != 0 || m.copyMode || m.reviewThreadsMode || m.selectedID() != item.ID || m.focus != focusReadingPane {
+				t.Fatal("batch did not focus destination")
+			}
+			if !strings.Contains(ansi.Strip(m.conv.View()), "Long third thread.") {
+				t.Fatal("batch turn is not visible")
+			}
+			if view == "backlog" {
+				updated, err := m.store.GetItem(item.ID)
+				if err != nil || updated.Status != models.StatusBacklog {
+					t.Fatal("batch unparked backlog")
+				}
+			}
+		})
+	}
+}
+
+func TestReviewDestinationClearsOnReentryAndRemoval(t *testing.T) {
+	m := markerReviewModel(t)
+	review := m.reviewReviews[0]
+	m.reviewID, m.reviewDestinationID = review.ID, review.ItemID
+	if err := m.store.DismissReview(review.ID); err != nil {
+		t.Fatal(err)
+	}
+	m.refreshReviewList()
+	if m.reviewID != "" || m.reviewDestinationID != "" {
+		t.Fatal("removed review retained its target")
+	}
+	m.reviewID, m.reviewDestinationID = review.ID, review.ItemID
+	m, _ = m.openReviewChanges()
+	next, _ := m.beginReviewQuestion(false)
+	m = next.(model)
+	if !m.reviewComposer.selectingDestination {
+		t.Fatal("new review reused old destination")
+	}
+}
+
+func TestDismissReviewFromTUI(t *testing.T) {
+	for _, view := range []string{"files", "threads", "fullscreen"} {
+		t.Run(view, func(t *testing.T) {
+			m := markerReviewModel(t)
+			review := m.reviewReviews[0]
+			m.reviewID, m.reviewDestinationID = review.ID, review.ItemID
+			if view == "threads" {
+				m.openReviewThreads()
+			}
+			if view == "fullscreen" {
+				m = m.enterCopyMode()
+			}
+			m = reviewKey(m, "X")
+			if m.reviewDismissID != review.ID || !strings.Contains(ansi.Strip(m.renderFooter()), "y confirm") {
+				t.Fatal("missing dismissal confirmation")
+			}
+			if _, err := m.store.GetReview(review.ID); err != nil {
+				t.Fatal("dismissed without confirmation")
+			}
+			m = reviewKey(m, "n")
+			if m.reviewDismissID != "" {
+				t.Fatal("did not cancel dismissal")
+			}
+			m = reviewKey(m, "X")
+			m = reviewKey(m, "y")
+			if m.err != nil {
+				t.Fatal(m.err)
+			}
+			if reviews, err := m.store.ListReviews(); err != nil || len(reviews) != 0 {
+				t.Fatal("review still active")
+			}
+			if m.reviewDestinationID != "" || m.reviewID != "" {
+				t.Fatal("dismissal retained target")
+			}
+		})
+	}
+}
+
+func TestReviewNavigationCanDismissEmptyReview(t *testing.T) {
+	m := markerReviewModel(t)
+	first := m.reviewReviews[0]
+	empty, err := m.store.CreateReview(first.ItemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.reviewID, m.reviewDestinationID = first.ID, first.ItemID
+	m.openReviewThreads()
+	m.reviewThreadCursor = len(first.Threads) - 1
+	m = reviewKey(m, "j")
+	current, ok := m.currentReview()
+	if !ok || current.ID != empty.ID {
+		t.Fatal("empty review cannot be selected")
+	}
+	m = reviewKey(m, "X")
+	m = reviewKey(m, "y")
+	if _, err := m.store.GetReview(empty.ID); err == nil {
+		t.Fatal("empty review still active")
+	}
+	if _, err := m.store.GetReview(first.ID); err != nil {
+		t.Fatal("dismissed wrong review")
+	}
+}

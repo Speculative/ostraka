@@ -63,6 +63,9 @@ func (m model) openReviewChanges() (model, tea.Cmd) {
 	m.reviewThreadsMode = false
 	m.reviewReviews = nil
 	m.reviewSelectedID = ""
+	m.reviewID = ""
+	m.reviewDestinationID = ""
+	m.reviewDismissID = ""
 	m.reviewThreadCursor = 0
 	m.err = nil
 	m = m.recalcLayout()
@@ -241,6 +244,9 @@ func (m model) ReviewSelection() (selection reviewdiff.Selection, marked bool, e
 }
 
 func (m model) handleReviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.reviewDismissID != "" {
+		return m.confirmReviewDismiss(msg)
+	}
 	if m.reviewSearching {
 		return m.handleReviewSearchKey(msg)
 	}
@@ -309,6 +315,8 @@ func (m model) handleReviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.beginReviewQuestion(true)
 	case "b":
 		return m.submitReviewBatch()
+	case "X":
+		return m.beginReviewDismiss()
 	case "F":
 		return m.finishCurrentReview()
 	case "left", "shift+left", "h":

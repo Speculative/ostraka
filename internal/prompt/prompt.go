@@ -124,8 +124,11 @@ const reviewCommitGuidance = `When the user requests finishing a review (LGTM, p
 authorizes committing the reviewed changes. Follow project commit instructions. If checks or the commit fail, keep the review open and report
 what needs intervention. After a successful commit, run ostraka review finish
 <review-id> --commit <commit-hash> before posting your final item turn. This
-verifies the new commit and defers review cleanup until that final turn has
-preserved pending review replies. Do not close the review on failure.`
+verifies the commit at HEAD and defers review cleanup until that final turn has
+preserved pending review replies. Ordinary user commit requests also authorize
+this workflow; approval need not originate from F. If the reviewed work is
+already committed, use that existing commit without creating an empty commit
+or rewriting history. Do not close the review on failure.`
 
 const agentOrientationText = `Ostraka items are durable work cards. Turns are their conversations; direct
 subthreads carry parallel work. Your normal harness progress is visible to the

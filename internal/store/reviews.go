@@ -314,6 +314,9 @@ func (s *Store) SubmitReviewBatch(reviewID string) (models.Item, error) {
 	if err != nil {
 		return models.Item{}, err
 	}
+	if models.TerminalStatuses[item.Status] {
+		return models.Item{}, fmt.Errorf("reopen the destination item before submitting a review batch")
+	}
 	// Complete a batch left between its item write and review-object update.
 	// This invocation reports that completed batch and leaves any newer drafts
 	// for an explicit subsequent submission.
@@ -862,4 +865,24 @@ func uniqueStrings(values []string) []string {
 		}
 	}
 	return unique
+}
+
+// DismissReview removes a review from active routing while retaining all its
+// discussion, drafts, and pending replies in the dismissed directory. It does
+// not require commit completion or change the destination item's state.
+func (s *Store) DismissReview(reviewID string) error {
+	unlock, err := s.lockReviews()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	review, err := s.loadReview(reviewID)
+	if err != nil {
+		return err
+	}
+	directory := filepath.Join(s.Root, reviewDir, "dismissed")
+	if err := os.MkdirAll(directory, 0755); err != nil {
+		return err
+	}
+	return os.Rename(s.reviewPath(review.ID), filepath.Join(directory, review.ID+".json"))
 }

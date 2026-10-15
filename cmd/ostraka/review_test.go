@@ -126,3 +126,34 @@ func TestReviewCLIBatchReplyFinalTurnAndFinish(t *testing.T) {
 	}
 
 }
+
+func TestReviewCLIDismissIsUserOnly(t *testing.T) {
+	project := t.TempDir()
+	s, err := store.NewStore(project + "/.ostraka")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "target", "", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := s.CreateReview(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	t.Setenv("OSTRAKA_AGENT_ITEM_ID", item.ID)
+	if err := reviewDismissCmd.RunE(reviewDismissCmd, []string{review.ID}); err == nil {
+		t.Fatal("agent dismissed review")
+	}
+	if _, err := s.GetReview(review.ID); err != nil {
+		t.Fatal("rejected dismissal removed review")
+	}
+	t.Setenv("OSTRAKA_AGENT_ITEM_ID", "")
+	if err := reviewDismissCmd.RunE(reviewDismissCmd, []string{review.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if reviews, err := s.ListReviews(); err != nil || len(reviews) != 0 {
+		t.Fatal("dismissed review still active")
+	}
+}

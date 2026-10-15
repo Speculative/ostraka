@@ -28,8 +28,10 @@ cross-process review lock:
   Agent CLI reminders appear in dispatch prompts, outside the saved turn.
 - `RequestReviewCommit(reviewID)` posts user commit approval and retains the
   review; unsent drafts must first be submitted or discarded.
-- `CompleteReviewCommit(reviewID, commit)` verifies a new commit at HEAD and a
+- `CompleteReviewCommit(reviewID, commit)` verifies the supplied commit at HEAD and a
   clean working tree, then marks the review for cleanup with the final turn.
+- `DismissReview(reviewID)` moves an active review to `REVIEWS/dismissed/`,
+  retaining drafts and pending replies without requiring a commit.
 - `FinishReview(reviewID)` is the legacy store cleanup API; it cannot bypass
   the commit workflow once approval has been requested.
 - `AddAgentTurnWithReview(itemID, content)` appends the final agent turn and
@@ -68,11 +70,15 @@ no new-side cursor; press `s` to select its old code.
 The header shows the active context, layout, and attachment side. Press `v`, move to the other end of the range, and
 press Enter to finish; `s` switches old/new side. Press `a` to ask about that
 range, or leave the range clear for an item-wide question. The first question
-opens the `@` destination picker; later questions reuse that destination. Use
+opens the `@` destination picker; later questions in the same visit reuse that
+destination. Reentering Review changes clears the destination so a new review
+cannot silently inherit an old session. Batches to archived or terminal items
+are rejected until the destination is reopened. Use
 `@` to choose a different item. In the composer, `Ctrl+S` saves a draft;
 repeat `a` to add more questions. The `s` control chooses which source version
 the selected excerpt comes from: `old` for HEAD or `new` for working-tree code. `b` submits all unsent questions for the
-selected review as one item turn.
+selected review as one item turn and opens its destination at the newest
+content, including from full-screen review.
 
 Press `f` for a full-screen review without the file list. The same movement,
 selection, search, and question controls work there. The destination picker
@@ -97,11 +103,16 @@ shows all threads in the current review, with a distinct cyan title band
 and a whole-thread highlight for the selected one. Unsubmitted comments show `[unsent]` beside their author and timestamp;
 comments without a code attachment have no special discussion label. `j/k`
 select the next/previous thread and bring it into view. At the ends, they
-continue into the adjacent nonempty review when multiple destinations have
-active reviews. The reader heading identifies the current destination.
+continue into the adjacent review, including empty reviews that need
+dismissal. The reader heading identifies the current destination.
 `t` (or Enter) composes a reply inside the selected thread; `a` starts a new comment thread. `h` returns to
 the selected thread’s file and source location. Ctrl+S saves replies for the same batch flow. There is no edit-draft
 control; `x` discards the latest unsent message in the selected thread.
+`X` dismisses the selected review after a `y` confirmation (`n`/Esc cancels).
+This works even for a stuck commit request or an archived destination. The
+complete review is retained at `REVIEWS/dismissed/<review-id>.json`; it no
+longer participates in routing or blocks new reviews. Item turns stay intact.
+With no selected review, X opens the thread reader to choose one first.
 `F` submits “LGTM, please commit” to the current destination and queues the
 agent. It works from the file list, code, and thread views. If there is only
 one active review, it is selected automatically; with multiple reviews and no
@@ -121,8 +132,12 @@ terminal destinations must be reopened first. Unsent drafts must be submitted
 or discarded before approval.
 
 After committing successfully, the agent runs `ostraka review finish
-<review-id> --commit <commit-hash>`. Completion requires a new commit at HEAD
-(descending from HEAD at approval) and a clean working tree. It marks the
+<review-id> --commit <commit-hash>`. Completion requires the supplied commit
+to be at HEAD and a clean working tree. When approval recorded a base HEAD, the commit must descend from it
+(the base itself is accepted for late approval). An ordinary user commit
+request also authorizes completion; the review does not require an approval
+record from F. Already committed work can be finished with its existing commit
+without an empty commit or rewritten history. It marks the
 review for deletion by the final agent item turn, after pending replies are
 recorded. A failed check or commit leaves the review open for intervention;
 an empty diff alone never closes it. Recorded discussion remains in item turns.
@@ -150,6 +165,7 @@ ostraka review reply <review-id> <thread-number> --content-stdin
 ostraka review attach <review-id> <thread-number> --file ... --side old|new --start N --end N --excerpt ...
 ostraka review detach <review-id> <thread-number>
 ostraka review submit <review-id>
+ostraka review dismiss <review-id>                   # user: retain on disk, stop routing
 ostraka review finish <review-id>                    # user: request commit
 ostraka review finish <review-id> --commit <hash>    # agent: verify success
 ```
