@@ -3,6 +3,7 @@ package tui
 import (
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/Speculative/ostraka/internal/models"
@@ -69,7 +70,11 @@ func (m *model) refreshMentionPicker() {
 		return
 	}
 	old := m.mentionPicker
-	items := rankMentionCandidates(token.query, m.mentionSourceItems())
+	activity := lastActivity
+	if m.reviewComposer.selectingDestination && m.reviewComposer.commitOnSelection {
+		activity = lastAgentActivity
+	}
+	items := rankMentionCandidatesByActivity(token.query, m.mentionSourceItems(), activity)
 	selected := 0
 	if old.open && old.query == token.query && old.start == token.start {
 		for i, item := range items {
@@ -142,6 +147,22 @@ func mentionBoundaryRune(r rune) bool {
 // Within each relevance class, live items come first, then most recent
 // activity. The final title/ID order makes otherwise equal results stable.
 func rankMentionCandidates(query string, items []models.Item) []models.Item {
+	return rankMentionCandidatesByActivity(query, items, lastActivity)
+}
+
+// lastAgentActivity leaves items with no agent replies at zero so creating an
+// item or adding a user turn cannot displace a session with completed work.
+func lastAgentActivity(item models.Item) time.Time {
+	var latest time.Time
+	for _, turn := range item.Turns {
+		if turn.Actor == models.ActorAgent && turn.Timestamp.After(latest) {
+			latest = turn.Timestamp
+		}
+	}
+	return latest
+}
+
+func rankMentionCandidatesByActivity(query string, items []models.Item, activity func(models.Item) time.Time) []models.Item {
 	query = strings.ToLower(query)
 	candidates := make([]mentionCandidate, 0, len(items))
 	seen := make(map[string]struct{}, len(items))
@@ -167,8 +188,8 @@ func rankMentionCandidates(query string, items []models.Item) []models.Item {
 		if iLive != jLive {
 			return iLive
 		}
-		iActivity := lastActivity(candidates[i].item)
-		jActivity := lastActivity(candidates[j].item)
+		iActivity := activity(candidates[i].item)
+		jActivity := activity(candidates[j].item)
 		if !iActivity.Equal(jActivity) {
 			return iActivity.After(jActivity)
 		}

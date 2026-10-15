@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Speculative/ostraka/internal/models"
 	"github.com/Speculative/ostraka/internal/reviewdiff"
@@ -591,11 +592,11 @@ func TestFinishWithoutReviewCancelAndArchivedDestination(t *testing.T) {
 
 func TestFinishWithoutReviewTabDispatchesMostRecentSession(t *testing.T) {
 	m, target, sup := finishWithoutReviewModel(t)
-	other, err := m.store.CreateItem(models.ChannelInbox, "A newer session", "", models.TypeThread, models.StatusActive, "")
-	if err != nil {
+	if _, err := m.store.AddTurn(target.ID, models.ActorAgent, "Ready for review."); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.store.AddTurn(target.ID, models.ActorAgent, "Ready for review."); err != nil {
+	other, err := m.store.CreateItem(models.ChannelInbox, "A newer backlog item", "", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
 		t.Fatal(err)
 	}
 	m = reviewKey(m, "F")
@@ -617,6 +618,45 @@ func TestFinishWithoutReviewTabDispatchesMostRecentSession(t *testing.T) {
 	untouched, err := m.store.GetItem(other.ID)
 	if err != nil || len(untouched.Turns) != 0 {
 		t.Fatal("Tab posted to the wrong session")
+	}
+}
+
+func TestCommitTargetPickerIgnoresNewerUserActivity(t *testing.T) {
+	m, target, _ := finishWithoutReviewModel(t)
+	now := time.Date(2026, 10, 15, 20, 0, 0, 0, time.UTC)
+	target.Title = "Work ready to commit"
+	target.Turns = []models.Turn{{Actor: models.ActorAgent, Timestamp: now}}
+	other := models.Item{
+		ID: "other", Title: "Work with newer user message", Status: models.StatusActive,
+		Turns: []models.Turn{
+			{Actor: models.ActorAgent, Timestamp: now.Add(-time.Hour)},
+			{Actor: models.ActorUser, Timestamp: now.Add(time.Hour)},
+		},
+	}
+	backlog := models.Item{
+		ID: "backlog", Title: "Work newly created", Channel: models.ChannelInbox,
+		Status: models.StatusBacklog, Created: now.Add(2 * time.Hour),
+	}
+	archived := models.Item{
+		ID: "archived", Title: "Work archived", Status: models.StatusArchived,
+		Turns: []models.Turn{{Actor: models.ActorAgent, Timestamp: now.Add(3 * time.Hour)}},
+	}
+	m.allItems = []models.Item{backlog, other, archived, target}
+	m = reviewKey(m, "F")
+	for _, query := range []string{"", "Work", "other"} {
+		m.input.SetValue("@" + query)
+		m.input.CursorEnd()
+		m.refreshMentionPicker()
+		want := target.ID
+		if query == "other" {
+			want = other.ID
+		}
+		if len(m.mentionPicker.items) == 0 || m.mentionPicker.items[0].ID != want {
+			t.Fatalf("commit suggestions for %q = %v, want %s first", query, mentionIDs(m.mentionPicker.items), want)
+		}
+		if query != "other" && strings.Join(mentionIDs(m.mentionPicker.items), ",") != target.ID+",other,backlog,archived" {
+			t.Fatalf("commit suggestions for %q = %v", query, mentionIDs(m.mentionPicker.items))
+		}
 	}
 }
 

@@ -559,6 +559,8 @@ func (m model) finishCurrentReview() (tea.Model, tea.Cmd) {
 			next, cmd := m.openReviewDestinationPicker(nil)
 			m = next.(model)
 			m.reviewComposer.commitOnSelection = true
+			m.closeMentionPicker()
+			m.refreshMentionPicker()
 			return m, cmd
 		}
 		return m, nil
