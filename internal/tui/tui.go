@@ -5390,7 +5390,15 @@ func (m *model) updateConv() {
 	}
 	sb.WriteString(wrapText(item.Title, w) + "\n")
 	sb.WriteString(wrapText(meta, w) + "\n" + headRule + "\n\n")
-	sb.WriteString(renderMarkdown(item.Body, w))
+	mentionItems := make(map[string]models.Item)
+	for _, candidate := range m.mentionSourceItems() {
+		mentionItems[candidate.ID] = candidate
+	}
+	mentionItems[item.ID] = item
+	renderContent := func(content string, width int) string {
+		return renderItemMarkdown(content, width, mentionItems)
+	}
+	sb.WriteString(renderContent(item.Body, w))
 	mentioned := itemsForIDs(m.allItems, item.Mentions)
 	backlinks := itemsForIDs(m.allItems, item.Backlinks)
 	if len(m.allItems) == 0 && m.store != nil {
@@ -5429,13 +5437,13 @@ func (m *model) updateConv() {
 				if !partial.TurnTimestamp.IsZero() && partial.TurnTimestamp.Equal(event.turn.Timestamp) {
 					if m.traceExpanded[traceSelectionKey(item.ID, event)] {
 						parts = append(parts, conversationPart{
-							content: renderMarkdown(partial.Content, w),
+							content: renderContent(partial.Content, w),
 							muted:   true,
 						})
 					}
 				}
 			}
-			parts = append(parts, conversationPart{content: renderMarkdown(event.turn.Content, w)})
+			parts = append(parts, conversationPart{content: renderContent(event.turn.Content, w)})
 			selected := conversationSelectionKey(event) == selectedKey
 			turnContent := renderConversationParts(parts, selected, w)
 			turn := turnRule + "\n" + turnContent
@@ -5500,7 +5508,7 @@ func (m *model) updateConv() {
 			parts := []conversationPart{{content: renderStandalonePartialHeader(event.partial), actor: models.ActorAgent}}
 			if m.traceExpanded[traceSelectionKey(item.ID, event)] {
 				parts = append(parts, conversationPart{
-					content: renderMarkdown(event.partial.Content, w),
+					content: renderContent(event.partial.Content, w),
 					muted:   true,
 				})
 			}
@@ -5529,7 +5537,7 @@ func (m *model) updateConv() {
 		sb.WriteString("\n\n" + turnRule + "\n" +
 			liveHeaderStyle.Render("agent  ·  working"))
 		if live != "" {
-			sb.WriteString("\n\n" + renderMarkdown(live, w))
+			sb.WriteString("\n\n" + renderContent(live, w))
 		}
 	}
 	// Include the presence marker so an empty live block appearing or

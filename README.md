@@ -23,6 +23,12 @@ flag for an item without children is rejected.
 Use `ostraka item rename <item-id> <new-title>` to change an item's label
 without changing its body or conversation.
 
+In the composer, type `@` to find and insert an item reference. In item
+conversations, references show `@[title]` with the target's current status marker and a
+dedicated lavender-on-plum background that marks the full title boundary.
+Stored text keeps `@item-id`; unknown IDs and references inside code or links
+remain literal.
+
 Roots can be assigned one optional lowercase group slug. Use
 `ostraka item add --group <group>`, `ostraka item group <item-id> <group|none>`,
 and `ostraka item list --group <group|none>` to organize and filter complete
