@@ -45,6 +45,7 @@ func loadReviewDiffCmd(directory string, generation uint64) tea.Cmd {
 }
 
 func (m model) openReviewChanges() (model, tea.Cmd) {
+	m.rememberItemSelection()
 	m.projectPane = reviewProjectPane
 	m.projectEntries = nil
 	m.editingProject = false

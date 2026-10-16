@@ -1384,6 +1384,7 @@ func (m model) handleNavKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "2":
 		return m.switchView(archiveView)
 	case "3":
+		m.rememberItemSelection()
 		m.focus = focusItemList
 		m.projectPane = 1
 		m.showProjectContext()
@@ -3262,13 +3263,22 @@ func (m *model) clearNewItemDraft() {
 	}
 }
 
-func (m model) switchView(v listView) (model, tea.Cmd) {
+// rememberItemSelection saves the list cursor before a tab clears the items.
+// Project and review cursors do not refer to items in the underlying view.
+func (m *model) rememberItemSelection() {
+	if m.projectPane != 0 {
+		return
+	}
 	if id := m.selectedID(); id != "" {
 		if m.selectedByView == nil {
 			m.selectedByView = make(map[listView]string)
 		}
 		m.selectedByView[m.view] = id
 	}
+}
+
+func (m model) switchView(v listView) (model, tea.Cmd) {
+	m.rememberItemSelection()
 	m.projectPane = 0
 	m.projectEntries = nil
 	m.view = v

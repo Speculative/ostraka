@@ -1844,6 +1844,57 @@ func TestSelectionIsRetainedIndependentlyAcrossViews(t *testing.T) {
 	}
 }
 
+func TestChildSelectionIsRetainedAcrossTabs(t *testing.T) {
+	for _, source := range []struct {
+		name   string
+		view   listView
+		status models.Status
+		key    rune
+	}{
+		{"inbox", channelView(models.ChannelInbox), models.StatusPendingUser, '1'},
+		{"archive", archiveView, models.StatusArchived, '2'},
+	} {
+		for _, destination := range []rune{'1', '2', '3', '4'} {
+			if destination == source.key {
+				continue
+			}
+			t.Run(source.name+"/to-"+string(destination), func(t *testing.T) {
+				root := mkItem("root", source.status)
+				child := mkItem("child", source.status)
+				child.Parent = root.ID
+				items := []models.Item{root, child}
+				st := newSelectionModel(t, items, 1).store
+				m := newModel(st, nil, nil)
+				m.width, m.height = 120, 40
+				m.items, m.selected = items, 1
+				m.view = source.view
+				m.collapsed = map[string]bool{root.ID: false}
+				m.backlogVisibilityInitialized = true
+
+				next, _ := m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{destination}})
+				m = next.(model)
+				if destination == '1' || destination == '2' {
+					other := mkItem("other", models.StatusPendingUser)
+					if destination == '2' {
+						other.Status = models.StatusArchived
+					}
+					m = loadInto(t, m, []models.Item{other})
+				}
+				next, _ = m.handleNavKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{source.key}})
+				m = next.(model)
+				next, _ = m.Update(itemsLoadedMsg{
+					allItems: items, view: m.view, showBacklog: m.showBacklog,
+					generation: m.itemsLoadGeneration,
+				})
+				m = next.(model)
+				if got := m.selectedID(); got != child.ID {
+					t.Fatalf("selection after returning = %q, want child %q", got, child.ID)
+				}
+			})
+		}
+	}
+}
+
 func TestSelectionHoldsItsRowWhenTheItemLeavesTheView(t *testing.T) {
 	// Archiving the selected item, or parking it in backlog with the filter
 	// on, removes it from this view. Leaving selected untouched pointed it
