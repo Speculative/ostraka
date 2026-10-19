@@ -4,10 +4,8 @@
 # and `-p carthage-ostraka`, so just run `carthage up` from the
 # project root.
 #
-# IMPORTANT: By default, NO host-side port bindings. Services are reachable
-# between each other via Docker DNS (`redis:6379`, `postgres:5432`, ...)
-# but nothing is published to the host. Only services the user explicitly
-# opted into during /carthage-annex get a `ports:` block.
+# The web workspace publishes port 8090 on host loopback only. Other services
+# are reachable between containers via Docker DNS and are not published.
 
 name: carthage-ostraka
 
@@ -24,6 +22,8 @@ services:
         HOST_UID: ${HOST_UID:-1000}
         HOST_GID: ${HOST_GID:-1000}
     image: carthage-ostraka:latest
+    ports:
+      - "127.0.0.1:8090:8090"
     working_dir: /workspace
     init: true
     tty: true

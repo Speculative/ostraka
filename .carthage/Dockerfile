@@ -12,6 +12,14 @@ FROM carthage-base-personal:v2
 
 USER root
 
+# Shared libraries for headless Chromium layout checks of the web workspace.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0t64 libnspr4 libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 \
+    libdbus-1-3 libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
+    libxrandr2 libgbm1 libxcb1 libxkbcommon0 libasound2t64 libatspi2.0-0t64 \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV GO_VERSION=1.26.5
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
     | tar -C /usr/local -xzf - \

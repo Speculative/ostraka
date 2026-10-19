@@ -42,6 +42,14 @@ Run `ostraka preamble` when an agent needs the static orientation and final
 reply guidance. Normal dispatched sessions receive the same guidance directly
 in their initial prompt.
 
+## Browser workspace
+
+Run `ostraka web` and open http://localhost:8090 for the responsive mobile and
+desktop browser interface. It shares project files with the CLI and TUI and
+streams conversations and live agent progress. To run agents without the TUI,
+close the TUI and use `ostraka web --supervise`.
+See [docs/web.md](docs/web.md) for preview setup, operations and limitations.
+
 ## Commit messages
 
 Run `./scripts/install-git-hooks.sh` to install the repository's commit-message

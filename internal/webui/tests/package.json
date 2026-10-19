@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "scripts": {
+    "test": "node smoke.cjs",
+    "integration": "node integration.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

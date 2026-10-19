@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#10151c" />
+    <meta
+      name="description"
+      content="Ostraka — a workspace for durable conversations with coding agents."
+    />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/style.css" />
+    <title>Ostraka</title>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#detail">Skip to conversation</a>
+    <div class="workspace">
+      <aside class="sidebar" aria-label="Workspace navigation">
+        <a class="brand" href="#inbox"
+          ><img src="/icon.svg" alt="" width="30" height="30" /><span
+            >ostraka<span class="brand-sub">agent workspace</span></span
+          ></a
+        >
+        <div class="project-label" id="project-name">Workspace</div>
+        <nav id="navigation" aria-label="Views"></nav>
+        <div class="sidebar-bottom">
+          <span id="connection" role="status">Connecting…</span
+          ><button id="pause" class="quiet" hidden>Pause agents</button
+          ><span class="local-note">Local workspace · live updates</span>
+        </div>
+      </aside>
+      <section class="collection" aria-label="Items">
+        <header class="collection-header">
+          <div>
+            <span class="eyebrow">WORKSPACE</span>
+            <h1 id="view-title">Inbox</h1>
+          </div>
+          <button id="new-item" class="primary" title="New item (N)">
+            + New
+          </button>
+        </header>
+        <div class="filters">
+          <label class="search"
+            ><span aria-hidden="true">⌕</span
+            ><input
+              id="search"
+              type="search"
+              placeholder="Search conversations…"
+              aria-label="Search items" /></label
+          ><select id="group-filter" aria-label="Filter by group">
+            <option value="">All groups</option>
+          </select>
+        </div>
+        <div id="item-list" class="item-list" aria-live="polite"></div>
+        <footer class="collection-footer">
+          <span id="list-count"></span
+          ><span class="desktop-hint">N new · / search</span>
+        </footer>
+      </section>
+      <main id="detail" class="detail" tabindex="-1">
+        <div class="empty">
+          <span class="empty-mark">◈</span>
+          <h2>A little space to think.</h2>
+          <p>Select a conversation to pick up where you left off.</p>
+        </div>
+      </main>
+    </div>
+    <dialog id="modal">
+      <form id="modal-form">
+        <header>
+          <h2 id="modal-title"></h2>
+          <button
+            type="button"
+            id="modal-close"
+            class="icon-button"
+            aria-label="Close dialog"
+          >
+            ×
+          </button>
+        </header>
+        <div id="modal-fields"></div>
+        <p id="modal-error" class="error" role="alert" hidden></p>
+        <footer>
+          <button type="button" id="modal-cancel">Cancel</button
+          ><button type="submit" id="modal-submit" class="primary">Save</button>
+        </footer>
+      </form>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>
