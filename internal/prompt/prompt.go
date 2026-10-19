@@ -165,6 +165,8 @@ items. Link dependent items when narrower knowledge must persist.
 
 ` + reviewDispatchGuidance + "\n\n" + reviewCommitGuidance + `
 
+` + everyDispatchReplyGuidance + `
+
 When finished, send one substantive final reply with the exact command below.
 It hands the item back and ends this dispatch. Pass real multiline content
 through stdin, never literal \\n text. For work spanning dispatches, finish a
@@ -261,6 +263,16 @@ func BootstrapForMode(itemID, instructions, brief, itemContext, replyCommand str
 	}) + activitySection(activities, false)
 }
 
+// MissingReplyGuidance reminds an agent about a completed run that did not
+// publish its required item reply. The command is supplied by the supervisor.
+func MissingReplyGuidance(replyCommand string) string {
+	requireField("missing reply reminder", "ReplyCommand", replyCommand)
+	return "\n\nYour previous dispatch completed without posting an `ostraka item turn`. " +
+		"Your provider output was retained as progress, but it did not post an item reply. " +
+		"Continue the work. End this and every future dispatch by posting one substantive final reply " +
+		"with the command below. Pass real multiline content through stdin.\n" + replyCommand + "\n"
+}
+
 // Nudge builds the shorter prompt used for later turns in an existing item
 // conversation.
 func Nudge(itemID string, userTurns []string, activities []models.Activity) string {
@@ -300,8 +312,13 @@ func NudgeForMode(itemID string, mode models.AgentMode, userTurns []string, acti
 			break
 		}
 	}
-	return executionModeGuidance(mode) + "\n\n" + base + dispatchLengthGuidance + activitySection(activities, len(userTurns) > 0)
+	return executionModeGuidance(mode) + "\n\n" + base + "\n\n" + everyDispatchReplyGuidance + dispatchLengthGuidance + activitySection(activities, len(userTurns) > 0)
 }
+
+const everyDispatchReplyGuidance = `Every agent dispatch on this item, including all future turns, must end with
+one substantive final reply posted using "ostraka item turn" with --content-stdin.
+This applies when completing the work, handing off partial work, or asking a
+blocking question. Harness output alone does not post an item reply.`
 
 func executionModeGuidance(mode models.AgentMode) string {
 	if mode == models.AgentModeGoal {

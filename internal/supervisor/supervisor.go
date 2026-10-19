@@ -1138,6 +1138,9 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 		}
 		prompt = agentprompt.BootstrapForMode(msg.itemID, instructions, brief, context, replyCommand(s.root, msg.itemID), executionMode, activities)
 	}
+	if haveDispatchItem && s.previousDispatchMissedReply(dispatchItem) {
+		prompt += agentprompt.MissingReplyGuidance(replyCommand(s.root, msg.itemID))
+	}
 	if haveDispatchItem && executionMode == models.AgentModeGoal && dispatchItem.Goal != nil {
 		prompt += agentprompt.GoalGuidance(dispatchItem, agentprompt.EndGoalCommand(filepath.Dir(s.root), dispatchItem.ID))
 	}

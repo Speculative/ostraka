@@ -23,6 +23,7 @@ func TestBootstrapIntroducesItemWithoutReinitializingHarness(t *testing.T) {
 		command,
 		"starting a new Ostraka turn alone does not require revalidation",
 		"finish a coherent slice",
+		"Every agent dispatch on this item, including all future turns, must end with one substantive final reply",
 		"self-scheduling commands",
 	} {
 		if !strings.Contains(normalized, want) {
@@ -51,6 +52,7 @@ func TestNudgeExplicitlyContinuesTheConversation(t *testing.T) {
 		"Starting a new Ostraka turn does not by itself require revalidation",
 		"Do not rerun a successful check against unchanged inputs merely to reorient",
 		"ordinary harness progress updates remain visible to the user",
+		"Every agent dispatch on this item, including all future turns, must end with one substantive final reply",
 		"bounded checkpoints",
 		"self-scheduling commands",
 	} {
@@ -213,6 +215,7 @@ func TestAgentOrientationIncludesExactReplyCommand(t *testing.T) {
 	for _, want := range []string{
 		command,
 		"ends this dispatch",
+		"Every agent dispatch on this item, including all future turns, must end with one substantive final reply",
 		"project brief replace --content-stdin",
 		"within 6000 characters",
 		"ostraka item show <item-id> --include-partial --json",
