@@ -361,6 +361,7 @@ type model struct {
 	// separate from selected so switching views cannot make a checkpoint land
 	// on the wrong item.
 	draftItemID        string
+	draftSavedContent  string // Last loaded/saved value; unchanged editors never write it back.
 	draftSequence      int
 	pendingDraftItemID string
 	draftParent        string
@@ -2305,11 +2306,13 @@ func (m model) openComposer() (tea.Model, tea.Cmd) {
 	m.vim = vimEditor{register: m.vim.register, linewise: m.vim.linewise}
 	m.closeMentionPicker()
 	m.draftItemID = m.selectedID()
+	m.draftSavedContent = ""
 	m.input.Reset()
 	if content, err := m.store.LoadDraft(m.draftItemID); err != nil {
 		m.err = err
 	} else {
 		m.input.SetValue(content)
+		m.draftSavedContent = content
 		m.input.CursorEnd()
 		if content != "" {
 			m.pendingDraftItemID = m.draftItemID
@@ -2561,6 +2564,7 @@ func (m model) restoreRelatedComposer(createdID string) model {
 	}
 	m.input.SetCursor(m.returnDraftCol)
 	m.draftItemID = m.returnDraftItemID
+	m.draftSavedContent = m.returnDraftContent
 	if m.returnDraftContent != "" {
 		m.pendingDraftItemID = m.returnDraftItemID
 	} else {
@@ -3226,15 +3230,45 @@ func (m *model) checkpointTurnDraft() {
 		return
 	}
 	content := m.input.Value()
+	if content == m.draftSavedContent {
+		m.refreshComposingDraft()
+		return
+	}
 	if err := m.store.SaveDraft(m.draftItemID, content); err != nil {
 		m.err = err
 		return
 	}
+	m.draftSavedContent = content
 	if content == "" {
 		m.pendingDraftItemID = ""
 	} else {
 		m.pendingDraftItemID = m.draftItemID
 	}
+}
+
+// Clean composers follow shared drafts, including clears after another client
+// sends a turn. Uncheckpointed local edits stay in the editor.
+func (m *model) refreshComposingDraft() {
+	if m.store == nil || m.draftItemID == "" || m.editingProject || m.reviewComposer.active || m.editingNewItemDraft() || m.input.Value() != m.draftSavedContent {
+		return
+	}
+	content, err := m.store.LoadDraft(m.draftItemID)
+	if err != nil {
+		m.err = err
+		return
+	}
+	if content == m.draftSavedContent {
+		return
+	}
+	m.input.SetValue(content)
+	m.input.CursorEnd()
+	m.draftSavedContent = content
+	m.pendingDraftItemID = ""
+	if content != "" {
+		m.pendingDraftItemID = m.draftItemID
+	}
+	m.refreshMentionPicker()
+	*m = m.recalcLayout()
 }
 
 func (m *model) checkpointNewItemDraft() {
@@ -5098,7 +5132,11 @@ func (m *model) showSelected(promptProposal bool) {
 // is also the collapsed preview, but it is never focused in this state, so
 // navigation remains active until the user presses t to edit it.
 func (m *model) refreshPendingDraft() {
-	if m.mode == modeCompose || m.store == nil {
+	if m.mode == modeCompose {
+		m.refreshComposingDraft()
+		return
+	}
+	if m.store == nil {
 		return
 	}
 	if m.draftVisible() && m.draftSelected {

@@ -84,8 +84,10 @@ traces and submit turns. The turn composer formats Markdown as you type while
 leaving every source character visible: emphasis, strikethrough, code, links,
 headings, quotes and list markers. It keeps native text selection, undo, paste
 and keyboard input; the sent message and saved draft retain the original text. Drafts persist in the project and on the browser.
-Idle composers follow shared draft updates; text edited locally is preserved
-while other clients update. Status/mode selectors and child/review buttons
+Composers follow shared draft updates once local edits have been saved, even
+while focused. Sending or clearing a draft in either interface clears the other
+clean composer; unchanged TUI checkpoints never write cached text back.
+Unsaved local edits are preserved while other clients update. Status/mode selectors and child/review buttons
 expose item operations. Double-click the conversation title (or focus
 it and press Enter) to rename it in place; Enter saves and Escape cancels.
 Group and move fields offer dropdown suggestions and accept typed values.

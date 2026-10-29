@@ -352,6 +352,24 @@ const input = (node, value) => {
   assert.equal(compose.value, "Next message");
   assert.equal(saved.root, "Next message");
 
+  // Once autosaved, a focused web composer follows a TUI clear without echoing.
+  compose.focus();
+  saved.root = "";
+  const savesBeforeClear = calls.filter((c) => c.op === "draft").length;
+  source.change();
+  await wait(280);
+  assert.equal(compose.value, "");
+  assert.equal(w.localStorage.getItem("ostraka:Demo:draft:root"), null);
+  await wait(720);
+  assert.equal(calls.filter((c) => c.op === "draft").length, savesBeforeClear);
+  // An external change must still leave uncheckpointed local input alone.
+  input(compose, "Still typing locally");
+  saved.root = "External edit";
+  source.change();
+  await wait(280);
+  assert.equal(compose.value, "Still typing locally");
+  compose.blur();
+
   // Family folding/search and optimistic order payload.
   d.querySelector(".fold").click();
   await wait();

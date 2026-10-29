@@ -440,8 +440,7 @@
     if (
       draftVersion === draftVersions.get(id) &&
       !sendingDrafts.has(id) &&
-      !editedDrafts.has(id) &&
-      document.activeElement !== composer
+      !editedDrafts.has(id)
     ) {
       const draft = data.draft || "";
       if (composer.value !== draft) {
@@ -578,12 +577,17 @@
     if (sendingDrafts.has(id) && !beforeSend) return job.chain;
     clearTimeout(job.timer);
     if (job.pending !== null) {
-      const content = job.pending;
+      const content = job.pending,
+        version = draftVersions.get(id);
       job.pending = null;
       job.chain = job.chain
         .catch(() => {})
         .then(() => action("draft", { id, content }, false))
         .then(() => {
+          if (version === draftVersions.get(id)) {
+            draftVersions.set(id, (version || 0) + 1);
+            if (!sendingDrafts.has(id)) editedDrafts.delete(id);
+          }
           if (detailID === id && $("#draft-status"))
             $("#draft-status").textContent = "Draft saved";
         })
