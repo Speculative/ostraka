@@ -91,3 +91,45 @@ func TestSharedDraftRefreshPreservesLocalEdits(t *testing.T) {
 		t.Fatalf("saved editor did not follow external clear: %q", m.input.Value())
 	}
 }
+
+func TestIndependentComposersFollowSharedDraft(t *testing.T) {
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.CreateItem(models.ChannelInbox, "shared", "body", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := make([]model, 2)
+	for i := range clients {
+		m := newModel(s, nil, nil)
+		m.items = []models.Item{item}
+		next, _ := m.openComposer()
+		clients[i] = next.(model)
+	}
+	for _, writer := range []int{0, 1} {
+		clients[writer].input.SetValue("edited in either composer")
+		clients[writer].checkpointTurnDraft()
+		clients[1-writer].refreshPendingDraft()
+		if clients[1-writer].input.Value() != "edited in either composer" {
+			t.Fatal("peer did not receive draft")
+		}
+		if _, err := s.AddTurn(item.ID, models.ActorUser, clients[1-writer].input.Value()); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ClearDraft(item.ID); err != nil {
+			t.Fatal(err)
+		}
+		for i := range clients {
+			clients[i].refreshPendingDraft()
+			clients[i].checkpointTurnDraft()
+			if clients[i].input.Value() != "" {
+				t.Fatal("sent draft survived in a composer")
+			}
+		}
+		if draft, err := s.LoadDraft(item.ID); err != nil || draft != "" {
+			t.Fatalf("sent draft bounced back: %q, %v", draft, err)
+		}
+	}
+}

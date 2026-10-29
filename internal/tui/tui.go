@@ -166,13 +166,19 @@ func startWatcher(root string) (<-chan struct{}, error) {
 		w.Close()
 		return nil, err
 	}
+	// Drafts are created lazily by the store. Create the directory before
+	// watching so the first draft and every later atomic replacement are seen.
+	if err := os.MkdirAll(filepath.Join(root, "drafts"), 0700); err != nil {
+		w.Close()
+		return nil, err
+	}
 	// Watch the supported item locations, retained partial traces, and
 	// supervisor state. Live progress is written under supervisor/, while a
 	// completed trace is written under PARTIALS/; omitting either leaves the
 	// reading pane stale until another action happens to trigger a reload. Legacy channel
 	// directories may remain on disk, but they are no longer part of the store
 	// schema or TUI.
-	for _, name := range []string{"INBOX", "ARCHIVE", "ACTIVITY", "PARTIALS", "REVIEWS", "supervisor"} {
+	for _, name := range []string{"INBOX", "ARCHIVE", "ACTIVITY", "PARTIALS", "REVIEWS", "supervisor", "drafts"} {
 		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
 			w.Add(filepath.Join(root, name))
 		}

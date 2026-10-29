@@ -109,7 +109,12 @@ and keyboard input; the sent message and saved draft retain the original text. D
 Composers follow shared draft updates once local edits have been saved, even
 while focused. Sending or clearing a draft in either interface clears the other
 clean composer; unchanged TUI checkpoints never write cached text back.
-Unsaved local edits are preserved while other clients update. Status/mode selectors and child/review buttons
+Unsaved local edits are preserved while other clients update. On reopening an
+item, the shared draft takes precedence over saved browser caches. Unsaved
+browser recovery text is restored only when its original shared draft still
+matches. The TUI watches draft-only writes, including the first draft in a
+project. A project still permits only one running TUI; multiple browser
+clients can attach alongside it. Status/mode selectors and child/review buttons
 expose item operations. Double-click the conversation title (or focus
 it and press Enter) to rename it in place; Enter saves and Escape cancels.
 Group and move fields offer dropdown suggestions and accept typed values.
@@ -196,3 +201,7 @@ starting targeted reviews and inline comments from the Reviews panel.
 The test creates a fixture commit inside the disposable repository to exercise
 tracked additions and deletions; it never commits the working project.
 Set `OSTRAKA_TEST_SCREENSHOTS` to an output directory to retain screenshots.
+
+`npm run draft-sync --prefix internal/webui/tests` runs a focused two-browser
+check against the same disposable server. It covers edits in either client,
+clearing after send, reopening items, stale caches, and unsaved recovery.

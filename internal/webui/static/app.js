@@ -55,7 +55,8 @@
   const editedDrafts = new Set(),
     sendingDrafts = new Set(),
     draftVersions = new Map();
-  const drafts = new Map(),
+  const draftBases = new Map(),
+    drafts = new Map(),
     draftJobs = new Map(),
     projectDrafts = new Map();
   const storage = {
@@ -82,6 +83,7 @@
     },
   };
   const draftKey = (id) => `ostraka:${state.project}:draft:${id}`;
+  const recoveryKey = (id) => `${draftKey(id)}:unsaved`;
   const report = (error) => toast(error.message || String(error), true);
   function toast(message, error = false) {
     const node = $("#toast");
@@ -479,6 +481,7 @@
         composer.value = draft;
         composer.renderPreview();
       }
+      draftBases.set(id, draft);
       drafts.set(id, draft);
       if (draft) storage.set(draftKey(id), draft);
       else storage.remove(draftKey(id));
@@ -513,11 +516,21 @@
     textarea.placeholder = "Continue the conversation…";
     textarea.setAttribute("aria-label", "Message");
     mentionCompletion(textarea);
-    const id = data.item.ID,
-      local = storage.get(draftKey(id));
-    if (!drafts.has(id)) {
-      drafts.set(id, local !== null ? local : data.draft || "");
-      if (local !== null && local !== (data.draft || "")) editedDrafts.add(id);
+    const id = data.item.ID;
+    if (!editedDrafts.has(id)) {
+      const shared = data.draft || "";
+      draftBases.set(id, shared);
+      drafts.set(id, shared);
+      // Recover unsaved edits only if the shared draft has not changed since
+      // they were made. A cached saved draft must never override another client.
+      let recovery;
+      try {
+        recovery = JSON.parse(storage.get(recoveryKey(id)));
+      } catch { /* Ignore an invalid recovery record. */ }
+      if (recovery && recovery.base === shared && typeof recovery.content === "string") {
+        drafts.set(id, recovery.content);
+        queueDraft(id, recovery.content);
+      } else storage.remove(recoveryKey(id));
     }
     textarea.value = drafts.get(id);
     textarea.addEventListener("input", () => {
@@ -561,12 +574,15 @@
         // Keep text entered while this message was sending.
         if (textarea.value === content) {
           textarea.value = "";
+          draftBases.set(id, "");
+          storage.remove(recoveryKey(id));
           drafts.set(id, "");
           editedDrafts.delete(id);
           const job = draftJobs.get(id);
           if (job) job.pending = null;
           storage.remove(draftKey(id));
         } else {
+          draftBases.set(id, "");
           drafts.set(id, textarea.value);
           storage.set(draftKey(id), textarea.value);
           queueDraft(id, textarea.value);
@@ -594,6 +610,7 @@
   function queueDraft(id, content) {
     draftVersions.set(id, (draftVersions.get(id) || 0) + 1);
     editedDrafts.add(id);
+    storage.set(recoveryKey(id), JSON.stringify({ base: draftBases.get(id) || "", content }));
     let job = draftJobs.get(id);
     if (!job) {
       job = { pending: null, timer: null, chain: Promise.resolve() };
@@ -616,9 +633,15 @@
         .catch(() => {})
         .then(() => action("draft", { id, content }, false))
         .then(() => {
+          draftBases.set(id, content);
           if (version === draftVersions.get(id)) {
+            storage.remove(recoveryKey(id));
             draftVersions.set(id, (version || 0) + 1);
             if (!sendingDrafts.has(id)) editedDrafts.delete(id);
+          } else if (editedDrafts.has(id)) {
+            storage.set(recoveryKey(id), JSON.stringify({
+              base: content, content: drafts.get(id),
+            }));
           }
           if (detailID === id && $("#draft-status"))
             $("#draft-status").textContent = "Draft saved";
@@ -2030,8 +2053,8 @@
         Lines: fullSource
           ? original.FullLines?.length
             ? original.FullLines
-            : original.Lines
-          : original.Lines,
+            : original.Lines || []
+          : original.Lines || [],
       };
       const details = el("details", "diff-file");
       details.dataset.path = file.Path;
@@ -2395,9 +2418,6 @@
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") scheduleRefresh();
     else for (const id of draftJobs.keys()) flushDraft(id).catch(() => {});
-  });
-  window.addEventListener("pagehide", () => {
-    for (const [id, content] of drafts) storage.set(draftKey(id), content);
   });
   const source = new EventSource("/api/events");
   source.addEventListener("open", () => {

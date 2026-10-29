@@ -93,6 +93,7 @@ w.fetch = async (path, options) => {
   } else if (path === "/api/diff")
     value = {
       Files: [
+        { Path: "empty.txt", Status: "untracked", Lines: null },
         {
           Path: "app.go",
           Status: "modified",
@@ -501,7 +502,10 @@ const input = (node, value) => {
   // Current diff is visible and refreshes with no active review.
   w.location.hash = "reviews";
   await wait();
-  assert.ok(d.querySelector(".diff-file").textContent.includes("app.go"));
+  assert.deepEqual(
+    [...d.querySelectorAll(".diff-file summary")].map((node) => node.textContent),
+    ["empty.txt · untracked", "app.go · modified"],
+  );
   source.change();
   await wait(280);
   assert.ok(d.querySelector(".diff-file"));

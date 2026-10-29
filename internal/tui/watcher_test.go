@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Speculative/ostraka/internal/store"
 )
 
 func TestStartWatcherSignalsForLiveProgress(t *testing.T) {
@@ -46,5 +48,39 @@ func TestStartWatcherSignalsForReviewReply(t *testing.T) {
 	case <-watchCh:
 	case <-time.After(time.Second):
 		t.Fatal("watcher did not signal for review-only update")
+	}
+}
+
+func TestStartWatcherSignalsForSharedDrafts(t *testing.T) {
+	root := t.TempDir()
+	watchCh, err := startWatcher(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Drain store initialization events before testing draft-only changes.
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-watchCh:
+	default:
+	}
+	for _, content := range []string{"first draft", "replacement draft", ""} {
+		if err := s.SaveDraft("shared", content); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-watchCh:
+		case <-time.After(time.Second):
+			t.Fatalf("watcher did not signal for draft %q", content)
+		}
+		// Let the atomic-write burst finish before the next mutation.
+		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-watchCh:
+		default:
+		}
 	}
 }

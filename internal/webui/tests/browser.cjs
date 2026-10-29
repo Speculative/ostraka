@@ -210,16 +210,20 @@ async function pick(locator, value) {
     await a
       .getByRole("button", { name: "Apply to next turn", exact: true })
       .click();
+    // This fresh item has never dispatched an agent. The selected settings
+    // are labeled Current until there is a dispatched model to differ from.
     await b.waitForFunction(() =>
-      document
-        .querySelector("#session-label")
-        ?.textContent.includes("Next turn: claude · opus · high"),
+      document.querySelector("#session-label")?.textContent ===
+        "Current: claude · opus · high",
     );
     const afterModel = await fetch(`${origin}/api/items/${root.ID}`).then((r) =>
       r.json(),
     );
     assert.equal(afterModel.item.Status, "active");
     assert.equal(afterModel.session.model, "opus");
+    assert.equal(afterModel.session.provider, "claude");
+    assert.equal(afterModel.session.effort, "high");
+    assert.equal(afterModel.session.current, null);
     await a.goto(`${origin}/#inbox/${parked.ID}`);
     await a
       .getByRole("button", { name: "Activate & queue", exact: true })
