@@ -52,7 +52,9 @@
   let stateLoaded = false;
   let refreshRunning = false,
     refreshAgain = false;
-  const editedDrafts = new Set();
+  const editedDrafts = new Set(),
+    sendingDrafts = new Set(),
+    draftVersions = new Map();
   const drafts = new Map(),
     draftJobs = new Map(),
     projectDrafts = new Map();
@@ -429,12 +431,18 @@
       );
       detailID = "";
     }
+    const draftVersion = draftVersions.get(id);
     const data = await request(`/api/items/${encodeURIComponent(id)}`);
     if (token !== revision || selected !== id) return;
     current = data;
     if (detailID !== id) buildItem(data);
     const composer = $("#composer");
-    if (!editedDrafts.has(id) && document.activeElement !== composer) {
+    if (
+      draftVersion === draftVersions.get(id) &&
+      !sendingDrafts.has(id) &&
+      !editedDrafts.has(id) &&
+      document.activeElement !== composer
+    ) {
       const draft = data.draft || "";
       if (composer.value !== draft) {
         composer.value = draft;
@@ -511,16 +519,21 @@
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const content = textarea.value;
-      if (!content.trim()) return;
+      if (!content.trim() || sendingDrafts.has(id)) return;
+      sendingDrafts.add(id);
       send.disabled = true;
       try {
-        await flushDraft(id);
+        await flushDraft(id, true);
         await action("turn", { id, content }, false);
+        // Ignore draft reads started before this send completed.
+        draftVersions.set(id, (draftVersions.get(id) || 0) + 1);
         // Keep text entered while this message was sending.
         if (textarea.value === content) {
           textarea.value = "";
           drafts.set(id, "");
           editedDrafts.delete(id);
+          const job = draftJobs.get(id);
+          if (job) job.pending = null;
           storage.remove(draftKey(id));
         } else {
           drafts.set(id, textarea.value);
@@ -533,6 +546,8 @@
       } catch (error) {
         report(error);
       } finally {
+        sendingDrafts.delete(id);
+        flushDraft(id).catch(report);
         send.disabled = false;
       }
     });
@@ -546,6 +561,7 @@
     });
   }
   function queueDraft(id, content) {
+    draftVersions.set(id, (draftVersions.get(id) || 0) + 1);
     editedDrafts.add(id);
     let job = draftJobs.get(id);
     if (!job) {
@@ -556,9 +572,10 @@
     clearTimeout(job.timer);
     job.timer = setTimeout(() => flushDraft(id).catch(report), 650);
   }
-  async function flushDraft(id) {
+  async function flushDraft(id, beforeSend = false) {
     const job = draftJobs.get(id);
     if (!job) return;
+    if (sendingDrafts.has(id) && !beforeSend) return job.chain;
     clearTimeout(job.timer);
     if (job.pending !== null) {
       const content = job.pending;

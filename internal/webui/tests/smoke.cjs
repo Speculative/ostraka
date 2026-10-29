@@ -50,6 +50,15 @@ const state = {
 const calls = [],
   saved = {},
   source = {};
+let holdDetail = null,
+  holdTurn = null;
+const gate = () => {
+  let release;
+  const promise = new Promise((resolve) => {
+    release = resolve;
+  });
+  return { promise, release, started: false };
+};
 let rejectDraft = false,
   rejectModels = false;
 w.EventSource = class {
@@ -118,6 +127,12 @@ w.fetch = async (path, options) => {
       saved[a.id] = a.content;
     }
     if (a.op === "turn") {
+      if (holdTurn) {
+        const pending = holdTurn;
+        holdTurn = null;
+        pending.started = true;
+        await pending.promise;
+      }
       saved[a.id] = "";
       state.items
         .find((i) => i.ID === a.id)
@@ -149,10 +164,14 @@ w.fetch = async (path, options) => {
     if (a.op === "instructions") state.instructions = a.content;
     if (a.op === "child-order") state.child_orders[a.id] = a.ids;
   }
-  return {
-    ok: true,
-    json: async () => JSON.parse(JSON.stringify(value ?? null)),
-  };
+  const snapshot = JSON.parse(JSON.stringify(value ?? null));
+  if (path.startsWith("/api/items/") && holdDetail) {
+    const pending = holdDetail;
+    holdDetail = null;
+    pending.started = true;
+    await pending.promise;
+  }
+  return { ok: true, json: async () => snapshot };
 };
 const wait = (ms = 60) => new Promise((r) => setTimeout(r, ms));
 const clickText = (root, text) => {
@@ -295,6 +314,44 @@ const input = (node, value) => {
   await wait(300);
   assert.equal(compose.value, "");
   assert.equal(calls.find((c) => c.op === "turn").content, "Unsent draft");
+  // A delayed refresh containing an early draft must not resurrect sent text.
+  compose.blur();
+  saved.root = "First";
+  const staleDetail = gate();
+  holdDetail = staleDetail;
+  source.change();
+  await wait(280);
+  assert.equal(staleDetail.started, true);
+  input(compose, "First word and the rest of the message");
+  d.querySelector(".composer").requestSubmit();
+  await wait(60);
+  assert.equal(compose.value, "");
+  staleDetail.release();
+  await wait(60);
+  assert.equal(compose.value, "");
+  assert.equal(w.localStorage.getItem("ostraka:Demo:draft:root"), null);
+  assert.equal(saved.root, "");
+  await wait(280);
+
+  // Typing during a slow send stays local until the turn clears its old draft.
+  input(compose, "Another message");
+  const slowTurn = gate();
+  holdTurn = slowTurn;
+  d.querySelector(".composer").requestSubmit();
+  await wait(60);
+  assert.equal(slowTurn.started, true);
+  const turnsBefore = calls.filter((c) => c.op === "turn").length;
+  d.querySelector(".composer").requestSubmit();
+  input(compose, "Next message");
+  const draftCalls = calls.filter((c) => c.op === "draft").length;
+  await wait(720);
+  assert.equal(calls.filter((c) => c.op === "draft").length, draftCalls);
+  assert.equal(calls.filter((c) => c.op === "turn").length, turnsBefore);
+  slowTurn.release();
+  await wait(300);
+  assert.equal(compose.value, "Next message");
+  assert.equal(saved.root, "Next message");
+
   // Family folding/search and optimistic order payload.
   d.querySelector(".fold").click();
   await wait();
