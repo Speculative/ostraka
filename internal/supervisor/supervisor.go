@@ -457,18 +457,9 @@ func (s *Supervisor) SessionIsStale(itemID string) bool {
 // that old turn overwrite the freshly selected session state when it
 // finishes.
 func (s *Supervisor) StartNewSession(itemID string, provider Provider, model, effort string) error {
-	if !provider.valid() {
-		return fmt.Errorf("unknown provider %q", provider)
-	}
 	s.session.mu.Lock()
 	defer s.session.mu.Unlock()
-	if err := saveItemSession(s.root, itemID, sessionFile{Provider: provider, Model: model, Effort: effort}); err != nil {
-		return err
-	}
-	if err := saveModelDefault(s.root, provider, model); err != nil {
-		return err
-	}
-	return saveEffortDefault(s.root, provider, effort)
+	return SelectNextSession(s.root, itemID, provider, model, effort)
 }
 
 func (s *Supervisor) PreferredEffort(provider Provider) string {
@@ -1056,32 +1047,16 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	}
 	runStarted = true
 	s.session.mu.Lock()
-	sf, err := loadItemSession(s.root, msg.itemID)
-	if err == nil && sessionIsStale(sf, time.Now()) {
-		staleSessionID := sf.SessionID
-		fresh := sf
-		fresh.SessionID = ""
-		fresh.PromptedTurns = nil
-		if resetErr := saveItemSession(s.root, msg.itemID, fresh); resetErr != nil {
-			s.logger.Printf("item %s: cannot rotate stale session %s: %v", msg.itemID, staleSessionID, resetErr)
-		} else {
-			// saveItemSession refreshes UpdatedAt. Reload the record so the
-			// completion guard can recognize this freshly selected state.
-			sf = fresh
-			if rotated, loadErr := loadItemSession(s.root, msg.itemID); loadErr != nil {
-				s.logger.Printf("item %s: cannot reload rotated session: %v", msg.itemID, loadErr)
-			} else {
-				sf = rotated
-			}
-			s.logger.Printf("item %s: rotating stale session %s before dispatch", msg.itemID, staleSessionID)
-		}
-	}
+	sf, err := prepareItemSession(s.root, msg.itemID)
 	s.session.mu.Unlock()
 	if err != nil {
 		s.logger.Printf("item %s: failed to load session, starting fresh with Claude: %v", msg.itemID, err)
 		sf = sessionFile{Provider: ProviderClaude}
 	}
 
+	if e := writeCurrentModel(s.root, msg.itemID, ModelSelection{Provider: sf.Provider, Model: sf.Model, Effort: sf.Effort}); e != nil {
+		s.logger.Printf("item %s: cannot record current model: %v", msg.itemID, e)
+	}
 	if sf.SessionID == "" {
 		s.logger.Printf("item %s: dispatching (fresh %s session)", msg.itemID, sf.Provider)
 		if s.store != nil {
@@ -1164,6 +1139,11 @@ func (s *Supervisor) dispatch(msg enqueueMsg) {
 	result, err := harness.RunTurn(turnCtx, prompt, sf.SessionID, sf.Model, sf.Effort, live.append)
 	if err == nil && result.IsError {
 		err = fmt.Errorf("%s: turn failed: %s", sf.Provider, turnErrorText(result))
+	}
+	if result.Model != "" {
+		if e := writeCurrentModel(s.root, msg.itemID, ModelSelection{Provider: sf.Provider, Model: result.Model, Effort: sf.Effort}); e != nil {
+			s.logger.Printf("item %s: cannot record resolved model: %v", msg.itemID, e)
+		}
 	}
 	interrupted := s.interruptRequested(active) || turnCtx.Err() != nil
 	if interrupted && err == nil {
@@ -1355,17 +1335,16 @@ func (s *Supervisor) persistSession(itemID string, dispatched sessionFile, sessi
 		return
 	}
 	s.session.mu.Lock()
-	current, loadErr := loadItemSession(s.root, itemID)
-	var saveErr error
-	if loadErr == nil && sameSessionState(current, dispatched) {
-		saveErr = saveItemSession(s.root, itemID, sessionFile{
-			Provider:      dispatched.Provider,
-			Model:         dispatched.Model,
-			Effort:        dispatched.Effort,
-			SessionID:     sessionID,
-			PromptedTurns: intPointer(promptedTurns),
-		})
-	}
+	saveErr := mutateSessions(s.root, func(sessions *sessionsFile) error {
+		current := itemSession(*sessions, itemID)
+		if sameSessionState(current, dispatched) {
+			sessions.Sessions[itemID] = sessionFile{
+				Provider: dispatched.Provider, Model: dispatched.Model, Effort: dispatched.Effort,
+				SessionID: sessionID, PromptedTurns: intPointer(promptedTurns), UpdatedAt: time.Now().UTC(),
+			}
+		}
+		return nil
+	})
 	s.session.mu.Unlock()
 	if saveErr != nil {
 		s.logger.Printf("item %s: failed to persist session id %s: %v", itemID, sessionID, saveErr)

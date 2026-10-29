@@ -173,7 +173,12 @@ func (s *Server) apply(a action) (any, error) {
 			return nil, e
 		}
 		return item, s.enqueue(item.ID)
-	case "interrupt", "pause", "session":
+	case "session":
+		if _, e := st.GetItem(a.ID); e != nil {
+			return nil, e
+		}
+		return nil, supervisor.SelectNextSession(st.Root, a.ID, a.Provider, a.Model, a.Effort)
+	case "interrupt", "pause":
 		if s.Supervisor == nil {
 			return nil, fmt.Errorf("this operation requires the server to own the supervisor (--supervise)")
 		}
@@ -182,11 +187,7 @@ func (s *Server) apply(a action) (any, error) {
 			return nil, s.Supervisor.InterruptItem(a.ID)
 		case "pause":
 			return map[string]bool{"paused": s.Supervisor.ToggleDispatchPause()}, nil
-		case "session":
-			if _, e := st.GetItem(a.ID); e != nil {
-				return nil, e
-			}
-			return nil, s.Supervisor.StartNewSession(a.ID, a.Provider, a.Model, a.Effort)
+
 		}
 	}
 	return nil, fmt.Errorf("unknown operation %q", a.Op)

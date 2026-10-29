@@ -1,13 +1,17 @@
 package webui
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Speculative/ostraka/internal/models"
 	"github.com/Speculative/ostraka/internal/store"
@@ -196,5 +200,180 @@ func TestMarkdownRendersTables(t *testing.T) {
 	html := markdown("| Layout | Width |\n| --- | --- |\n| Mobile | narrow |")
 	if !strings.Contains(html, "<table>") || !strings.Contains(html, "<td>Mobile</td>") {
 		t.Fatal(html)
+	}
+}
+
+func TestLiveEventsReachEveryClientForExternalAndBrowserWrites(t *testing.T) {
+	s := testServer(t)
+	item, err := s.Store.CreateItem(models.ChannelInbox, "Before", "", models.TypeThread, models.StatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(s.Handler())
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	readers := make([]*bufio.Reader, 2)
+	for i := range readers {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/api/events", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		readers[i] = bufio.NewReader(resp.Body)
+	}
+	readChange := func(reader *bufio.Reader) string {
+		t.Helper()
+		var data string
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasPrefix(line, "data: ") {
+				data = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+			}
+			if line == "\n" && data != "" {
+				return data
+			}
+		}
+	}
+	first := []string{readChange(readers[0]), readChange(readers[1])}
+	// A separate store instance exercises the same disk writes used by CLI/TUI.
+	external, err := store.NewStore(s.Store.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := external.RenameItem(item.ID, "From TUI"); err != nil {
+		t.Fatal(err)
+	}
+	for i, reader := range readers {
+		next := readChange(reader)
+		if next == first[i] {
+			t.Fatal("client missed external write")
+		}
+		first[i] = next
+	}
+	body := `{"op":"rename","id":"` + item.ID + `","title":"From browser"}`
+	resp, err := http.Post(server.URL+"/api/action", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatal(resp.Status)
+	}
+	for i, reader := range readers {
+		next := readChange(reader)
+		if next == first[i] {
+			t.Fatal("client missed browser write")
+		}
+		first[i] = next
+	}
+	if err := external.SaveDraft(item.ID, "Shared draft"); err != nil {
+		t.Fatal(err)
+	}
+	for i, reader := range readers {
+		if readChange(reader) == first[i] {
+			t.Fatal("client missed draft write")
+		}
+	}
+	got, err := external.GetItem(item.ID)
+	if err != nil || got.Title != "From browser" {
+		t.Fatalf("external store: %+v, %v", got, err)
+	}
+}
+
+func TestWorkingTreeEditsInvalidateWithoutItemWrites(t *testing.T) {
+	project := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = project
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git: %s: %v", out, err)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.name", "Test")
+	runGit("config", "user.email", "test@example.com")
+	st, err := store.NewStore(filepath.Join(project, ".ostraka"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Store: st}
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(project, path), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".gitignore", ".ostraka/\n")
+	write("file with spaces.txt", "original\n")
+	runGit("add", ".")
+	runGit("commit", "-m", "Initial")
+	before := s.fingerprint()
+	write("file with spaces.txt", "changed\n")
+	changed := s.fingerprint()
+	if before == changed {
+		t.Fatal("missed working tree edit")
+	}
+	// Status remains M, and content has the same size. Advance the timestamp
+	// explicitly so this assertion is independent of filesystem clock precision.
+	write("file with spaces.txt", "another\n")
+	later := time.Now().Add(time.Second)
+	if err := os.Chtimes(filepath.Join(project, "file with spaces.txt"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	if changed == s.fingerprint() {
+		t.Fatal("missed edit to already modified file")
+	}
+	before = s.fingerprint()
+	write("new file.txt", "untracked\n")
+	if before == s.fingerprint() {
+		t.Fatal("missed untracked file")
+	}
+	runGit("add", ".")
+	before = s.fingerprint()
+	runGit("commit", "-m", "Changes")
+	if before == s.fingerprint() {
+		t.Fatal("missed commit")
+	}
+}
+
+func TestAttachedBrowserCanChangeNextModelWithoutQueuing(t *testing.T) {
+	s := testServer(t)
+	item, err := s.Store.CreateItem(models.ChannelInbox, "Model settings", "", models.TypeThread, models.StatusBacklog, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := s.fingerprint()
+	w := request(t, s, `{"op":"session","id":"`+item.ID+`","provider":"codex","model":"next-model","effort":"high"}`, "")
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	if s.fingerprint() == before {
+		t.Fatal("model change did not invalidate clients")
+	}
+	got, err := s.Store.GetItem(item.ID)
+	if err != nil || got.Status != models.StatusBacklog || len(got.Turns) != 0 {
+		t.Fatalf("selection queued work: %+v, %v", got, err)
+	}
+	r := httptest.NewRequest("GET", "http://localhost/api/items/"+item.ID, nil)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	var detail struct {
+		Session struct{ Provider, Model, Effort string }
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Session.Model != "next-model" || detail.Session.Provider != "codex" || detail.Session.Effort != "high" {
+		t.Fatalf("detail: %+v", detail)
+	}
+	w = request(t, s, `{"op":"session","id":"`+item.ID+`","provider":"unknown","model":"bad"}`, "")
+	if w.Code != 400 {
+		t.Fatal("unknown provider accepted")
 	}
 }

@@ -55,6 +55,15 @@
           ><select id="group-filter" aria-label="Filter by group">
             <option value="">All groups</option>
           </select>
+          <select id="status-filter" aria-label="Filter by status">
+            <option value="">All statuses</option>
+            <option value="pending-user">Your turn</option>
+            <option value="agent-acknowledged">Working</option>
+            <option value="pending-agent">Queued</option>
+            <option value="active">Active</option>
+            <option value="backlog">Backlog</option>
+            <option value="proposed">Proposed</option>
+          </select>
         </div>
         <div id="item-list" class="item-list" aria-live="polite"></div>
         <footer class="collection-footer">

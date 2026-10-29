@@ -8,11 +8,15 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,6 +27,8 @@ import (
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/renderer"
+	"github.com/yuin/goldmark/util"
 )
 
 //go:embed static/*
@@ -42,11 +48,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/items/{id}", s.item)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("POST /api/action", s.action)
+	mux.HandleFunc("POST /api/highlight", s.highlight)
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, r *http.Request) {
-		if s.Supervisor == nil {
-			fail(w, 503, fmt.Errorf("model discovery requires --supervise"))
-			return
-		}
 		p := supervisor.Provider(r.URL.Query().Get("provider"))
 		if p != supervisor.ProviderClaude && p != supervisor.ProviderCodex {
 			fail(w, 400, fmt.Errorf("unknown provider"))
@@ -54,7 +57,13 @@ func (s *Server) Handler() http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
-		v, e := s.Supervisor.AvailableModels(ctx, p)
+		var v []supervisor.ModelOption
+		var e error
+		if s.Supervisor != nil {
+			v, e = s.Supervisor.AvailableModels(ctx, p)
+		} else {
+			v, e = supervisor.DiscoverModels(ctx, p)
+		}
 		respond(w, v, e)
 	})
 	mux.HandleFunc("GET /api/diff", func(w http.ResponseWriter, r *http.Request) {
@@ -143,8 +152,13 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"items": items, "reviews": reviews, "instructions": instructions, "brief": brief, "backlog_order": backlog, "child_orders": orders, "paused": paused, "supervised": s.Supervisor != nil, "project": filepath.Base(filepath.Dir(s.Store.Root))}, nil)
 }
 
-var htmlPolicy = bluemonday.UGCPolicy()
-var markdownRenderer = goldmark.New(goldmark.WithExtensions(extension.GFM))
+var htmlPolicy = func() *bluemonday.Policy {
+	p := bluemonday.UGCPolicy()
+	p.AllowAttrs("class").Matching(regexp.MustCompile(`^syntax-(comment|keyword|string|number|literal|name|operator|plain)$`)).OnElements("span")
+	return p
+}()
+var markdownRenderer = goldmark.New(goldmark.WithExtensions(extension.GFM),
+	goldmark.WithRendererOptions(renderer.WithNodeRenderers(util.Prioritized(codeRenderer{}, 100))))
 
 func markdown(content string) string {
 	var b bytes.Buffer
@@ -185,15 +199,22 @@ func (s *Server) item(w http.ResponseWriter, r *http.Request) {
 		turnsHTML[i] = markdown(t.Content)
 	}
 	snapshot, sessionErr := supervisor.ReadSessionSnapshot(s.Store.Root, id)
-	session := map[string]any{"provider": snapshot.Provider, "model": snapshot.Model, "effort": snapshot.Effort, "stale": snapshot.Stale}
+	session := map[string]any{"provider": snapshot.Provider, "model": snapshot.Model, "effort": snapshot.Effort, "stale": snapshot.Stale, "current": snapshot.Current}
 	sessionWarning := ""
 	if sessionErr != nil {
 		sessionWarning = sessionErr.Error()
 	}
+	if snapshot.Current == nil {
+		for i := len(activities) - 1; i >= 0; i-- {
+			a := activities[i]
+			if a.Type == store.ActivityAgentSessionStarted {
+				session["current"] = supervisor.ModelSelection{Provider: supervisor.Provider(a.Result), Model: a.Model, Effort: a.Effort}
+				break
+			}
+		}
+	}
 	dispatchError := supervisor.ReadDispatchError(s.Store.Root, id)
 	if s.Supervisor != nil {
-		p, m, eff, _, _ := s.Supervisor.Session(id)
-		session = map[string]any{"provider": p, "model": m, "effort": eff}
 		dispatchError, _ = s.Supervisor.DispatchError(id)
 	}
 	respond(w, map[string]any{"item": item, "activities": activities, "partials": partials, "live": live, "live_active": active, "draft": draft, "body_html": markdown(item.Body), "turns_html": turnsHTML, "session": session, "session_warning": sessionWarning, "error": dispatchError}, nil)
@@ -207,7 +228,7 @@ func (s *Server) fingerprint() string {
 		if e != nil {
 			return nil
 		}
-		if d.IsDir() && (d.Name() == "drafts" || d.Name() == ".git") {
+		if d.IsDir() && d.Name() == ".git" {
 			return filepath.SkipDir
 		}
 		if !d.IsDir() {
@@ -220,8 +241,44 @@ func (s *Server) fingerprint() string {
 	if s.Supervisor != nil {
 		fmt.Fprint(h, s.Supervisor.DispatchesPaused())
 	}
+	s.workingTreeFingerprint(h)
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
+
+// Include Git changes even when no item or review file changes. Porcelain
+// status names changed/untracked files; their metadata detects further edits
+// while their status stays unchanged. HEAD also invalidates after a commit.
+func (s *Server) workingTreeFingerprint(h io.Writer) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	dir := filepath.Dir(s.Store.Root)
+	revision := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel", "HEAD")
+	revision.Dir = dir
+	revision.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+	out, _ := revision.Output() // Unborn repositories still print their root.
+	root, _, found := strings.Cut(string(out), "\n")
+	if !found {
+		return
+	}
+	fmt.Fprint(h, string(out))
+	status := exec.CommandContext(ctx, "git", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
+	status.Dir = dir
+	status.Env = revision.Env
+	out, err := status.Output()
+	if err != nil {
+		return
+	}
+	fmt.Fprint(h, string(out))
+	for _, entry := range strings.Split(string(out), "\x00") {
+		if len(entry) < 4 {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(root, entry[3:])); err == nil {
+			fmt.Fprintf(h, "%s:%d:%d\n", entry[3:], info.Size(), info.ModTime().UnixNano())
+		}
+	}
+}
+
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	f, ok := w.(http.Flusher)
 	if !ok {

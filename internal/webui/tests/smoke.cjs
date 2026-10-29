@@ -37,6 +37,7 @@ const state = {
     item("kid", "Child", "root"),
     item("kid2", "Second child", "root"),
     item("later", "Saved for later", "", "backlog"),
+    item("archived", "Old conversation", "", "archived"),
   ],
   reviews: [],
   child_orders: { root: ["kid", "kid2"] },
@@ -49,7 +50,8 @@ const state = {
 const calls = [],
   saved = {},
   source = {};
-let rejectDraft = false;
+let rejectDraft = false,
+  rejectModels = false;
 w.EventSource = class {
   constructor() {}
   addEventListener(name, fn) {
@@ -70,7 +72,11 @@ w.fetch = async (path, options) => {
       partials: [],
       live: "Progress text",
       live_active: true,
-      session: { provider: "codex", model: "test" },
+      session: {
+        provider: "codex",
+        model: "test",
+        current: { provider: "codex", model: "current-test", effort: "medium" },
+      },
       error: "",
     };
   } else if (path === "/api/diff")
@@ -87,7 +93,15 @@ w.fetch = async (path, options) => {
         },
       ],
     };
-  else if (path.startsWith("/api/models"))
+  else if (path === "/api/highlight") {
+    const { source } = JSON.parse(options.body);
+    value = [{ class: "syntax-keyword", text: source }];
+  } else if (path.startsWith("/api/models")) {
+    if (rejectModels)
+      return {
+        ok: false,
+        json: async () => ({ error: "Discovery unavailable" }),
+      };
     value = [
       {
         ID: "test",
@@ -95,7 +109,7 @@ w.fetch = async (path, options) => {
         SupportedReasoningEfforts: ["medium"],
       },
     ];
-  else if (path === "/api/action") {
+  } else if (path === "/api/action") {
     const a = JSON.parse(options.body);
     calls.push(a);
     if (a.op === "draft") {
@@ -123,11 +137,22 @@ w.fetch = async (path, options) => {
         ],
       });
     }
+    if (a.op === "session") state.nextSession = a;
+    if (a.op === "rename")
+      state.items.find((i) => i.ID === a.id).Title = a.title;
+    if (a.op === "group")
+      state.items.find((i) => i.ID === a.id).Group = a.group;
+    if (a.op === "reparent")
+      state.items.find((i) => i.ID === a.id).Parent = a.parent;
+    if (a.op === "unparent") state.items.find((i) => i.ID === a.id).Parent = "";
     if (a.op === "pause") state.paused = !state.paused;
     if (a.op === "instructions") state.instructions = a.content;
     if (a.op === "child-order") state.child_orders[a.id] = a.ids;
   }
-  return { ok: true, json: async () => value ?? null };
+  return {
+    ok: true,
+    json: async () => JSON.parse(JSON.stringify(value ?? null)),
+  };
 };
 const wait = (ms = 60) => new Promise((r) => setTimeout(r, ms));
 const clickText = (root, text) => {
@@ -149,12 +174,118 @@ const input = (node, value) => {
     d.querySelector(".detail-header h2").textContent,
     "First conversation",
   );
-  assert.equal(d.querySelectorAll(".item-row").length, 3);
+  assert.equal(d.querySelectorAll(".item-row").length, 4);
   assert.ok(d.querySelector(".markdown strong"));
   assert.equal(d.querySelector(".trace").textContent, "Progress text");
+  assert.ok(
+    d
+      .querySelector("#session-label")
+      .textContent.includes("Current: codex · current-test · medium"),
+  );
+  assert.ok(
+    d
+      .querySelector("#session-label")
+      .textContent.includes("Next turn: codex · test"),
+  );
+  assert.equal(
+    [...d.querySelectorAll("button")].some(
+      (b) => b.textContent === "Start agent",
+    ),
+    false,
+  );
   source.open();
   assert.equal(d.querySelector("#connection").textContent, "Connected");
+  // Inbox includes backlog by default; filters retain family context and archive stays separate.
+  assert.equal(d.querySelector("a[href='#backlog']"), null);
+  assert.ok(
+    !d.querySelector("#item-list").textContent.includes("Old conversation"),
+  );
+  w.location.hash = "archive";
+  await wait();
+  assert.equal(d.querySelectorAll(".item-row").length, 1);
+  assert.equal(d.querySelector("#status-filter").hidden, true);
+  w.location.hash = "inbox/root";
+  await wait();
+  const statuses = d.querySelector("#status-filter");
+  statuses.value = "backlog";
+  statuses.dispatchEvent(new w.Event("change"));
+  assert.equal(d.querySelectorAll(".item-row").length, 1);
+  assert.ok(
+    d.querySelector("#item-list").textContent.includes("Saved for later"),
+  );
+  statuses.value = "";
+  statuses.dispatchEvent(new w.Event("change"));
+  assert.equal(d.querySelectorAll(".item-row").length, 4);
+  assert.equal(
+    [...d.querySelectorAll("button")].some((b) => b.textContent === "More…"),
+    false,
+  );
+  // Inline rename survives invalidation, with Enter to save and Escape to cancel.
+  d.querySelector(".detail-header h2").dispatchEvent(
+    new w.MouseEvent("dblclick", { bubbles: true }),
+  );
+  let titleInput = d.querySelector("[aria-label='Item title']");
+  input(titleInput, "Renamed conversation");
+  source.change();
+  await wait(280);
+  assert.equal(d.querySelector("[aria-label='Item title']"), titleInput);
+  titleInput.dispatchEvent(
+    new w.KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+  );
+  await wait(280);
+  assert.equal(
+    d.querySelector(".detail-header h2").textContent,
+    "Renamed conversation",
+  );
+  d.querySelector(".detail-header h2").dispatchEvent(
+    new w.MouseEvent("dblclick", { bubbles: true }),
+  );
+  titleInput = d.querySelector("[aria-label='Item title']");
+  input(titleInput, "Do not save");
+  titleInput.dispatchEvent(
+    new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+  );
+  await wait(280);
+  assert.equal(calls.filter((c) => c.op === "rename").length, 1);
+  const groupInput = d.querySelector(".inline-picker [name=group]");
+  input(groupInput, "next");
+  groupInput.closest("form").requestSubmit();
+  await wait(280);
+  assert.equal(calls.find((c) => c.op === "group").group, "next");
   const compose = d.querySelector("#composer");
+  saved.root = "External saved draft";
+  source.change();
+  await wait(280);
+  assert.equal(compose.value, "External saved draft");
+  // @ completion inserts text-owned mentions without a separate mention mutation.
+  input(compose, "See @Saved");
+  assert.ok(!d.querySelector(".mention-menu").hidden);
+  compose.dispatchEvent(
+    new w.KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+  );
+  assert.equal(compose.value, "See @later ");
+  input(compose, "Email person@example.com");
+  assert.equal(d.querySelector(".mention-menu").hidden, true);
+  assert.equal(
+    calls.some((c) => c.op === "mention"),
+    false,
+  );
+  const markdownSource =
+    "**bold** *italic* ~~gone~~ `code` [link](https://example.com)\n# Heading\n> Quote\n```js\nconst x = '<script>';\n```";
+  input(compose, markdownSource);
+  const preview = d.querySelector(".composer-preview");
+  assert.equal(preview.textContent, markdownSource);
+  assert.equal(preview.getAttribute("aria-hidden"), "true");
+  assert.equal(preview.querySelector(".md-bold").textContent, "bold");
+  assert.equal(preview.querySelector(".md-italic").textContent, "italic");
+  assert.equal(preview.querySelector(".md-strike").textContent, "gone");
+  assert.equal(preview.querySelector(".md-code").textContent, "code");
+  assert.equal(preview.querySelector(".md-link").textContent, "link");
+  assert.equal(preview.querySelectorAll("script,a").length, 0);
+  assert.ok(preview.querySelector(".md-heading"));
+  await wait(220);
+  assert.ok(preview.querySelector(".syntax-keyword"));
+  assert.equal(preview.textContent, markdownSource);
   input(compose, "Unsent draft");
   source.change();
   await wait(280);
@@ -167,7 +298,7 @@ const input = (node, value) => {
   // Family folding/search and optimistic order payload.
   d.querySelector(".fold").click();
   await wait();
-  assert.equal(d.querySelectorAll(".item-row").length, 1);
+  assert.equal(d.querySelectorAll(".item-row").length, 2);
   input(d.querySelector("#search"), "Child");
   assert.equal(d.querySelectorAll(".item-row").length, 3);
   input(d.querySelector("#search"), "");
@@ -180,6 +311,25 @@ const input = (node, value) => {
     "kid2",
   ]);
   assert.deepEqual(state.child_orders.root, ["kid2", "kid"]);
+  const parentInput = d.querySelector(".inline-picker [name=parent]");
+  input(parentInput, "later");
+  parentInput.closest("form").requestSubmit();
+  await wait(280);
+  assert.equal(calls.find((c) => c.op === "reparent").parent, "later");
+  const rootInput = d.querySelector(".inline-picker [name=parent]");
+  input(rootInput, "");
+  rootInput.closest("form").requestSubmit();
+  await wait(280);
+  assert.equal(calls.find((c) => c.op === "unparent").id, "kid");
+  // Current diff is visible and refreshes with no active review.
+  w.location.hash = "reviews";
+  await wait();
+  assert.ok(d.querySelector(".diff-file").textContent.includes("app.go"));
+  source.change();
+  await wait(280);
+  assert.ok(d.querySelector(".diff-file"));
+  w.location.hash = "inbox/kid";
+  await wait();
   // Review creation, diff selection, anchored comment and parent item navigation.
   clickText(d.querySelector(".toolbar"), "Review");
   await wait(300);
@@ -188,8 +338,11 @@ const input = (node, value) => {
   d.querySelectorAll(".diff-line")[2].dispatchEvent(
     new w.MouseEvent("click", { bubbles: true, shiftKey: true }),
   );
-  input(d.querySelector(".review-compose textarea"), "Review this range");
-  d.querySelector(".review-compose").requestSubmit();
+  const inlineComposer = d.querySelector(".inline-review-compose");
+  assert.ok(inlineComposer);
+  assert.ok(inlineComposer.previousElementSibling.classList.contains("chosen"));
+  input(inlineComposer.querySelector("textarea"), "Review this range");
+  inlineComposer.requestSubmit();
   await wait(300);
   const thread = calls.find((c) => c.op === "review-thread");
   assert.equal(thread.anchor.start_line, 1);
@@ -198,11 +351,10 @@ const input = (node, value) => {
   assert.equal(d.querySelectorAll(".review-thread").length, 1);
   assert.equal(d.querySelector(".review-card>a").hash, "#inbox/kid");
   // Drafts, attachments, and touch range selection.
-  const range = d.querySelector("#diff input[type=checkbox]");
-  range.checked = true;
-  range.dispatchEvent(new w.Event("change"));
   d.querySelectorAll(".diff-line")[1].click();
-  d.querySelectorAll(".diff-line")[2].click();
+  d.querySelectorAll(".diff-line")[2].dispatchEvent(
+    new w.MouseEvent("click", { bubbles: true, shiftKey: true }),
+  );
   clickText(d.querySelector(".review-thread"), "Attach selected code");
   await wait();
   assert.equal(calls.find((c) => c.op === "review-attach").anchor.end_line, 2);
@@ -223,7 +375,25 @@ const input = (node, value) => {
     calls.find((c) => c.op === "review-delete-draft").message_id,
     "m1",
   );
-  input(d.querySelector(".review-compose textarea"), "Not yet added");
+  let liveReply = d.querySelector(".review-compose textarea");
+  input(liveReply, "Not yet added");
+  liveReply.focus();
+  liveReply.setSelectionRange(4, 4);
+  state.reviews[0].threads[0].messages.push({
+    id: "agent-live",
+    actor: "agent",
+    content: "External reply",
+    created_at: now,
+  });
+  source.change();
+  await wait(280);
+  liveReply = d.querySelector(".review-compose textarea");
+  assert.equal(d.activeElement, liveReply);
+  assert.equal(liveReply.selectionStart, 4);
+  assert.equal(liveReply.value, "Not yet added");
+  assert.ok(
+    d.querySelector(".review-page").textContent.includes("External reply"),
+  );
   assert.equal(
     w.localStorage.getItem("ostraka:Demo:review:rev1:new"),
     "Not yet added",
@@ -231,7 +401,12 @@ const input = (node, value) => {
   // Project edits survive live refresh.
   w.location.hash = "project";
   await wait();
+  state.instructions = "External rules";
+  source.change();
+  await wait(280);
+  assert.equal(d.querySelector(".document-editor").value, "External rules");
   input(d.querySelector(".document-editor"), "Edited rules");
+  state.instructions = "Changed elsewhere while editing";
   source.change();
   await wait(280);
   assert.equal(d.querySelector(".document-editor").value, "Edited rules");
@@ -241,16 +416,49 @@ const input = (node, value) => {
   // Modal create and new-session model discovery.
   w.location.hash = "inbox/root";
   await wait();
-  clickText(d.querySelector(".toolbar"), "More…");
+  clickText(d.querySelector(".composer-footer"), "Change model");
   await wait();
-  d.querySelector("[name=operation]").value = "session";
+  assert.equal(d.querySelector("#modal-title").textContent, "Change model");
+  assert.equal(d.querySelector("[name=model]").tagName, "SELECT");
+  assert.equal(d.querySelector("[name=effort]").tagName, "SELECT");
+  assert.equal(d.querySelector("[name=model] option").value, "test");
+  d.querySelector("[name=model]").value = "test";
+  d.querySelector("[name=model]").dispatchEvent(new w.Event("change"));
+  d.querySelector("[name=effort]").value = "medium";
   d.querySelector("#modal-form").requestSubmit();
   await wait();
-  assert.equal(
-    d.querySelector("#modal-title").textContent,
-    "New agent session",
+  assert.equal(state.nextSession.model, "test");
+  assert.equal(state.nextSession.effort, "medium");
+  assert.equal(calls.filter((c) => c.op === "start").length, 0);
+  rejectModels = true;
+  clickText(d.querySelector(".composer-footer"), "Change model");
+  await wait();
+  assert.equal(d.querySelector("#modal-submit").disabled, true);
+  assert.equal(d.querySelector("[name=model]").disabled, true);
+  assert.ok(
+    d
+      .querySelector("#modal-error")
+      .textContent.includes("Discovery unavailable"),
   );
-  assert.equal(d.querySelector("#model-options option").value, "test");
+  rejectModels = false;
+  clickText(d.querySelector("#modal-fields"), "Retry model discovery");
+  await wait();
+  assert.equal(d.querySelector("#modal-submit").disabled, false);
+  assert.equal(d.querySelector("[name=model]").value, "test");
+  d.querySelector("#modal-cancel").click();
+  // Attach mode exposes model selection too, and queuing parked work is explicit.
+  state.supervised = false;
+  source.change();
+  await wait(280);
+  assert.ok(!d.querySelector("#change-model").hidden);
+  w.location.hash = "inbox/later";
+  await wait();
+  clickText(d.querySelector(".toolbar"), "Activate & queue");
+  await wait();
+  assert.ok(
+    d.querySelector("#modal-fields").textContent.includes("pending-agent"),
+  );
+  assert.equal(calls.filter((c) => c.op === "start").length, 0);
   d.querySelector("#modal-cancel").click();
   d.querySelector("#new-item").click();
   assert.ok(d.querySelector("[name=title]"));

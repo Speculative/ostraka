@@ -59,26 +59,29 @@ async function api(op, fields = {}) {
     assert.equal(w.hacked, undefined);
     assert.equal(d.querySelector(".markdown script"), null);
     const compose = d.querySelector("#composer");
-    compose.value = "Persistent draft";
+    const draftSource = "**Persistent** draft with `code` and ~~strike~~";
+    compose.value = draftSource;
     compose.dispatchEvent(new w.Event("input"));
+    assert.equal(d.querySelector(".composer-preview").textContent, draftSource);
     await wait(850);
     assert.equal(
       (await fetch(`${origin}/api/items/${root.ID}`).then((r) => r.json()))
         .draft,
-      "Persistent draft",
+      draftSource,
     );
     d.querySelector(".composer").requestSubmit();
     await wait(350);
     assert.equal(d.querySelector("#composer").value, "");
+    assert.equal(d.querySelector(".composer-preview").textContent, "");
     assert.equal(
       (
         await fetch(`${origin}/api/items/${root.ID}`).then((r) => r.json())
       ).item.Turns.at(-1).Content,
-      "Persistent draft",
+      draftSource,
     );
     btn(d.querySelector(".toolbar"), "＋ Child");
     await wait();
-    assert.equal(d.querySelector("[name=group]"), null);
+    assert.equal(d.querySelector("#modal [name=group]"), null);
     d.querySelector("[name=title]").value = "Integration child";
     d.querySelector("#modal-form").requestSubmit();
     await wait(350);

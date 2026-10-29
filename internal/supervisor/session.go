@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -96,15 +97,19 @@ func loadItemSession(root, itemID string) (sessionFile, error) {
 	if err != nil {
 		return sessionFile{}, err
 	}
+	return itemSession(sessions, itemID), nil
+}
+
+func itemSession(sessions sessionsFile, itemID string) sessionFile {
 	session, ok := sessions.Sessions[itemID]
 	if !ok {
 		provider := sessions.DefaultProvider
 		if !provider.valid() {
 			provider = ProviderClaude
 		}
-		return sessionFile{Provider: provider, Model: sessions.ModelDefaults[provider], Effort: sessions.EffortDefaults[provider]}, nil
+		return sessionFile{Provider: provider, Model: sessions.ModelDefaults[provider], Effort: sessions.EffortDefaults[provider]}
 	}
-	return session, nil
+	return session
 }
 
 func loadEffortDefault(root string, provider Provider) (string, error) {
@@ -123,56 +128,84 @@ func loadModelDefault(root string, provider Provider) (string, error) {
 	return sessions.ModelDefaults[provider], nil
 }
 
-func saveModelDefault(root string, provider Provider, model string) error {
+// mutateSessions protects the full read/modify/write transaction; readers see
+// atomic snapshots, including when the web server attaches to the TUI.
+func mutateSessions(root string, update func(*sessionsFile) error) error {
+	unlock, err := lockSessions(root)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	sessions, err := loadSessions(root)
 	if err != nil {
 		return err
 	}
-	if sessions.ModelDefaults == nil {
-		sessions.ModelDefaults = make(map[Provider]string)
-	}
-	sessions.ModelDefaults[provider] = model
-	b, err := json.MarshalIndent(sessions, "", "  ")
+	before, err := json.Marshal(sessions)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(sessionPath(root), b, 0644)
-}
-
-func saveEffortDefault(root string, provider Provider, effort string) error {
-	sessions, err := loadSessions(root)
+	if err := update(&sessions); err != nil {
+		return err
+	}
+	after, err := json.Marshal(sessions)
 	if err != nil {
 		return err
 	}
-	if sessions.EffortDefaults == nil {
-		sessions.EffortDefaults = make(map[Provider]string)
+	if bytes.Equal(before, after) {
+		return nil
 	}
-	sessions.EffortDefaults[provider] = effort
-	// The most recently completed provider/model/effort choice is the
-	// default for items which do not have their own session yet.
-	sessions.DefaultProvider = provider
-	b, err := json.MarshalIndent(sessions, "", "  ")
+	data, err := json.MarshalIndent(sessions, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(sessionPath(root), b, 0644)
+	return writeAtomic(sessionPath(root), data)
 }
 
 func saveItemSession(root, itemID string, session sessionFile) error {
-	sessions, err := loadSessions(root)
-	if err != nil {
-		return err
-	}
 	if !session.Provider.valid() {
 		return fmt.Errorf("unknown provider %q", session.Provider)
 	}
-	session.UpdatedAt = time.Now().UTC()
-	sessions.Sessions[itemID] = session
-	b, err := json.MarshalIndent(sessions, "", "  ")
-	if err != nil {
-		return err
+	return mutateSessions(root, func(s *sessionsFile) error {
+		session.UpdatedAt = time.Now().UTC()
+		s.Sessions[itemID] = session
+		return nil
+	})
+}
+
+// SelectNextSession sets the next turn's provider/model in a fresh context.
+// It never starts or interrupts an agent and is safe from an attached server.
+func SelectNextSession(root, itemID string, provider Provider, model, effort string) error {
+	if !provider.valid() {
+		return fmt.Errorf("unknown provider %q", provider)
 	}
-	return os.WriteFile(sessionPath(root), b, 0644)
+	return mutateSessions(root, func(s *sessionsFile) error {
+		s.Sessions[itemID] = sessionFile{Provider: provider, Model: model, Effort: effort, UpdatedAt: time.Now().UTC()}
+		if s.ModelDefaults == nil {
+			s.ModelDefaults = make(map[Provider]string)
+		}
+		if s.EffortDefaults == nil {
+			s.EffortDefaults = make(map[Provider]string)
+		}
+		s.ModelDefaults[provider] = model
+		s.EffortDefaults[provider] = effort
+		s.DefaultProvider = provider
+		return nil
+	})
+}
+
+func prepareItemSession(root, itemID string) (sessionFile, error) {
+	var selected sessionFile
+	err := mutateSessions(root, func(s *sessionsFile) error {
+		selected = itemSession(*s, itemID)
+		if sessionIsStale(selected, time.Now()) {
+			selected.SessionID = ""
+			selected.PromptedTurns = nil
+			selected.UpdatedAt = time.Now().UTC()
+			s.Sessions[itemID] = selected
+		}
+		return nil
+	})
+	return selected, err
 }
 
 func sessionIsStale(session sessionFile, now time.Time) bool {

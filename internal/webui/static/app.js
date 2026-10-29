@@ -34,7 +34,6 @@
   };
   const views = {
     inbox: ["◫", "Inbox"],
-    backlog: ["▤", "Backlog"],
     archive: ["▧", "Archive"],
     reviews: ["⌘", "Reviews"],
     project: ["◇", "Project"],
@@ -53,6 +52,7 @@
   let stateLoaded = false;
   let refreshRunning = false,
     refreshAgain = false;
+  const editedDrafts = new Set();
   const drafts = new Map(),
     draftJobs = new Map(),
     projectDrafts = new Map();
@@ -134,13 +134,7 @@
     return `${Math.floor(seconds / 86400)}d`;
   }
   const itemByID = (id) => state.items.find((i) => i.ID === id);
-  const channel = (item) =>
-    item.Status === "archived"
-      ? "archive"
-      : item.Status === "backlog" ||
-          (item.Parent && itemByID(item.Parent)?.Status === "backlog")
-        ? "backlog"
-        : "inbox";
+  const channel = (item) => (item.Status === "archived" ? "archive" : "inbox");
   function route() {
     const parts = location.hash.slice(1).split("/");
     view = views[parts[0]] ? parts[0] : "inbox";
@@ -158,6 +152,7 @@
     $("#view-title").textContent = views[view][1];
     $("#new-item").hidden = view === "project";
     $(".filters").hidden = view === "project";
+    $("#status-filter").hidden = view !== "inbox";
     renderNavigation();
     renderList();
     if (stateLoaded) renderDetail().catch(report);
@@ -189,6 +184,9 @@
     const q = $("#search").value.trim().toLowerCase(),
       group = $("#group-filter").value;
     return (
+      (view !== "inbox" ||
+        !$("#status-filter").value ||
+        item.Status === $("#status-filter").value) &&
       (!group || item.Group === group) &&
       (!q ||
         `${item.ID} ${item.Title} ${item.Body} ${(item.Turns || []).map((t) => t.Content).join(" ")}`
@@ -252,7 +250,7 @@
           el(
             "div",
             "empty",
-            "No active reviews. Start one from a conversation.",
+            "No active reviews. Current changes are shown in the reading pane.",
           ),
         );
       $("#list-count").textContent = `${reviews.length} reviews`;
@@ -271,20 +269,28 @@
       archived: 6,
     };
     const rank = (i) =>
-      Math.min(
-        priority[i.Status] ?? 9,
-        ...childrenOf(i.ID)
-          .filter((c) => visibleIDs.has(c.ID))
-          .map((c) => priority[c.Status] ?? 9),
-      );
-    roots.sort((a, b) =>
-      view === "backlog"
-        ? ((state.backlog_order || []).indexOf(a.ID) + 1 || 99999) -
-          ((state.backlog_order || []).indexOf(b.ID) + 1 || 99999)
-        : view === "archive"
-          ? a.Created.localeCompare(b.Created)
-          : rank(a) - rank(b) || a.Created.localeCompare(b.Created),
-    );
+      i.Status === "backlog"
+        ? priority.backlog
+        : Math.min(
+            priority[i.Status] ?? 9,
+            ...childrenOf(i.ID)
+              .filter((c) => visibleIDs.has(c.ID))
+              .map((c) => priority[c.Status] ?? 9),
+          );
+    roots.sort((a, b) => {
+      if (view === "archive") return a.Created.localeCompare(b.Created);
+      const attention = rank(a) - rank(b);
+      if (attention) return attention;
+      if (a.Status === "backlog" && b.Status === "backlog") {
+        const order = state.backlog_order || [];
+        return (
+          (order.indexOf(a.ID) < 0 ? 99999 : order.indexOf(a.ID)) -
+            (order.indexOf(b.ID) < 0 ? 99999 : order.indexOf(b.ID)) ||
+          a.Created.localeCompare(b.Created)
+        );
+      }
+      return a.Created.localeCompare(b.Created);
+    });
     let count = 0;
     roots.forEach((root) => {
       let children = childrenOf(root.ID).filter((i) => visibleIDs.has(i.ID));
@@ -298,9 +304,13 @@
       if (
         !folded.has(root.ID) ||
         $("#search").value ||
-        $("#group-filter").value
+        $("#group-filter").value ||
+        (view === "inbox" && $("#status-filter").value)
       )
-        (rootMatches ? children : matchedChildren).forEach((child) => {
+        (rootMatches && !(view === "inbox" && $("#status-filter").value)
+          ? children
+          : matchedChildren
+        ).forEach((child) => {
           list.append(itemRow(child, true, 0));
           count++;
         });
@@ -423,7 +433,23 @@
     if (token !== revision || selected !== id) return;
     current = data;
     if (detailID !== id) buildItem(data);
-    renderItemHeader(data);
+    const composer = $("#composer");
+    if (!editedDrafts.has(id) && document.activeElement !== composer) {
+      const draft = data.draft || "";
+      if (composer.value !== draft) {
+        composer.value = draft;
+        composer.renderPreview();
+      }
+      drafts.set(id, draft);
+      if (draft) storage.set(draftKey(id), draft);
+      else storage.remove(draftKey(id));
+    }
+    const header = $(".detail-header");
+    if (
+      !header.contains(document.activeElement) ||
+      !document.activeElement.matches("input,select")
+    )
+      renderItemHeader(data);
     renderTimeline(data);
   }
   function buildItem(data) {
@@ -447,10 +473,13 @@
     textarea.id = "composer";
     textarea.placeholder = "Continue the conversation…";
     textarea.setAttribute("aria-label", "Message");
+    mentionCompletion(textarea);
     const id = data.item.ID,
       local = storage.get(draftKey(id));
-    if (!drafts.has(id))
+    if (!drafts.has(id)) {
       drafts.set(id, local !== null ? local : data.draft || "");
+      if (local !== null && local !== (data.draft || "")) editedDrafts.add(id);
+    }
     textarea.value = drafts.get(id);
     textarea.addEventListener("input", () => {
       drafts.set(id, textarea.value);
@@ -473,8 +502,12 @@
     const send = el("button", "primary", "Send ↑");
     send.type = "submit";
     append(actions, draftStatus, send);
-    append(footer, info, actions);
-    append(form, textarea, footer);
+    const changeModel = button("Change model", () =>
+      sessionModal(current.item),
+    );
+    changeModel.id = "change-model";
+    append(footer, info, changeModel, actions);
+    append(form, inlineMarkdownEditor(textarea), footer);
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const content = textarea.value;
@@ -487,12 +520,14 @@
         if (textarea.value === content) {
           textarea.value = "";
           drafts.set(id, "");
+          editedDrafts.delete(id);
           storage.remove(draftKey(id));
         } else {
           drafts.set(id, textarea.value);
           storage.set(draftKey(id), textarea.value);
           queueDraft(id, textarea.value);
         }
+        textarea.renderPreview();
         toast("Message sent");
         scheduleRefresh();
       } catch (error) {
@@ -511,6 +546,7 @@
     });
   }
   function queueDraft(id, content) {
+    editedDrafts.add(id);
     let job = draftJobs.get(id);
     if (!job) {
       job = { pending: null, timer: null, chain: Promise.resolve() };
@@ -545,6 +581,21 @@
   function renderItemHeader(data) {
     const i = data.item,
       header = $(".detail-header");
+    const signature = JSON.stringify([
+      i.ID,
+      i.Title,
+      i.Parent,
+      i.Group,
+      i.Status,
+      i.Mode,
+      i.Goal,
+      data.session,
+      data.error,
+      state.supervised,
+      state.items.map((item) => [item.ID, item.Title, item.Group, item.Parent]),
+    ]);
+    if (header.dataset.signature === signature) return;
+    header.dataset.signature = signature;
     header.replaceChildren();
     const crumbs = el("div", "breadcrumb");
     append(
@@ -600,19 +651,27 @@
       mode,
       button("＋ Child", () => newItem(i.Parent || i.ID)),
       button("Review", async () => {
-        await action("review-create", { id: i.ID });
+        reviewTarget = i.ID;
+        await targetReview(i.ID);
         location.hash = "reviews";
       }),
-      button("More…", () => itemOptions(i)),
     );
     if (state.supervised && i.Status === "agent-acknowledged")
       toolbar.append(
         button("Stop", () => action("interrupt", { id: i.ID }), "danger"),
       );
     if (!["agent-acknowledged", "pending-agent", "archived"].includes(i.Status))
-      toolbar.append(
-        button("Start agent", () => action("start", { id: i.ID })),
-      );
+      if (["backlog", "proposed"].includes(i.Status) || data.error)
+        toolbar.append(
+          button(
+            i.Status === "proposed"
+              ? "Accept & queue"
+              : i.Status === "backlog"
+                ? "Activate & queue"
+                : "Retry agent",
+            () => queueAgent(i),
+          ),
+        );
     if (i.Goal)
       toolbar.append(
         button("End goal", () => action("end-goal", { id: i.ID })),
@@ -623,21 +682,47 @@
         button("↑", () => reorder(i, -1)),
         button("↓", () => reorder(i, 1)),
       );
-    if (!i.Parent && view === "backlog")
+    if (!i.Parent && i.Status === "backlog")
       append(
         toolbar,
         button("↑", () => action("move-backlog", { id: i.ID, delta: -1 })),
         button("↓", () => action("move-backlog", { id: i.ID, delta: 1 })),
       );
-    append(header, crumbs, el("h2", "", i.Title), toolbar);
-    $("#session-label").textContent =
-      [data.session?.provider, data.session?.model, data.session?.effort]
+    const title = el("h2", "editable-title", i.Title);
+    title.tabIndex = 0;
+    title.title = "Double-click to rename (or press Enter)";
+    title.setAttribute(
+      "aria-label",
+      `${i.Title}. Double-click or press Enter to rename`,
+    );
+    title.addEventListener("dblclick", () => renameTitle(title, i));
+    title.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.target === title) {
+        e.preventDefault();
+        renameTitle(title, i);
+      }
+    });
+    append(header, crumbs, title, toolbar, itemPlacement(i));
+    toolbar.append(button("Delete", () => deleteItem(i), "danger"));
+    const sessionLabel = $("#session-label"),
+      session = data.session || {};
+    const describe = (selection) =>
+      [
+        selection.provider,
+        selection.model || "Provider default",
+        selection.effort,
+      ]
         .filter(Boolean)
-        .join(" · ") ||
-      (state.supervised
-        ? "Default agent session"
-        : "Attached to project · agent controls in the TUI");
-    $("#session-label").title = $("#session-label").textContent;
+        .join(" · ");
+    sessionLabel.replaceChildren(
+      el(
+        "span",
+        "",
+        `Current: ${session.current ? describe(session.current) : "Not yet reported"}${i.Status === "agent-acknowledged" ? " (running)" : ""}`,
+      ),
+      el("span", "", `Next turn: ${describe(session)}`),
+    );
+    sessionLabel.title = sessionLabel.textContent;
   }
   async function reorder(i, delta) {
     const expected =
@@ -844,6 +929,7 @@
       if (["title", "content"].includes(f.name)) input.required = true;
       append(label, title, input);
       container.append(label);
+      if (f.type === "textarea") mentionCompletion(input);
     });
     modalHandler = onSubmit;
     if (!dialog.open) dialog.showModal();
@@ -895,171 +981,498 @@
       "Create",
     );
   }
-  function itemOptions(item) {
-    const choices = [
-      ["rename", "Rename"],
-      ["group", "Change group"],
-      ["reparent", "Move under another item"],
-      ["unparent", "Make a root item"],
-      ["mention", "Mention another item"],
-      ["session", "New agent session"],
-      ["delete", "Delete item"],
-    ];
+  function renameTitle(title, item) {
+    if ($("input", title)) return;
+    const input = el("input", "title-input");
+    input.value = item.Title;
+    input.setAttribute("aria-label", "Item title");
+    title.replaceChildren(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      try {
+        if (save && input.value.trim() && input.value !== item.Title)
+          await action("rename", { id: item.ID, title: input.value.trim() });
+      } catch (e) {
+        report(e);
+      }
+      title.textContent = itemByID(item.ID)?.Title || item.Title;
+      scheduleRefresh();
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        finish(e.key === "Enter");
+      }
+    });
+    input.addEventListener("blur", () => finish(true));
+  }
+  function deleteItem(item) {
     showModal(
-      "Conversation actions",
-      [
-        field(
-          "operation",
-          "Action",
-          "select",
-          "rename",
-          choices
-            .filter(([value]) => value !== "session" || state.supervised)
-            .map(([value, label]) => ({ value, label })),
-        ),
-      ],
-      async ({ operation }) => {
-        // Close this picker before opening the selected form.
-        setTimeout(() => {
-          if (operation === "rename")
-            showModal(
-              "Rename conversation",
-              [field("title", "Title", "text", item.Title)],
-              (v) => action("rename", { id: item.ID, ...v }),
-            );
-          if (operation === "group")
-            showModal(
-              "Change group",
-              [field("group", "Group (empty clears it)", "text", item.Group)],
-              (v) => action("group", { id: item.ID, ...v }),
-              "Save",
-              "Subthreads inherit the group of their root.",
-            );
-          if (operation === "unparent")
-            action("unparent", { id: item.ID }).catch(report);
-          if (operation === "mention" || operation === "reparent") {
-            const candidates = state.items.filter(
-              (i) => i.ID !== item.ID && (operation === "mention" || !i.Parent),
-            );
-            showModal(
-              operation === "mention" ? "Mention an item" : "Move conversation",
-              [
-                field(
-                  "parent",
-                  "Target item",
-                  "select",
-                  "",
-                  candidates.map((i) => ({
-                    value: i.ID,
-                    label: `${i.ID} · ${i.Title}`,
-                  })),
-                ),
-                ...(operation === "reparent"
-                  ? [
-                      field(
-                        "flatten",
-                        "Move this item’s children into the destination family",
-                        "checkbox",
-                        false,
-                      ),
-                    ]
-                  : []),
-              ],
-              (v) => action(operation, { id: item.ID, ...v }),
-            );
-          }
-          if (operation === "delete")
-            showModal(
-              "Delete conversation",
-              [],
-              async () => {
-                await action("delete", { id: item.ID });
-                location.hash = view;
-              },
-              "Delete permanently",
-              `Permanently delete “${item.Title}” and its stored conversation? This cannot be undone.`,
-            );
-          if (operation === "session") sessionModal(item);
-        }, 0);
+      "Delete conversation",
+      [],
+      async () => {
+        await action("delete", { id: item.ID });
+        location.hash = view;
       },
-      "Continue",
+      "Delete permanently",
+      `Permanently delete “${item.Title}” and its stored conversation? This cannot be undone.`,
     );
   }
+  function itemPlacement(item) {
+    const placement = el("div", "item-placement");
+    function picker(label, name, value, options, submit) {
+      const form = el("form", "inline-picker"),
+        wrapper = el("label");
+      const input = el("input"),
+        list = el("datalist");
+      list.id = `${name}-options`;
+      input.name = name;
+      input.value = value;
+      input.setAttribute("list", list.id);
+      input.setAttribute("aria-label", label);
+      input.placeholder = name === "group" ? "No group" : "Root item";
+      options.forEach(([value, title]) =>
+        list.append(new Option(title, value)),
+      );
+      append(wrapper, el("span", "", label), input);
+      append(form, wrapper, list);
+      if (name === "parent" && childrenOf(item.ID).length) {
+        const flatten = el("label", "checkbox"),
+          check = el("input");
+        check.type = "checkbox";
+        check.name = "flatten";
+        append(flatten, check, document.createTextNode("Move children too"));
+        form.append(flatten);
+      }
+      const save = el("button", "", name === "group" ? "Set group" : "Move");
+      save.type = "submit";
+      form.append(save);
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        save.disabled = true;
+        try {
+          await submit(input.value.trim(), form);
+          input.blur();
+          scheduleRefresh();
+        } catch (error) {
+          report(error);
+        } finally {
+          save.disabled = false;
+        }
+      });
+      placement.append(form);
+    }
+    picker(
+      "Group",
+      "group",
+      item.Group || "",
+      [...new Set(state.items.map((i) => i.Group).filter(Boolean))]
+        .sort()
+        .map((g) => [g, g]),
+      (group) => action("group", { id: item.ID, group }),
+    );
+    picker(
+      "Move under",
+      "parent",
+      item.Parent || "",
+      state.items
+        .filter((i) => i.ID !== item.ID && !i.Parent)
+        .map((i) => [i.ID, i.Title]),
+      (parent, form) => {
+        if (!parent) return action("unparent", { id: item.ID });
+        const target =
+          itemByID(parent) ||
+          state.items.find((i) => i.Title === parent && !i.Parent);
+        if (!target || target.ID === item.ID || target.Parent)
+          throw new Error("Choose a root item from the picker.");
+        return action("reparent", {
+          id: item.ID,
+          parent: target.ID,
+          flatten: !!$("[name=flatten]", form)?.checked,
+        });
+      },
+    );
+    return placement;
+  }
+  function mentionCompletion(input) {
+    const menu = el("div", "mention-menu");
+    menu.hidden = true;
+    menu.setAttribute("role", "listbox");
+    menu.id = `mentions-${++mentionSequence}`;
+    input.setAttribute("aria-controls", menu.id);
+    input.setAttribute("aria-autocomplete", "list");
+    let start = 0,
+      end = 0,
+      active = 0,
+      candidates = [];
+    const close = () => {
+      menu.hidden = true;
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
+    };
+    const choose = (item) => {
+      input.setRangeText(`@${item.ID} `, start, end, "end");
+      close();
+      input.focus();
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const highlight = () => {
+      $$("button", menu).forEach((b, n) =>
+        b.setAttribute("aria-selected", String(n === active)),
+      );
+      input.setAttribute("aria-activedescendant", `${menu.id}-${active}`);
+    };
+    const update = () => {
+      if (!input.isConnected) return;
+      const caret = input.selectionStart,
+        before = input.value.slice(0, caret);
+      const match = before.match(/(?:^|\s)@([^\s@]*)$/);
+      if (!match || input.selectionStart !== input.selectionEnd) {
+        close();
+        return;
+      }
+      start = caret - match[1].length - 1;
+      end = caret;
+      const query = match[1].toLowerCase();
+      candidates = state.items
+        .filter(
+          (i) =>
+            i.ID !== selected &&
+            `${i.ID} ${i.Title}`.toLowerCase().includes(query),
+        )
+        .slice(0, 8);
+      if (!candidates.length) {
+        close();
+        return;
+      }
+      active = 0;
+      menu.replaceChildren();
+      candidates.forEach((item, n) => {
+        const option = button(`@${item.ID} · ${item.Title}`, () =>
+          choose(item),
+        );
+        option.id = `${menu.id}-${n}`;
+        option.setAttribute("role", "option");
+        option.addEventListener("mousedown", (e) => e.preventDefault());
+        menu.append(option);
+      });
+      if (!menu.isConnected)
+        (input.closest(".markdown-editor") || input).after(menu);
+      menu.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+      highlight();
+    };
+    input.addEventListener("input", update);
+    input.addEventListener("click", update);
+    input.addEventListener("keydown", (e) => {
+      if (menu.hidden) return;
+      if (
+        ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key) &&
+        !e.ctrlKey &&
+        !e.metaKey
+      ) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (e.key === "Escape") close();
+        else if (e.key === "Enter" || e.key === "Tab")
+          choose(candidates[active]);
+        else {
+          active =
+            (active + (e.key === "ArrowDown" ? 1 : -1) + candidates.length) %
+            candidates.length;
+          highlight();
+        }
+      }
+    });
+    input.addEventListener("blur", () => setTimeout(close, 180));
+  }
+  let mentionSequence = 0;
+  function queueAgent(item) {
+    showModal(
+      "Queue agent without a new message?",
+      [],
+      () => action("start", { id: item.ID }),
+      "Queue agent",
+      `The agent will continue using this conversation's existing messages. “${item.Title}” will become Queued (pending-agent)${["backlog", "proposed"].includes(item.Status) ? " and leave its parked state" : ""}. To give new instructions, cancel and send a message instead.`,
+    );
+  }
+
+  // Keep a native textarea for selection, undo, IME, paste and accessibility.
+  // A matching, noninteractive layer styles the source without consuming any
+  // Markdown characters or inserting HTML from the message.
+  const syntaxCache = new Map();
+  async function syntaxTokens(source, language) {
+    const key = JSON.stringify([source, language]);
+    if (!syntaxCache.has(key)) {
+      if (syntaxCache.size >= 64)
+        syntaxCache.delete(syntaxCache.keys().next().value);
+      const pending = request("/api/highlight", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source, language }),
+      });
+      syntaxCache.set(key, pending);
+      pending.catch(() => syntaxCache.delete(key));
+    }
+    return syntaxCache.get(key);
+  }
+  function applySyntaxLines(nodes, tokens) {
+    const fragments = nodes.map(() => document.createDocumentFragment());
+    let row = 0;
+    tokens.forEach((token) =>
+      token.text.split("\n").forEach((part, i) => {
+        if (i) row++;
+        if (part && fragments[row])
+          fragments[row].append(el("span", token.class, part));
+      }),
+    );
+    nodes.forEach((node, i) => {
+      if (fragments[i].textContent === node.textContent)
+        node.replaceChildren(fragments[i]);
+    });
+  }
+  function inlineMarkdownEditor(textarea) {
+    const editor = el("div", "markdown-editor"),
+      preview = el("pre", "composer-preview");
+    preview.setAttribute("aria-hidden", "true");
+    const marker = (parent, text) =>
+      parent.append(el("span", "md-marker", text));
+    function inline(parent, text, depth = 0) {
+      if (depth > 12) {
+        parent.append(document.createTextNode(text));
+        return;
+      }
+      let at = 0,
+        plain = "";
+      const flush = () => {
+        if (plain) parent.append(document.createTextNode(plain));
+        plain = "";
+      };
+      while (at < text.length) {
+        if (text[at] === "\\" && at + 1 < text.length) {
+          plain += text.slice(at, at + 2);
+          at += 2;
+          continue;
+        }
+        const rest = text.slice(at);
+        const link = rest.match(/^\[([^\]\n]+)\]\(([^)\n]+)\)/);
+        if (link) {
+          flush();
+          marker(parent, "[");
+          const label = el("span", "md-link");
+          inline(label, link[1], depth + 1);
+          parent.append(label);
+          marker(parent, `](${link[2]})`);
+          at += link[0].length;
+          continue;
+        }
+        const token = rest.match(/^(`+|\*\*\*|___|\*\*|__|~~|\*|_)/)?.[0];
+        let end = token ? text.indexOf(token, at + token.length) : -1;
+        if (token && !token.startsWith("`")) {
+          if (
+            /\s/.test(text[at + token.length] || " ") ||
+            (token.includes("_") && /[\p{L}\p{N}]/u.test(text[at - 1] || ""))
+          )
+            end = -1;
+          while (
+            end >= 0 &&
+            (text[end - 1] === "\\" || /\s/.test(text[end - 1]))
+          )
+            end = text.indexOf(token, end + token.length);
+        }
+        if (end > at + (token?.length || 0)) {
+          flush();
+          marker(parent, token);
+          const cls = token.startsWith("`")
+            ? "md-code"
+            : token === "~~"
+              ? "md-strike"
+              : token.length === 3
+                ? "md-bold md-italic"
+                : token.length === 2
+                  ? "md-bold"
+                  : "md-italic";
+          const content = el("span", cls);
+          if (token.startsWith("`"))
+            content.textContent = text.slice(at + token.length, end);
+          else inline(content, text.slice(at + token.length, end), depth + 1);
+          parent.append(content);
+          marker(parent, token);
+          at = end + token.length;
+          continue;
+        }
+        plain += text[at++];
+      }
+      flush();
+    }
+    let highlightTimer,
+      previewGeneration = 0;
+    textarea.renderPreview = () => {
+      const version = ++previewGeneration;
+      clearTimeout(highlightTimer);
+      const codeBlocks = [];
+      let block = null;
+      const fragment = document.createDocumentFragment();
+      let fence = "";
+      const lines = textarea.value.split("\n");
+      lines.forEach((line, index) => {
+        const node = el("span", "md-line"),
+          delimiter = line.match(/^ {0,3}(`{3,}|~{3,})/);
+        if (
+          delimiter &&
+          (!fence ||
+            (delimiter[1][0] === fence[0] &&
+              delimiter[1].length >= fence.length))
+        ) {
+          marker(node, line);
+          if (!fence) {
+            block = {
+              language: line.slice(delimiter[0].length).trim().split(/\s/)[0],
+              nodes: [],
+            };
+            codeBlocks.push(block);
+          }
+          fence = fence ? "" : delimiter[1];
+        } else if (fence) {
+          const code = el("span", "md-code", line);
+          block.nodes.push(code);
+          node.append(code);
+        } else {
+          const prefix = line.match(
+            /^( {0,3}(?:#{1,6} |(?:> ?)+|[-+*] |\d+\. ))/,
+          );
+          if (prefix) {
+            marker(node, prefix[0]);
+            if (prefix[0].includes("#")) node.classList.add("md-heading");
+            if (prefix[0].includes(">")) node.classList.add("md-quote");
+          }
+          inline(node, line.slice(prefix?.[0].length || 0));
+        }
+        fragment.append(node);
+        if (index < lines.length - 1)
+          fragment.append(document.createTextNode("\n"));
+      });
+      // A final line keeps scroll and caret geometry identical after Enter.
+      if (textarea.value.endsWith("\n"))
+        fragment.append(document.createTextNode("\u200b"));
+      preview.replaceChildren(fragment);
+      highlightTimer = setTimeout(() => {
+        codeBlocks.forEach(async (block) => {
+          if (!block.nodes.length) return;
+          try {
+            const tokens = await syntaxTokens(
+              block.nodes.map((n) => n.textContent).join("\n"),
+              block.language,
+            );
+            if (version === previewGeneration && preview.isConnected)
+              applySyntaxLines(block.nodes, tokens);
+          } catch {
+            /* Keep exact source readable while offline. */
+          }
+        });
+      }, 160);
+      preview.scrollTop = textarea.scrollTop;
+      preview.scrollLeft = textarea.scrollLeft;
+    };
+    textarea.addEventListener("input", textarea.renderPreview);
+    textarea.addEventListener("scroll", () => {
+      preview.scrollTop = textarea.scrollTop;
+      preview.scrollLeft = textarea.scrollLeft;
+    });
+    textarea.renderPreview();
+    append(editor, preview, textarea);
+    return editor;
+  }
+
   function sessionModal(item) {
     const session = current?.session || {};
     showModal(
-      "New agent session",
+      "Change model",
       [
         field("provider", "Provider", "select", session.provider || "codex", [
           "codex",
           "claude",
         ]),
-        field(
-          "model",
-          "Model (empty uses provider default)",
-          "text",
-          session.model,
-        ),
-        field(
-          "effort",
-          "Reasoning effort (empty uses default)",
-          "text",
-          session.effort,
-        ),
+        field("model", "Model", "select"),
+        field("effort", "Reasoning effort", "select"),
       ],
-      (v) => action("session", { id: item.ID, ...v }),
-      "Start session",
-      "Starts a fresh session using the chosen provider and model.",
+      async (values) => {
+        if (loading || !models.some((m) => m.ID === values.model))
+          throw new Error("Choose an available model first.");
+        await action("session", { id: item.ID, ...values });
+        toast("Model saved for the next turn");
+      },
+      "Apply to next turn",
+      "Applies on the next turn in a fresh provider session. The running turn continues with its current model. This does not queue an agent.",
     );
-    const provider = $("[name=provider]", $("#modal")),
-      model = $("[name=model]", $("#modal")),
-      effort = $("[name=effort]", $("#modal"));
-    const options = el("datalist");
-    options.id = "model-options";
-    $("#modal-fields").append(options);
-    model.setAttribute("list", options.id);
-    const efforts = el("datalist");
-    efforts.id = "effort-options";
-    $("#modal-fields").append(efforts);
-    effort.setAttribute("list", efforts.id);
-    let models = [];
-    const updateEfforts = () => {
-      const selectedModel = models.find((m) => m.ID === model.value);
-      efforts.replaceChildren(
-        ...(selectedModel?.SupportedReasoningEfforts || []).map(
-          (v) => new Option(v, v),
-        ),
+    const provider = $("#modal [name=provider]"),
+      model = $("#modal [name=model]"),
+      effort = $("#modal [name=effort]");
+    let models = [],
+      loading = true,
+      generation = 0;
+    function updateEfforts(preferred = "") {
+      const option = models.find((m) => m.ID === model.value);
+      const choices = option?.SupportedReasoningEfforts || [];
+      effort.replaceChildren(
+        new Option("Provider default", ""),
+        ...choices.map((v) => new Option(v, v)),
       );
-    };
-    const load = async () => {
-      const p = provider.value;
-      options.replaceChildren();
+      effort.value = choices.includes(preferred)
+        ? preferred
+        : option?.DefaultReasoningEffort || "";
+      if (!choices.includes(effort.value)) effort.value = "";
+    }
+    async function load() {
+      const token = ++generation,
+        selectedProvider = provider.value;
+      loading = true;
+      model.disabled = effort.disabled = true;
+      $("#modal-submit").disabled = true;
+      model.replaceChildren(new Option("Loading models…", ""));
+      effort.replaceChildren(new Option("Provider default", ""));
+      $("#modal-error").hidden = true;
       try {
         const result = await request(
-          `/api/models?provider=${encodeURIComponent(p)}`,
+          `/api/models?provider=${encodeURIComponent(selectedProvider)}`,
         );
-        if (provider.value !== p) return;
+        if (token !== generation || !$("#modal").open || !model.isConnected)
+          return;
         models = Array.isArray(result) ? result : [];
-        options.replaceChildren(
+        if (!models.length)
+          throw new Error("No models were returned. Retry model discovery.");
+        model.replaceChildren(
           ...models.map(
             (m) =>
               new Option(m.DisplayName || m.ID || "Provider default", m.ID),
           ),
         );
-        updateEfforts();
-      } catch (e) {
-        toast(
-          `Model discovery: ${e.message}. You can enter a model manually.`,
-          true,
+        model.value =
+          selectedProvider === session.provider &&
+          models.some((m) => m.ID === session.model)
+            ? session.model
+            : (models.find((m) => m.Default) || models[0]).ID;
+        updateEfforts(
+          selectedProvider === session.provider ? session.effort : "",
         );
+        loading = false;
+        model.disabled = effort.disabled = false;
+        $("#modal-submit").disabled = false;
+      } catch (error) {
+        if (token !== generation || !model.isConnected) return;
+        model.replaceChildren(new Option("Models unavailable", ""));
+        $("#modal-error").textContent = error.message;
+        $("#modal-error").hidden = false;
       }
-    };
-    provider.addEventListener("change", () => {
-      model.value = "";
-      effort.value = "";
-      load();
-    });
-    model.addEventListener("input", updateEfforts);
+    }
+    provider.addEventListener("change", load);
+    model.addEventListener("change", () => updateEfforts(effort.value));
+    $("#modal-fields").append(button("Retry model discovery", load));
     load();
   }
   function renderProject() {
@@ -1068,6 +1481,9 @@
       const pause = $("[data-project-pause]", main);
       if (pause)
         pause.textContent = state.paused ? "Resume agents" : "Pause agents";
+      const editor = $(".document-editor");
+      if (!projectDrafts.has(projectTab))
+        editor.value = state[projectTab] || "";
       return;
     }
     detailID = "";
@@ -1100,8 +1516,6 @@
         "primary",
       );
     function selectTab(tab) {
-      if (editor.dataset.tab)
-        projectDrafts.set(editor.dataset.tab, editor.value);
       projectTab = tab;
       editor.dataset.tab = tab;
       editor.value = projectDrafts.get(tab) ?? state[tab] ?? "";
@@ -1140,12 +1554,18 @@
     main.replaceChildren(page);
     selectTab(projectTab);
   }
+  let diffRevision = 0,
+    lastDiffSignature = "";
   let diffCache = null,
     diffLoading = null,
     anchor = null,
     diffStart = null,
-    extendSelection = false,
-    fullSource = false;
+    fullSource = false,
+    diffMode = storage.get("ostraka:diff-mode") || "unified",
+    reviewTarget = "",
+    selectedReviewID = "",
+    diffDrag = null,
+    suppressDiffClick = false;
   const reviewDraftKey = (key) => `ostraka:${state.project}:review:${key}`;
   function reviewDraft(text, key, unsent) {
     text.dataset.draftKey = key;
@@ -1153,19 +1573,40 @@
     text.addEventListener("input", () =>
       storage.set(reviewDraftKey(key), text.value),
     );
+    mentionCompletion(text);
   }
   async function renderReviews(force = false) {
+    if (diffDrag) return;
+    if (!reviewTarget) {
+      const suggested =
+        current?.item.Status !== "archived" ? current?.item.ID : "";
+      reviewTarget = suggested || state.reviews[0]?.item_id || "";
+    }
     const main = $("#detail"),
-      signature = JSON.stringify(state.reviews);
+      signature = JSON.stringify([
+        state.reviews,
+        state.items.map((i) => [i.ID, i.Title, i.Status]),
+        reviewTarget,
+        selectedReviewID,
+      ]);
     if (
       !force &&
       main.dataset.page === "reviews" &&
-      (signature === reviewSignature ||
-        (main.contains(document.activeElement) &&
-          document.activeElement.matches("textarea")))
-    )
+      signature === reviewSignature
+    ) {
+      if (!diffCache && $("#diff", main)) await loadDiff($("#diff", main));
       return;
-    // Preserve unfinished thread replies across server refreshes.
+    }
+    // Preserve unfinished thread replies and caret across server refreshes.
+    const focused = document.activeElement;
+    const focusKey = focused?.dataset.draftKey;
+    const caret = focusKey
+      ? [focused.selectionStart, focused.selectionEnd]
+      : null;
+    const scrollTop = main.scrollTop;
+    const diffOpen = new Map(
+      $$(".diff-file", main).map((node) => [node.dataset.path, node.open]),
+    );
     const unsent = new Map(
       $$("textarea", main)
         .filter((n) => n.dataset.draftKey)
@@ -1185,12 +1626,34 @@
         "Discuss changes, select code context, and send a batch back to the agent.",
       ),
     );
+    const targetForm = el("form", "review-target-form"),
+      targetLabel = el("label"),
+      target = reviewTargetSelect("Review target");
+    target.id = "review-target";
+    append(targetLabel, el("span", "", "Review target"), target);
+    const startReview = el("button", "primary", "Start review");
+    startReview.type = "submit";
+    append(targetForm, targetLabel, startReview);
+    targetForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      startReview.disabled = true;
+      try {
+        await targetReview(target.value);
+        await renderReviews(true);
+        $("#diff")?.scrollIntoView({ block: "start" });
+      } catch (error) {
+        report(error);
+      } finally {
+        startReview.disabled = false;
+      }
+    });
+    page.append(targetForm);
     if (!state.reviews.length)
       page.append(
         el(
           "div",
           "empty",
-          "Start a review from a conversation to discuss the current working tree.",
+          "Choose a target above to start a review, or select code below to add your first comment.",
         ),
       );
     state.reviews.forEach((review) => {
@@ -1392,22 +1855,22 @@
       append(card, form);
       page.append(card);
     });
-    if (state.reviews.length) {
+    {
       const diffSection = el("section");
       diffSection.id = "diff";
-      const rangeLabel = el("label", "checkbox");
-      const rangeInput = el("input");
-      rangeInput.type = "checkbox";
-      rangeInput.checked = extendSelection;
-      rangeInput.addEventListener("change", () => {
-        extendSelection = rangeInput.checked;
+      const layoutLabel = el("label", "diff-layout"),
+        layout = el("select");
+      layout.setAttribute("aria-label", "Diff layout");
+      layout.add(new Option("Unified", "unified"));
+      layout.add(new Option("Side by side", "split"));
+      layout.value = diffMode;
+      layout.addEventListener("change", () => {
+        diffMode = layout.value;
+        storage.set("ostraka:diff-mode", diffMode);
+        loadDiff(diffSection).catch(report);
       });
-      append(
-        rangeLabel,
-        rangeInput,
-        document.createTextNode("Extend selection to next tapped line"),
-      );
-      diffSection.append(rangeLabel);
+      append(layoutLabel, document.createTextNode("Layout "), layout);
+      diffSection.append(layoutLabel);
       const sourceLabel = el("label", "checkbox"),
         sourceInput = el("input");
       sourceInput.type = "checkbox";
@@ -1428,6 +1891,7 @@
         heading,
         el("h3", "", "Current changes"),
         button("Refresh diff", async () => {
+          diffRevision++;
           diffCache = null;
           await loadDiff(diffSection);
         }),
@@ -1438,25 +1902,54 @@
         el(
           "p",
           "muted",
-          "Click a line to attach it to your next comment. Shift-click selects a range on the same side and hunk.",
+          "Drag across lines to select a range and comment underneath it. On touch screens, drag the line numbers; swipe the code to scroll.",
         ),
       );
       const files = el("div");
       files.id = "diff-files";
       diffSection.append(files);
-      page.append(diffSection);
+      const firstReview = $(".review-card", page);
+      if (firstReview) page.insertBefore(diffSection, firstReview);
+      else page.append(diffSection);
       main.replaceChildren(page);
-      await loadDiff(diffSection);
-    } else main.replaceChildren(page);
+      if (focusKey) {
+        const replacement = $$("textarea", page).find(
+          (n) => n.dataset.draftKey === focusKey,
+        );
+        if (replacement) {
+          replacement.focus({ preventScroll: true });
+          replacement.setSelectionRange(...caret);
+        }
+      }
+      main.scrollTop = scrollTop;
+      await loadDiff(diffSection, diffOpen);
+      if (focusKey) {
+        const replacement = $$("textarea", page).find(
+          (n) => n.dataset.draftKey === focusKey,
+        );
+        if (replacement && document.activeElement !== replacement) {
+          replacement.focus({ preventScroll: true });
+          replacement.setSelectionRange(...caret);
+        }
+      }
+      main.scrollTop = scrollTop;
+    }
   }
-  async function loadDiff(section) {
+  async function loadDiff(section, savedOpen = null) {
     const files = $("#diff-files", section);
     if (!files) return;
     if (!diffCache) {
-      files.replaceChildren(el("p", "muted", "Reading working tree…"));
+      if (!files.children.length)
+        files.append(el("p", "muted", "Reading working tree…"));
+      const version = diffRevision;
       try {
         if (!diffLoading) diffLoading = request("/api/diff");
-        diffCache = await diffLoading;
+        const result = await diffLoading;
+        if (version !== diffRevision) {
+          scheduleRefresh();
+          return;
+        }
+        diffCache = result;
       } catch (e) {
         files.replaceChildren(el("p", "error", e.message));
         return;
@@ -1465,6 +1958,15 @@
       }
     }
     if (!section.isConnected) return;
+    const signature = JSON.stringify([diffCache, fullSource, diffMode]);
+    if (signature === files.dataset.signature) return;
+    const opened =
+      savedOpen ||
+      new Map($$(".diff-file", files).map((n) => [n.dataset.path, n.open]));
+    files.dataset.signature = signature;
+    if (lastDiffSignature && lastDiffSignature !== JSON.stringify(diffCache))
+      clearAnchor();
+    lastDiffSignature = JSON.stringify(diffCache);
     files.replaceChildren();
     if (!diffCache.Files?.length)
       files.append(el("p", "muted", "Working tree is clean."));
@@ -1478,48 +1980,283 @@
           : original.Lines,
       };
       const details = el("details", "diff-file");
-      details.open = diffCache.Files.length === 1;
+      details.dataset.path = file.Path;
+      details.open = opened.get(file.Path) ?? diffCache.Files.length === 1;
       details.append(el("summary", "", `${file.Path} · ${file.Status}`));
       if (file.Binary || file.Notice)
         details.append(
           el("p", "muted", file.Binary ? "Binary file" : file.Notice),
         );
-      const lines = el("div", "diff-lines");
-      (file.Lines || []).forEach((line, index) => {
-        const kind =
-          typeof line.Kind === "number"
-            ? String.fromCharCode(line.Kind)
-            : line.Kind;
-        const b = el(
-          "button",
-          `diff-line${kind === "+" ? " add" : kind === "-" ? " remove" : ""}`,
-        );
-        b.dataset.index = index;
-        b.dataset.path = file.Path;
-        append(
-          b,
-          el("span", "line-number", line.OldLine || ""),
-          el("span", "line-number", line.NewLine || ""),
-          el("span", "code", `${kind} ${line.Text}`),
-        );
-        b.title =
-          line.NewLine || line.OldLine
-            ? "Select this line as review context"
-            : "Hunk metadata";
-        b.disabled = !(line.NewLine || line.OldLine);
-        b.type = "button";
-        b.addEventListener("click", (e) =>
-          selectDiff(file, index, e.shiftKey || extendSelection),
-        );
-        lines.append(b);
-      });
+      const lines = el(
+        "div",
+        `diff-lines${diffMode === "split" ? " split" : ""}`,
+      );
+      if (diffMode === "split") {
+        const heading = el("div", "diff-row diff-columns");
+        append(heading, el("span", "", "Before"), el("span", "", "After"));
+        lines.append(heading);
+        let removed = [],
+          added = [];
+        const flush = () => {
+          for (let n = 0; n < Math.max(removed.length, added.length); n++) {
+            const row = el("div", "diff-row");
+            row.append(
+              removed[n] === undefined
+                ? el("span", "diff-empty")
+                : diffLine(file, removed[n], "old"),
+            );
+            row.append(
+              added[n] === undefined
+                ? el("span", "diff-empty")
+                : diffLine(file, added[n], "new"),
+            );
+            lines.append(row);
+          }
+          removed = [];
+          added = [];
+        };
+        file.Lines.forEach((line, index) => {
+          const kind = lineKind(line);
+          if (kind === "-") removed.push(index);
+          else if (kind === "+") added.push(index);
+          else {
+            flush();
+            const row = el(
+              "div",
+              `diff-row${!line.OldLine && !line.NewLine ? " diff-hunk" : ""}`,
+            );
+            if (!line.OldLine && !line.NewLine)
+              row.append(el("span", "", line.Text));
+            else
+              append(
+                row,
+                line.OldLine
+                  ? diffLine(file, index, "old")
+                  : el("span", "diff-empty"),
+                line.NewLine
+                  ? diffLine(file, index, "new")
+                  : el("span", "diff-empty"),
+              );
+            lines.append(row);
+          }
+        });
+        flush();
+      } else
+        file.Lines.forEach((_, index) => lines.append(diffLine(file, index)));
       details.append(lines);
       files.append(details);
     });
+    markDiffSelection();
+    if (anchor) showInlineReviewComposer();
+  }
+  function lineKind(line) {
+    return typeof line.Kind === "number"
+      ? String.fromCharCode(line.Kind)
+      : line.Kind;
+  }
+  function diffLine(file, index, side) {
+    const line = file.Lines[index],
+      kind = lineKind(line);
+    const b = el(
+      "button",
+      `diff-line${kind === "+" ? " add" : kind === "-" ? " remove" : ""}`,
+    );
+    b.type = "button";
+    b.dataset.index = index;
+    b.dataset.path = file.Path;
+    b.dataset.side = side || (line.NewLine ? "new" : "old");
+    if (side)
+      append(
+        b,
+        el(
+          "span",
+          "line-number",
+          (side === "old" ? line.OldLine : line.NewLine) || "",
+        ),
+      );
+    else
+      append(
+        b,
+        el("span", "line-number", line.OldLine || ""),
+        el("span", "line-number", line.NewLine || ""),
+      );
+    b.append(el("span", "code", `${kind} ${line.Text}`));
+    b.disabled = !(line.NewLine || line.OldLine);
+    b.title = "Drag to select lines and add a comment";
+    b.addEventListener("pointerdown", (e) => {
+      if (
+        e.button !== 0 ||
+        (e.pointerType === "touch" && !e.target.closest(".line-number"))
+      )
+        return;
+      e.preventDefault();
+      selectDiff(file, index, false, side);
+      diffDrag = {
+        file,
+        pointerID: e.pointerId,
+        side: side || (line.NewLine ? "new" : "old"),
+        button: b,
+      };
+      b.setPointerCapture?.(e.pointerId);
+      suppressDiffClick = true;
+      $(".inline-review-compose")?.remove();
+    });
+    b.addEventListener("click", (e) => {
+      if (suppressDiffClick && e.detail !== 0) {
+        suppressDiffClick = false;
+        return;
+      }
+      selectDiff(file, index, e.shiftKey, side);
+      showInlineReviewComposer(true);
+    });
+    return b;
+  }
+  document.addEventListener("pointermove", (e) => {
+    if (!diffDrag || e.pointerId !== diffDrag.pointerID) return;
+    const hit = document
+      .elementFromPoint(e.clientX, e.clientY)
+      ?.closest(".diff-line");
+    if (
+      !hit ||
+      hit.dataset.path !== diffDrag.file.Path ||
+      hit.disabled ||
+      (diffMode === "split" && hit.dataset.side !== diffDrag.side)
+    )
+      return;
+    const line = diffDrag.file.Lines[+hit.dataset.index];
+    if (!(diffDrag.side === "old" ? line.OldLine : line.NewLine)) return;
+    selectDiff(diffDrag.file, +hit.dataset.index, true, diffDrag.side);
+    const scroller = hit.closest(".diff-lines"),
+      bounds = scroller.getBoundingClientRect();
+    if (e.clientY < bounds.top + 24) scroller.scrollTop -= 20;
+    else if (e.clientY > bounds.bottom - 24) scroller.scrollTop += 20;
+  });
+  document.addEventListener("pointerup", (e) => {
+    if (!diffDrag || e.pointerId !== diffDrag.pointerID) return;
+    const drag = diffDrag;
+    diffDrag = null;
+    drag.button.releasePointerCapture?.(e.pointerId);
+    showInlineReviewComposer(true);
+    scheduleRefresh();
+    setTimeout(() => {
+      suppressDiffClick = false;
+    }, 0);
+  });
+  document.addEventListener("pointercancel", () => {
+    diffDrag = null;
+    suppressDiffClick = false;
+  });
+  function reviewTargetSelect(label) {
+    const select = el("select");
+    select.setAttribute("aria-label", label);
+    select.dataset.reviewTarget = "";
+    select.add(new Option("Choose an item…", ""));
+    state.items
+      .filter((i) => i.Status !== "archived")
+      .forEach((i) => select.add(new Option(`${i.ID} · ${i.Title}`, i.ID)));
+    select.value = reviewTarget;
+    select.addEventListener("change", () => {
+      reviewTarget = select.value;
+      selectedReviewID = "";
+      $$("[data-review-target]").forEach((n) => (n.value = reviewTarget));
+    });
+    return select;
+  }
+  async function targetReview(itemID) {
+    if (!itemID || !itemByID(itemID) || itemByID(itemID).Status === "archived")
+      throw new Error("Choose a live item as the review target.");
+    reviewTarget = itemID;
+    let review =
+      state.reviews.find(
+        (r) => r.id === selectedReviewID && r.item_id === itemID,
+      ) || state.reviews.find((r) => r.item_id === itemID);
+    if (!review) {
+      review = await action("review-create", { id: itemID }, false);
+      state.reviews.push(review);
+    }
+    selectedReviewID = review.id;
+    return review;
+  }
+  function markDiffSelection() {
+    $$(".diff-line").forEach((n) => {
+      const from = Math.min(diffStart?.index ?? -1, diffStart?.end ?? -1),
+        to = Math.max(diffStart?.index ?? -1, diffStart?.end ?? -1);
+      n.classList.toggle(
+        "chosen",
+        !!anchor &&
+          n.dataset.path === diffStart?.path &&
+          +n.dataset.index >= from &&
+          +n.dataset.index <= to &&
+          (diffMode !== "split" || n.dataset.side === anchor.side),
+      );
+    });
+  }
+  function showInlineReviewComposer(reveal = false) {
+    if (!anchor || diffDrag) return;
+    const selected = $$(".diff-line.chosen").at(-1);
+    if (!selected) return;
+    const key = JSON.stringify(anchor),
+      existing = $(".inline-review-compose");
+    if (existing?.dataset.selection === key) return;
+    existing?.remove();
+    const form = el("form", "inline-review-compose");
+    form.dataset.selection = key;
+    const selection = { ...anchor },
+      text = el("textarea"),
+      target = reviewTargetSelect("Comment target");
+    text.setAttribute("aria-label", "Comment on selected lines");
+    text.placeholder = "Comment on these lines…";
+    reviewDraft(text, "inline-code", new Map());
+    const controls = el("div", "toolbar"),
+      send = el("button", "primary", "Add comment");
+    send.type = "submit";
+    append(
+      controls,
+      target,
+      button("Cancel", () => {
+        storage.remove(reviewDraftKey("inline-code"));
+        clearAnchor();
+      }),
+      send,
+    );
+    append(
+      form,
+      el(
+        "p",
+        "anchor",
+        `${selection.file} · ${selection.side} lines ${selection.start_line}–${selection.end_line}`,
+      ),
+      text,
+      controls,
+    );
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!text.value.trim()) return;
+      send.disabled = true;
+      try {
+        const review = await targetReview(target.value);
+        await action("review-thread", {
+          review_id: review.id,
+          content: text.value,
+          anchor: selection,
+        });
+        storage.remove(reviewDraftKey("inline-code"));
+        text.value = "";
+        clearAnchor();
+        toast("Review comment added");
+      } catch (error) {
+        report(error);
+      } finally {
+        send.disabled = false;
+      }
+    });
+    (selected.closest(".diff-row") || selected).after(form);
+    if (reveal) form.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
   function clearAnchor() {
     anchor = null;
     diffStart = null;
+    $(".inline-review-compose")?.remove();
     $$(".diff-line.chosen").forEach((n) => n.classList.remove("chosen"));
     $$("[data-anchor-label]").forEach(
       (n) =>
@@ -1527,9 +2264,10 @@
           "General comment · select a diff line below to attach code"),
     );
   }
-  function selectDiff(file, index, extend) {
+  function selectDiff(file, index, extend, requestedSide) {
     const line = file.Lines[index],
-      side = line.NewLine ? "new" : "old";
+      side = requestedSide || (line.NewLine ? "new" : "old");
+    if (!(side === "old" ? line.OldLine : line.NewLine)) return;
     const start =
       extend && diffStart?.path === file.Path && diffStart.side === side
         ? diffStart.index
@@ -1553,25 +2291,26 @@
       end_line: numbers.at(-1),
       excerpt: selectedLines.map((l) => l.Text).join("\n"),
     };
-    if (!extend || !diffStart) diffStart = { path: file.Path, side, index };
-    $$(".diff-line").forEach((n) =>
-      n.classList.toggle(
-        "chosen",
-        n.dataset.path === file.Path &&
-          +n.dataset.index >= from &&
-          +n.dataset.index <= to,
-      ),
-    );
+    diffStart = { path: file.Path, side, index: start, end: index };
+    markDiffSelection();
     $$("[data-anchor-label]").forEach(
       (n) =>
         (n.textContent = `${anchor.file} · ${side} lines ${anchor.start_line}–${anchor.end_line}`),
     );
   }
   $("#detail").addEventListener("focusout", (e) => {
-    if (view === "reviews" && e.target.matches("textarea")) scheduleRefresh();
+    if (
+      (view === "reviews" && e.target.matches("textarea")) ||
+      e.target.id === "composer"
+    )
+      scheduleRefresh();
   });
   $("#search").addEventListener("input", renderList);
   $("#group-filter").addEventListener("change", renderList);
+  $("#status-filter").addEventListener("change", renderList);
+  $("#detail").addEventListener("focusout", (e) => {
+    if (e.target.closest(".detail-header")) scheduleRefresh();
+  });
   $("#new-item").addEventListener("click", () => newItem());
   $("#pause").addEventListener("click", () => action("pause").catch(report));
   window.addEventListener("hashchange", () => {
@@ -1610,6 +2349,7 @@
     $("#connection").classList.add("online");
   });
   source.addEventListener("change", () => {
+    diffRevision++;
     diffCache = null;
     scheduleRefresh();
   });
