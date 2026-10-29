@@ -51,6 +51,11 @@ const calls = [],
   saved = {},
   source = {};
 let retainedPartials = [];
+let sessionSelection = {
+  provider: "codex",
+  model: "test",
+  current: { provider: "codex", model: "current-test", effort: "medium" },
+};
 let holdDetail = null,
   holdTurn = null;
 const gate = () => {
@@ -82,11 +87,7 @@ w.fetch = async (path, options) => {
       partials: retainedPartials,
       live: "Progress text",
       live_active: true,
-      session: {
-        provider: "codex",
-        model: "test",
-        current: { provider: "codex", model: "current-test", effort: "medium" },
-      },
+      session: sessionSelection,
       error: "",
     };
   } else if (path === "/api/diff")
@@ -198,16 +199,56 @@ const input = (node, value) => {
   assert.equal(d.querySelectorAll(".item-row").length, 4);
   assert.ok(d.querySelector(".markdown strong"));
   assert.equal(d.querySelector(".trace").textContent, "Progress text");
-  assert.ok(
-    d
-      .querySelector("#session-label")
-      .textContent.includes("Current: codex · current-test · medium"),
+  assert.equal(
+    d.querySelector("#session-label").textContent,
+    "Next turn: codex · test",
   );
-  assert.ok(
-    d
-      .querySelector("#session-label")
-      .textContent.includes("Next turn: codex · test"),
+  for (const [selection, expected] of [
+    [
+      {
+        provider: "codex",
+        model: "test",
+        current: { provider: "codex", model: "test", effort: "" },
+      },
+      "Current: codex · test",
+    ],
+    [
+      {
+        provider: "codex",
+        model: "test",
+        effort: "high",
+        current: { provider: "codex", model: "test", effort: "medium" },
+      },
+      "Next turn: codex · test · high",
+    ],
+    [
+      {
+        provider: "claude",
+        model: "test",
+        current: { provider: "codex", model: "test" },
+      },
+      "Next turn: claude · test",
+    ],
+    [{ provider: "codex", model: "test" }, "Current: codex · test"],
+    [
+      { provider: "codex", current: { provider: "codex" } },
+      "Current: codex · Provider default",
+    ],
+  ]) {
+    sessionSelection = selection;
+    source.change();
+    await wait(280);
+    assert.equal(d.querySelector("#session-label").textContent, expected);
+    assert.equal(d.querySelector("#session-label").title, expected);
+  }
+  state.items[0].Status = "agent-acknowledged";
+  source.change();
+  await wait(280);
+  assert.equal(
+    d.querySelector("#session-label").textContent,
+    "Current: codex · Provider default (running)",
   );
+  state.items[0].Status = "active";
   assert.equal(
     [...d.querySelectorAll("button")].some(
       (b) => b.textContent === "Start agent",
@@ -430,7 +471,7 @@ const input = (node, value) => {
   assert.equal(compose.value, "Still typing locally");
   compose.blur();
 
-  // Family folding/search and optimistic order payload.
+  // Family folding/search; ordering buttons are absent for children and backlog roots.
   d.querySelector(".fold").click();
   await wait();
   assert.equal(d.querySelectorAll(".item-row").length, 2);
@@ -439,13 +480,11 @@ const input = (node, value) => {
   input(d.querySelector("#search"), "");
   w.location.hash = "inbox/kid";
   await wait();
-  clickText(d.querySelector(".toolbar"), "↓");
-  await wait(280);
-  assert.deepEqual(calls.find((c) => c.op === "child-order").expected, [
-    "kid",
-    "kid2",
-  ]);
-  assert.deepEqual(state.child_orders.root, ["kid2", "kid"]);
+  const hasOrderButtons = () =>
+    [...d.querySelectorAll(".toolbar button")].some((button) =>
+      ["↑", "↓"].includes(button.textContent),
+    );
+  assert.equal(hasOrderButtons(), false);
   const parentInput = d.querySelector(".inline-picker [name=parent]");
   input(parentInput, "later");
   parentInput.closest("form").requestSubmit();
@@ -456,6 +495,9 @@ const input = (node, value) => {
   rootInput.closest("form").requestSubmit();
   await wait(280);
   assert.equal(calls.find((c) => c.op === "unparent").id, "kid");
+  w.location.hash = "inbox/later";
+  await wait();
+  assert.equal(hasOrderButtons(), false);
   // Current diff is visible and refreshes with no active review.
   w.location.hash = "reviews";
   await wait();
@@ -602,7 +644,7 @@ const input = (node, value) => {
   source.error();
   assert.equal(d.querySelector("#connection").textContent, "Reconnecting…");
   console.log(
-    "PASS: navigation, sanitized Markdown, composer identity, drafts/send, folding/search, child order, reviews/range anchors, project editing, model discovery, connection status",
+    "PASS: navigation, sanitized Markdown, composer identity, drafts/send, folding/search, removed order controls, reviews/range anchors, project editing, model discovery, connection status",
   );
   dom.window.close();
 })().catch((e) => {

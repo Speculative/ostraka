@@ -279,6 +279,13 @@ nav {
   background: transparent;
   min-width: 0;
 }
+.search:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.search input:focus-visible {
+  outline: none;
+}
 .filters select {
   font-size: 12px;
   padding: 6px 10px;
@@ -1667,7 +1674,7 @@ details.trace-block {
     line-height: 22px;
   }
   .detail-header {
-    padding: 0 var(--detail-gutter) 12px;
+    padding: 0 var(--detail-gutter) 4px;
     max-height: 45dvh;
     overflow-y: auto;
   }
@@ -1679,7 +1686,7 @@ details.trace-block {
   }
   .detail-header h2 {
     font-size: 20px;
-    margin: 8px 0;
+    margin: 8px 0 4px;
   }
   .toolbar {
     gap: 8px;
@@ -1695,6 +1702,7 @@ details.trace-block {
   }
   .message {
     padding: 12px;
+    margin-bottom: 16px;
   }
   .message-heading {
     margin: -12px -12px 12px;
@@ -1709,13 +1717,29 @@ details.trace-block {
   }
   .composer-actions {
     width: 100%;
+    min-width: 0;
+    margin-left: 0;
     justify-content: flex-end;
   }
   .composer-footer {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     gap: 8px;
   }
   .session-label {
+    grid-column: 1 / -1;
+    min-width: 0;
     font-size: 11px;
+  }
+  .composer-actions #draft-status {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .composer-actions button {
+    flex-shrink: 0;
+    min-height: 44px;
   }
   .document-tabs {
     gap: 0;
@@ -1759,9 +1783,12 @@ details.trace-block {
 }
 @media (max-width: 640px) {
   .item-inspector > summary {
-    min-height: 44px;
-    padding: 11px 0;
+    min-height: 28px;
+    padding: 3px 0;
     font-size: 16px;
+  }
+  .item-inspector[open] > summary {
+    margin-bottom: 4px;
   }
 }
 

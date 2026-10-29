@@ -731,18 +731,6 @@
       toolbar.append(
         button("End goal", () => action("end-goal", { id: i.ID })),
       );
-    if (i.Parent && view !== "archive")
-      append(
-        toolbar,
-        button("↑", () => reorder(i, -1)),
-        button("↓", () => reorder(i, 1)),
-      );
-    if (!i.Parent && i.Status === "backlog")
-      append(
-        toolbar,
-        button("↑", () => action("move-backlog", { id: i.ID, delta: -1 })),
-        button("↓", () => action("move-backlog", { id: i.ID, delta: 1 })),
-      );
     const title = el("h2", "editable-title", i.Title);
     title.tabIndex = 0;
     title.title = "Double-click to rename (or press Enter)";
@@ -781,25 +769,13 @@
       ]
         .filter(Boolean)
         .join(" · ");
-    sessionLabel.replaceChildren(
-      el(
-        "span",
-        "",
-        `Current: ${session.current ? describe(session.current) : "Not yet reported"}${i.Status === "agent-acknowledged" ? " (running)" : ""}`,
-      ),
-      el("span", "", `Next turn: ${describe(session)}`),
-    );
+    const modelChanged =
+      session.current &&
+      ["provider", "model", "effort"].some(
+        (key) => (session.current[key] || "") !== (session[key] || ""),
+      );
+    sessionLabel.textContent = `${modelChanged ? "Next turn" : "Current"}: ${describe(session)}${!modelChanged && i.Status === "agent-acknowledged" ? " (running)" : ""}`;
     sessionLabel.title = sessionLabel.textContent;
-  }
-  async function reorder(i, delta) {
-    const expected =
-        state.child_orders?.[i.Parent] || childrenOf(i.Parent).map((c) => c.ID),
-      ids = [...expected],
-      at = ids.indexOf(i.ID),
-      next = at + delta;
-    if (at < 0 || next < 0 || next >= ids.length) return;
-    [ids[at], ids[next]] = [ids[next], ids[at]];
-    await action("child-order", { id: i.Parent, expected, ids });
   }
   function markdown(html, fallback) {
     const node = el("div", "markdown");
@@ -2398,7 +2374,9 @@
   document.addEventListener("keydown", (e) => {
     if (
       $("#modal").open ||
-      e.target.closest("input,textarea,select,[role=combobox],[contenteditable]") ||
+      e.target.closest(
+        "input,textarea,select,[role=combobox],[contenteditable]",
+      ) ||
       e.ctrlKey ||
       e.metaKey ||
       e.altKey
