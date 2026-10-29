@@ -50,6 +50,7 @@ const state = {
 const calls = [],
   saved = {},
   source = {};
+let retainedPartials = [];
 let holdDetail = null,
   holdTurn = null;
 const gate = () => {
@@ -78,7 +79,7 @@ w.fetch = async (path, options) => {
       body_html: "<p>Opening <strong>context</strong></p>",
       turns_html: ["<p>Hello</p>"],
       activities: [],
-      partials: [],
+      partials: retainedPartials,
       live: "Progress text",
       live_active: true,
       session: {
@@ -187,6 +188,7 @@ const input = (node, value) => {
   node.dispatchEvent(new w.Event("input", { bubbles: true }));
 };
 (async () => {
+  w.eval(fs.readFileSync(path.join(staticRoot, "select.js"), "utf8"));
   w.eval(fs.readFileSync(path.join(staticRoot, "app.js"), "utf8"));
   await wait();
   assert.equal(
@@ -212,6 +214,64 @@ const input = (node, value) => {
     ),
     false,
   );
+  // Retained progress belongs to its explicitly linked agent reply. Runs with
+  // no reply (or a missing target) remain readable standalone entries.
+  retainedPartials = [
+    {
+      id: "linked",
+      timestamp: new Date(Date.parse(now) - 2000).toISOString(),
+      turn_timestamp: now,
+      status: "completed",
+      content: "Captured <script>work</script>",
+    },
+    {
+      id: "linked-again",
+      timestamp: now,
+      turn_timestamp: now,
+      status: "completed",
+      content: "More captured work",
+    },
+    {
+      id: "interrupted",
+      timestamp: now,
+      status: "interrupted",
+      content: "Unfinished work",
+    },
+    {
+      id: "missing-reply",
+      timestamp: now,
+      turn_timestamp: "2000-01-01T00:00:00Z",
+      status: "completed",
+      content: "Reply no longer available",
+    },
+  ];
+  source.change();
+  await wait(280);
+  const linked = d.querySelector('details[data-key="linked"]');
+  assert.equal(
+    linked.closest(".message").querySelector(".markdown").textContent,
+    "Hello",
+  );
+  assert.equal(linked.open, false);
+  assert.equal(
+    linked.querySelector(".trace").textContent,
+    "Captured <script>work</script>",
+  );
+  assert.equal(linked.querySelector("script"), null);
+  assert.equal(d.querySelectorAll(".message > details.trace-block").length, 2);
+  assert.equal(d.querySelectorAll(".timeline > details.trace-block").length, 2);
+  linked.open = true;
+  retainedPartials[0].content = "Updated capture";
+  source.change();
+  await wait(280);
+  assert.equal(d.querySelector('details[data-key="linked"]').open, true);
+  assert.equal(
+    d.querySelector('details[data-key="linked"] .trace').textContent,
+    "Updated capture",
+  );
+  retainedPartials = [];
+  source.change();
+  await wait(280);
   source.open();
   assert.equal(d.querySelector("#connection").textContent, "Connected");
   // Inbox includes backlog by default; filters retain family context and archive stays separate.

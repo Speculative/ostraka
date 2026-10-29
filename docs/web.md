@@ -29,6 +29,15 @@ manifest supports a standalone desktop window in browsers that offer
 There is no offline mode or bundled native runtime. Mobile and desktop browser
 layouts are the supported targets; installing a desktop window is optional.
 
+## Appearance
+
+The workspace uses Jeff Tao's design system v0.1: ink on white paper, a single
+blue accent, square panels and controls, and locally bundled Lato and JetBrains
+Mono. Phone layouts use 44px controls and bottom navigation. Item Properties
+start collapsed on phones and can be opened to change status, mode, group or
+parent. See [Web design](web-design.md) for tokens, component mappings and
+asset provenance.
+
 ## Container preview
 
 Carthage configuration publishes host loopback port 8090. If the running

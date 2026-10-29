@@ -3,7 +3,8 @@
   "scripts": {
     "test": "node smoke.cjs",
     "integration": "node integration.cjs",
-    "browser": "node browser.cjs"
+    "browser": "node browser.cjs",
+    "select": "node select.cjs"
   },
   "devDependencies": {
     "jsdom": "^29.1.1",

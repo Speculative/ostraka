@@ -53,6 +53,8 @@ async function api(op, fields = {}) {
     return b;
   }
   try {
+    w.HTMLElement.prototype.scrollIntoView = function () {};
+    w.eval(fs.readFileSync(path.join(staticRoot, "select.js"), "utf8"));
     w.eval(fs.readFileSync(path.join(staticRoot, "app.js"), "utf8"));
     await wait(250);
     assert.equal(d.querySelector(".markdown h2").textContent, "Context");
@@ -79,7 +81,7 @@ async function api(op, fields = {}) {
       ).item.Turns.at(-1).Content,
       draftSource,
     );
-    btn(d.querySelector(".toolbar"), "＋ Child");
+    btn(d.querySelector(".toolbar"), "+ Child");
     await wait();
     assert.equal(d.querySelector("#modal [name=group]"), null);
     d.querySelector("[name=title]").value = "Integration child";
@@ -95,7 +97,7 @@ async function api(op, fields = {}) {
       );
     assert.equal(child.Parent, root.ID);
     assert.equal(child.Group, "web");
-    btn(d.querySelector(".toolbar"), "＋ Child");
+    btn(d.querySelector(".toolbar"), "+ Child");
     await wait();
     d.querySelector("[name=title]").value = "Integration sibling";
     d.querySelector("#modal-form").requestSubmit();

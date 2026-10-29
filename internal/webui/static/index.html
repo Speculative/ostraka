@@ -6,25 +6,26 @@
       name="viewport"
       content="width=device-width,initial-scale=1,viewport-fit=cover"
     />
-    <meta name="theme-color" content="#10151c" />
+    <meta name="theme-color" content="#ffffff" />
     <meta
       name="description"
       content="Ostraka — a workspace for durable conversations with coding agents."
     />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/tokens.css" />
     <link rel="stylesheet" href="/style.css" />
     <title>Ostraka</title>
+    <script src="/select.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
-  <body>
+  <body class="sp-app">
     <a class="skip" href="#detail">Skip to conversation</a>
     <div class="workspace">
       <aside class="sidebar" aria-label="Workspace navigation">
         <a class="brand" href="#inbox"
-          ><img src="/icon.svg" alt="" width="30" height="30" /><span
-            >ostraka<span class="brand-sub">agent workspace</span></span
-          ></a
+          ><span class="brand-monogram" aria-hidden="true">O</span
+          ><span>ostraka<span class="brand-sub">agent workspace</span></span></a
         >
         <div class="project-label" id="project-name">Workspace</div>
         <nav id="navigation" aria-label="Views"></nav>
@@ -37,16 +38,23 @@
       <section class="collection" aria-label="Items">
         <header class="collection-header">
           <div>
-            <span class="eyebrow">WORKSPACE</span>
             <h1 id="view-title">Inbox</h1>
           </div>
-          <button id="new-item" class="primary" title="New item (N)">
-            + New
-          </button>
+          <button id="new-item" title="New item (N)">+ New</button>
         </header>
         <div class="filters">
           <label class="search"
-            ><span aria-hidden="true">⌕</span
+            ><svg
+              class="nav-icon"
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="square"
+            >
+              <circle cx="10" cy="10" r="7" />
+              <path d="m15 15 6 6" /></svg
             ><input
               id="search"
               type="search"

@@ -27,6 +27,23 @@ async function textIs(locator, text) {
       { selector: ".detail-header h2", text },
     );
 }
+// Exercise the visible component rather than writing its backing form field.
+async function pick(locator, value) {
+  const frame = locator.locator("..");
+  const select = frame.locator("select");
+  await select
+    .locator(`option[value="${value}"]`)
+    .waitFor({ state: "attached" });
+  await locator
+    .page()
+    .waitForFunction((node) => !node.disabled, await select.elementHandle());
+  const label = await select.locator(`option[value="${value}"]`).textContent();
+  await frame.getByRole("combobox").click();
+  await locator
+    .page()
+    .getByRole("option", { name: label, exact: true })
+    .click();
+}
 (async () => {
   assert.ok(
     project && binary,
@@ -93,6 +110,54 @@ async function textIs(locator, text) {
       textIs(a.locator(".detail-header h2"), root.Title),
       textIs(b.locator(".detail-header h2"), root.Title),
     ]);
+    // Brand assets are local and the app keeps its square, ink-on-paper frame.
+    const design = await a.evaluate(async () => {
+      const fonts = await Promise.all([
+        document.fonts.load('400 13px "Lato"'),
+        document.fonts.load('400 12px "JetBrains Mono"'),
+      ]);
+      const style = (selector) =>
+        getComputedStyle(document.querySelector(selector));
+      return {
+        fonts: fonts.map((faces) => faces.length),
+        paper: style("body").backgroundColor,
+        ink: style("body").color,
+        selection: style(".item-row.selected").backgroundColor,
+        selectionText: style(".item-row.selected").color,
+        radius: style("#composer").borderRadius,
+        icons: document.querySelectorAll("#navigation svg[aria-hidden=true]")
+          .length,
+      };
+    });
+    assert.deepEqual(design, {
+      fonts: [1, 1],
+      paper: "rgb(255, 255, 255)",
+      ink: "rgb(0, 0, 0)",
+      selection: "rgb(0, 0, 255)",
+      selectionText: "rgb(255, 255, 255)",
+      radius: "0px",
+      icons: 4,
+    });
+    // Wait through the control transition: generic button hover must not turn
+    // list titles white on a light row, or obscure a selected title.
+    for (const [row, background, color] of [
+      [a.locator(".item-row.selected"), "rgb(0, 0, 255)", "rgb(255, 255, 255)"],
+      [
+        a.locator(".item-row").filter({ hasText: parked.Title }),
+        "rgb(243, 243, 243)",
+        "rgb(0, 0, 0)",
+      ],
+    ]) {
+      await row.locator(".item-main").hover();
+      await a.waitForTimeout(250);
+      assert.deepEqual(
+        await row.evaluate((node) => ({
+          background: getComputedStyle(node).backgroundColor,
+          color: getComputedStyle(node.querySelector(".item-title")).color,
+        })),
+        { background, color },
+      );
+    }
     assert.equal(await a.locator("#status-filter").inputValue(), "");
     assert.equal(
       await a
@@ -108,9 +173,9 @@ async function textIs(locator, text) {
         .count(),
       0,
     );
-    await a.locator("#status-filter").selectOption("backlog");
+    await pick(a.locator("#status-filter"), "backlog");
     assert.equal(await a.locator(".item-row").count(), 1);
-    await a.locator("#status-filter").selectOption("");
+    await pick(a.locator("#status-filter"), "");
     await a.locator(".detail-header h2").dblclick();
     await a
       .getByRole("textbox", { name: "Item title", exact: true })
@@ -139,9 +204,9 @@ async function textIs(locator, text) {
       0,
     );
     await a.getByRole("button", { name: "Change model", exact: true }).click();
-    await a.locator("#modal [name=provider]").selectOption("claude");
-    await a.locator("#modal [name=model]").selectOption("opus");
-    await a.locator("#modal [name=effort]").selectOption("high");
+    await pick(a.locator("#modal [name=provider]"), "claude");
+    await pick(a.locator("#modal [name=model]"), "opus");
+    await pick(a.locator("#modal [name=effort]"), "high");
     await a
       .getByRole("button", { name: "Apply to next turn", exact: true })
       .click();
@@ -201,9 +266,10 @@ async function textIs(locator, text) {
       .getByText("+ second external edit", { exact: true })
       .waitFor({ state: "attached" });
     // Drag on the deleted side, then comment directly below the range.
-    await a
-      .getByRole("combobox", { name: "Diff layout", exact: true })
-      .selectOption("split");
+    await pick(
+      a.getByRole("combobox", { name: "Diff layout", exact: true }),
+      "split",
+    );
     const sample = a
       .locator(".diff-file")
       .filter({ has: a.locator("summary", { hasText: "review-sample.go" }) });
@@ -245,9 +311,10 @@ async function textIs(locator, text) {
       ),
       true,
     );
-    await inline
-      .getByRole("combobox", { name: "Comment target", exact: true })
-      .selectOption(parked.ID);
+    await pick(
+      inline.getByRole("combobox", { name: "Comment target", exact: true }),
+      parked.ID,
+    );
     await inline
       .getByRole("textbox", { name: "Comment on selected lines", exact: true })
       .fill("Check removed lines");
@@ -263,9 +330,10 @@ async function textIs(locator, text) {
     assert.equal(removed.end_line, 5);
     assert.equal(removed.excerpt, "    old := 1\n    return old");
     // Start another targeted review from the panel, without opening the item.
-    await a
-      .getByRole("combobox", { name: "Review target", exact: true })
-      .selectOption(root.ID);
+    await pick(
+      a.getByRole("combobox", { name: "Review target", exact: true }),
+      root.ID,
+    );
     await a.getByRole("button", { name: "Start review", exact: true }).click();
     await a.waitForFunction(
       (id) =>
@@ -288,14 +356,26 @@ async function textIs(locator, text) {
     assert.equal(added.side, "new");
     assert.equal(added.excerpt, "    next := 2\n    return next");
     // Switch layout without changing source or range attachments.
-    await a
-      .getByRole("combobox", { name: "Diff layout", exact: true })
-      .selectOption("unified");
-    assert.equal(await a.locator(".diff-lines.split").count(), 0);
+    await pick(
+      a.getByRole("combobox", { name: "Diff layout", exact: true }),
+      "unified",
+    );
+    await a.waitForFunction(() => !document.querySelector(".diff-lines.split"));
     await mobile.goto(`${origin}/#inbox/${root.ID}`);
     await textIs(mobile.locator(".detail-header h2"), "Renamed from CLI");
+    assert.equal(
+      await mobile.locator(".item-inspector").evaluate((n) => n.open),
+      false,
+    );
+    await mobile.locator(".item-inspector > summary").click();
     assert.ok(await mobile.locator(".item-placement").isVisible());
+    await mobile.locator(".item-inspector > summary").click();
     assert.ok(await mobile.locator("#composer").isVisible());
+    assert.ok(
+      await mobile.locator(".timeline").evaluate((n) => n.clientHeight > 300),
+    );
+    const touchControls = await mobile.locator("#change-model").boundingBox();
+    assert.ok(touchControls.height >= 44);
     const markdown =
       "**Bold** *italic* ~~strike~~ `inline code`\n[Link](https://example.com)\n> A quote";
     await mobile.locator("#composer").fill(markdown);
@@ -386,9 +466,10 @@ async function textIs(locator, text) {
       });
     }
     await mobile.goto(`${origin}/#reviews`);
-    await mobile
-      .getByRole("combobox", { name: "Diff layout", exact: true })
-      .selectOption("split");
+    await pick(
+      mobile.getByRole("combobox", { name: "Diff layout", exact: true }),
+      "split",
+    );
     const mobileFile = mobile.locator(".diff-file").filter({
       has: mobile.locator("summary", { hasText: "review-sample.go" }),
     });

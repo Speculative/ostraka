@@ -1,0 +1,219 @@
+/* Jeff Tao design system v0.1. Source: supplied design-system archive. */
+/* Jeff Tao — generated from tokens.json */
+:root,
+[data-theme="light"] {
+  --paper: #ffffff;
+  --ink: #000000;
+  --surface: #f3f3f3;
+  --rule: #d9d9d9;
+  --ink-muted: #616161;
+  --ink-dimmed: #cfcfcf;
+  --band: var(--ink);
+  --on-band: var(--paper);
+  --canvas: #f8f6f1; /* Ostraka canvas override. */
+  --tag-1: #0000ff;
+  --on-tag-1: #ffffff;
+  --tag-1-text: #0000ff;
+  --tag-2: #ff8b1e;
+  --on-tag-2: #000000;
+  --tag-2-text: #a84f00;
+  --tag-3: #007d70;
+  --on-tag-3: #ffffff;
+  --tag-3-text: #007d70;
+  --tag-4: #d42a0c;
+  --on-tag-4: #ffffff;
+  --tag-4-text: #d42a0c;
+  --tag-5: #ffd100;
+  --on-tag-5: #000000;
+  --tag-5-text: #966e00;
+  --tag-6: #00a8e8;
+  --on-tag-6: #000000;
+  --tag-6-text: #007ab5;
+  --tag-7: #ff3d8b;
+  --on-tag-7: #000000;
+  --tag-7-text: #df1b74;
+  --tag-8: #8a8a8a;
+  --on-tag-8: #000000;
+  --tag-8-text: #616161;
+  --marker-yellow: #fff2b3;
+  --marker-cyan: #d8f3ff;
+  --accent-blue: var(--tag-1);
+  --on-accent-blue: var(--on-tag-1);
+  --accent-blue-text: var(--tag-1-text);
+  --accent-blue-tint: #e5f0ff;
+  --accent-red: var(--tag-4);
+  --on-accent-red: var(--on-tag-4);
+  --accent-red-text: var(--tag-4-text);
+  --accent-red-tint: #ffeae3;
+  --accent-orange: var(--tag-2);
+  --on-accent-orange: var(--on-tag-2);
+  --accent-orange-text: var(--tag-2-text);
+  --accent-orange-tint: #fff0e0;
+  --accent-purple: #8000ff;
+  --on-accent-purple: #ffffff;
+  --accent-purple-text: #8000ff;
+  --accent-purple-tint: #f2e5ff;
+  --accent: var(--accent-blue);
+  --on-accent: var(--on-accent-blue);
+  --accent-text: var(--accent-blue-text);
+  --accent-tint: var(--accent-blue-tint);
+  --focus: var(--accent-text);
+  --danger: #c2300e;
+  --on-danger: #ffffff;
+  --shadow-float: 4px 4px 0 #000000;
+  --shadow-dialog: 8px 8px 0 #000000;
+  --shadow-offset: 8px 8px 0 #0000ff;
+  --shadow-offset-sm: 4px 4px 0 #0000ff;
+}
+[data-theme="dark"] {
+  --paper: #000000;
+  --ink: #ffffff;
+  --surface: #1a1a1a;
+  --rule: #333333;
+  --ink-muted: #a0a0a0;
+  --ink-dimmed: #4d4d4d;
+  --band: var(--ink);
+  --on-band: var(--paper);
+  --canvas: #111111;
+  --tag-1: #5c5cff;
+  --on-tag-1: #ffffff;
+  --tag-1-text: #9494ff;
+  --tag-2: #ff8b1e;
+  --on-tag-2: #000000;
+  --tag-2-text: #ffa255;
+  --tag-3: #1fb3a2;
+  --on-tag-3: #000000;
+  --tag-3-text: #71d2c3;
+  --tag-4: #de381e;
+  --on-tag-4: #000000;
+  --tag-4-text: #ff967f;
+  --tag-5: #ffd100;
+  --on-tag-5: #000000;
+  --tag-5-text: #dfba32;
+  --tag-6: #00a8e8;
+  --on-tag-6: #000000;
+  --tag-6-text: #47ccff;
+  --tag-7: #ff3d8b;
+  --on-tag-7: #000000;
+  --tag-7-text: #ff92b6;
+  --tag-8: #8a8a8a;
+  --on-tag-8: #000000;
+  --tag-8-text: #b4b4b4;
+  --marker-yellow: #5a4800;
+  --marker-cyan: #004466;
+  --accent-blue: var(--tag-1);
+  --on-accent-blue: var(--on-tag-1);
+  --accent-blue-text: var(--tag-1-text);
+  --accent-blue-tint: #0d0d3a;
+  --accent-red: var(--tag-4);
+  --on-accent-red: var(--on-tag-4);
+  --accent-red-text: var(--tag-4-text);
+  --accent-red-tint: #39150e;
+  --accent-orange: var(--tag-2);
+  --on-accent-orange: var(--on-tag-2);
+  --accent-orange-text: var(--tag-2-text);
+  --accent-orange-tint: #3a2108;
+  --accent-purple: #a65cff;
+  --on-accent-purple: #000000;
+  --accent-purple-text: #bda3ff;
+  --accent-purple-tint: #24103f;
+  --accent: var(--accent-blue);
+  --on-accent: var(--on-accent-blue);
+  --accent-text: var(--accent-blue-text);
+  --accent-tint: var(--accent-blue-tint);
+  --focus: var(--accent-text);
+  --danger: #ff6a47;
+  --on-danger: #000000;
+  --shadow-float: 4px 4px 0 #ffffff;
+  --shadow-dialog: 8px 8px 0 #ffffff;
+  --shadow-offset: 8px 8px 0 #5c5cff;
+  --shadow-offset-sm: 4px 4px 0 #5c5cff;
+}
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 24px;
+  --space-5: 32px;
+  --space-6: 64px;
+  --radius-0: 0;
+  --radius-full: 9999px;
+  --border-hair: 1px;
+  --border-rule: 2px;
+  --border-heavy: 4px;
+  --offset-lg: 8px;
+  --offset-sm: 4px;
+  --control-sm: 24px;
+  --control-md: 32px;
+  --control-touch: 44px;
+  --bar-h: 40px;
+  --panel-w: 272px;
+  --content-width: 832px;
+  --font-sans: "Lato", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --font-sans-alt: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+}
+
+@font-face {
+  font-family: "Lato";
+  src: url("fonts/lato-latin-400-normal.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Lato";
+  src: url("fonts/lato-latin-400-italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Lato";
+  src: url("fonts/lato-latin-700-normal.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Lato";
+  src: url("fonts/lato-latin-700-italic.woff2") format("woff2");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Lato";
+  src: url("fonts/lato-latin-900-normal.woff2") format("woff2");
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Lato";
+  src: url("fonts/lato-latin-900-italic.woff2") format("woff2");
+  font-weight: 900;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono-latin-400-normal.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono-latin-400-italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono-latin-700-normal.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
