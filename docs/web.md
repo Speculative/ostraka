@@ -57,8 +57,21 @@ The server is a trusted local development tool with access to project files
 and coding agents. Bind to loopback by default. Do not expose it on an
 untrusted network without an authenticated reverse proxy. It has no accounts
 or remote authentication. Mutations require JSON and same-origin requests;
-cross-site requests and unknown DNS hosts are rejected. Markdown is sanitized
+cross-origin API requests are rejected, while external links can open the UI.
+Markdown is sanitized
 before rendering. No endpoint accepts arbitrary shell commands or file paths.
+
+The server accepts any HTTP Host and trusts the listener/proxy boundary for
+access control. No public-host configuration or OAuth integration is needed.
+`--listen` selects a network interface and port, not an external hostname.
+Behind Traefik forward-auth (including a tunnel/router chain), preserve the
+public Host and browser Origin. HTTPS may terminate at the proxy; do not
+rewrite Origin or enable CORS. The UI lives at the hostname root (`/`). All
+routes, including `/api/events`, must pass through the authenticated proxy;
+stream SSE without buffering and allow its 20-second heartbeats. A router in
+the same container can use the default loopback listener; a sidecar needs a
+container-network listener. Network exposure is managed by the deployment,
+not by an application Host allowlist.
 
 `GET /api/state` returns items, reviews, project context, ordering and server
 status. `GET /api/items/{id}` returns conversation, activity, retained traces,

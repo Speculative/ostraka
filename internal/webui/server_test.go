@@ -151,13 +151,43 @@ func TestEventsImmediatelyInvalidate(t *testing.T) {
 	}
 }
 
-func TestDNSRebindingHostRejected(t *testing.T) {
-	s := testServer(t)
-	r := httptest.NewRequest("GET", "http://attacker.example/api/state", nil)
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
-	if w.Code != 403 {
-		t.Fatal(w.Code)
+// TLS and access control belong to the deployment proxy. No per-host server
+// configuration is needed, but foreign browser origins must still be rejected.
+func TestProxyHostAndBrowserBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, path, origin, site, mode, dest string
+		status                                       int
+	}{
+		{name: "public host read", method: "GET", path: "/api/state", status: 200},
+		{name: "https origin over backend http", method: "POST", path: "/api/action", origin: "https://ostraka.agents.speculative.tech", site: "same-origin", status: 200},
+		{name: "sibling origin write", method: "POST", path: "/api/action", origin: "https://5173.ostraka.agents.speculative.tech", site: "same-site", status: 403},
+		{name: "foreign origin write", method: "POST", path: "/api/action", origin: "https://external.example", site: "cross-site", status: 403},
+		{name: "cross-site write without origin", method: "POST", path: "/api/action", site: "cross-site", status: 403},
+		{name: "external document entry", method: "GET", path: "/", site: "cross-site", mode: "navigate", dest: "document", status: 200},
+		{name: "external document with origin", method: "GET", path: "/", origin: "https://external.example", site: "cross-site", mode: "navigate", dest: "document", status: 200},
+		{name: "embedded document", method: "GET", path: "/", site: "cross-site", mode: "navigate", dest: "iframe", status: 403},
+		{name: "cross-site fetch", method: "GET", path: "/", site: "cross-site", mode: "cors", dest: "empty", status: 403},
+		{name: "api navigation", method: "GET", path: "/api/state", site: "cross-site", mode: "navigate", dest: "document", status: 403},
+		{name: "event stream navigation", method: "GET", path: "/api/events", site: "cross-site", mode: "navigate", dest: "document", status: 403},
+		{name: "post navigation", method: "POST", path: "/", site: "cross-site", mode: "navigate", dest: "document", status: 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testServer(t)
+			r := httptest.NewRequest(tc.method, "http://ostraka.agents.speculative.tech"+tc.path, strings.NewReader(`{"op":"create","title":"Proxy turn"}`))
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Origin", tc.origin)
+			r.Header.Set("Sec-Fetch-Site", tc.site)
+			r.Header.Set("Sec-Fetch-Mode", tc.mode)
+			r.Header.Set("Sec-Fetch-Dest", tc.dest)
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, r)
+			if w.Code != tc.status {
+				t.Fatalf("status = %d, want %d: %s", w.Code, tc.status, w.Body.String())
+			}
+			if w.Header().Get("Access-Control-Allow-Origin") != "" {
+				t.Fatal("unexpected CORS permission")
+			}
+		})
 	}
 }
 

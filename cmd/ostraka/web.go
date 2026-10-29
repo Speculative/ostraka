@@ -42,8 +42,7 @@ func runWeb(cmd *cobra.Command, args []string) error {
 		return e
 	}
 	defer ln.Close()
-	host, _, _ := net.SplitHostPort(addr)
-	app := &webui.Server{Store: st, AllowedHost: host}
+	app := &webui.Server{Store: st}
 	own, _ := cmd.Flags().GetBool("supervise")
 	if own {
 		lock, e := tui.AcquireSupervisorLock(root)

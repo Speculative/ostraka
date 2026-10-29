@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,13 +34,13 @@ import (
 var assets embed.FS
 
 type Server struct {
-	Store       *store.Store
-	Supervisor  *supervisor.Supervisor
-	AllowedHost string
+	Store      *store.Store
+	Supervisor *supervisor.Supervisor
 }
 
-// Handler accepts only same-origin writes and never enables CORS. The listener
-// should bind to loopback unless protected by an authenticated reverse proxy.
+// Handler trusts the network boundary for access control and accepts any Host.
+// Browser requests retain same-origin protections; CORS is never enabled. The
+// listener should bind to loopback unless behind an authenticated reverse proxy.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/state", s.state)
@@ -73,28 +72,25 @@ func (s *Server) Handler() http.Handler {
 	sub, _ := fs.Sub(assets, "static")
 	mux.Handle("GET /", http.FileServer(http.FS(sub)))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host := r.Host
-		if h, _, e := net.SplitHostPort(host); e == nil {
-			host = h
-		}
-		if host != "localhost" && net.ParseIP(host) == nil && host != s.AllowedHost {
-			fail(w, 403, fmt.Errorf("unrecognized host"))
-			return
-		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'")
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
-		if origin := r.Header.Get("Origin"); origin != "" {
+		// Entering the UI from an external link is safe. Keep cross-origin
+		// restrictions on API requests, writes and embedded resources.
+		documentEntry := r.Method == http.MethodGet && r.URL.Path == "/" &&
+			r.Header.Get("Sec-Fetch-Mode") == "navigate" &&
+			r.Header.Get("Sec-Fetch-Dest") == "document"
+		if origin := r.Header.Get("Origin"); origin != "" && !documentEntry {
 			u, e := url.Parse(origin)
 			if e != nil || u.Host != r.Host || (u.Scheme != "http" && u.Scheme != "https") {
 				fail(w, 403, fmt.Errorf("cross-origin request rejected"))
 				return
 			}
 		}
-		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		if r.Header.Get("Sec-Fetch-Site") == "cross-site" && !documentEntry {
 			fail(w, 403, fmt.Errorf("cross-site request rejected"))
 			return
 		}
