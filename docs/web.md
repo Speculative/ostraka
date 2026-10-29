@@ -100,9 +100,12 @@ subscribe independently to the same project state.
 Inbox includes active and backlog conversations in foldable families, with
 all non-archived statuses shown by default. Search, group and status filters
 narrow the list; matching children retain their parent for context. Archive
-remains a separate view. Ordering buttons preserve saved family and backlog
-order. Select a conversation to read Markdown, activities and retained/live
-traces and submit turns. The turn composer formats Markdown as you type while
+remains a separate view, with newest family activity first. Inbox follows the
+TUI: working, queued, your turn, active, proposed, then backlog. Families use
+their highest-attention status and newest turn (or creation time without turns)
+for ties. Backlogged roots stay parked and follow saved backlog order; children
+follow saved order, then creation order. Archive children use creation order.
+Select a conversation to read Markdown, activities and retained/live traces and submit turns. The turn composer formats Markdown as you type while
 leaving every source character visible: emphasis, strikethrough, code, links,
 headings, quotes and list markers. It keeps native text selection, undo, paste
 and keyboard input; the sent message and saved draft retain the original text. Drafts persist in the project and on the browser.

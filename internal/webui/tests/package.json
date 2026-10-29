@@ -1,7 +1,7 @@
 {
   "private": true,
   "scripts": {
-    "test": "node smoke.cjs",
+    "test": "node smoke.cjs && node ordering.cjs",
     "integration": "node integration.cjs",
     "browser": "node browser.cjs",
     "draft-sync": "node draft-sync.cjs",

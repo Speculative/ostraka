@@ -235,7 +235,8 @@
         bi = order.indexOf(b.ID);
       return (
         (ai < 0 ? 99999 : ai) - (bi < 0 ? 99999 : bi) ||
-        a.Created.localeCompare(b.Created)
+        Date.parse(a.Created) - Date.parse(b.Created) ||
+        a.ID.localeCompare(b.ID)
       );
     });
   }
@@ -292,43 +293,58 @@
     const visible = state.items.filter((i) => channel(i) === view),
       visibleIDs = new Set(visible.map((i) => i.ID));
     let roots = visible.filter((i) => !i.Parent || !visibleIDs.has(i.Parent));
+    // Keep Inbox family ordering in sync with the TUI's view.go.
     const priority = {
-      "pending-user": 0,
-      "agent-acknowledged": 1,
-      "pending-agent": 2,
-      proposed: 3,
-      active: 4,
+      "agent-acknowledged": 0,
+      "pending-agent": 1,
+      "pending-user": 2,
+      active: 3,
+      proposed: 4,
       backlog: 5,
       archived: 6,
     };
-    const rank = (i) =>
-      i.Status === "backlog"
-        ? priority.backlog
-        : Math.min(
-            priority[i.Status] ?? 9,
-            ...childrenOf(i.ID)
-              .filter((c) => visibleIDs.has(c.ID))
-              .map((c) => priority[c.Status] ?? 9),
-          );
+    const rank = (item) => priority[item.Status] ?? 7;
+    const activity = (item) =>
+      Date.parse(item.Turns?.at(-1)?.Timestamp || item.Created);
+    const families = new Map(
+      roots.map((root) => [root.ID, { rank: rank(root), activity: activity(root) }]),
+    );
+    const byID = new Map(state.items.map((item) => [item.ID, item]));
+    for (const item of view === "archive" ? visible : state.items) {
+      const key = item.Parent || item.ID,
+        family = families.get(key);
+      if (!family) continue;
+      if (byID.get(key)?.Status !== "backlog")
+        family.rank = Math.min(family.rank, rank(item));
+      family.activity = Math.max(family.activity, activity(item));
+    }
+    const backlogPositions = new Map(
+      (state.backlog_order || []).map((id, index) => [id, index]),
+    );
     roots.sort((a, b) => {
-      if (view === "archive") return a.Created.localeCompare(b.Created);
-      const attention = rank(a) - rank(b);
-      if (attention) return attention;
-      if (a.Status === "backlog" && b.Status === "backlog") {
-        const order = state.backlog_order || [];
-        return (
-          (order.indexOf(a.ID) < 0 ? 99999 : order.indexOf(a.ID)) -
-            (order.indexOf(b.ID) < 0 ? 99999 : order.indexOf(b.ID)) ||
-          a.Created.localeCompare(b.Created)
-        );
+      const left = families.get(a.ID),
+        right = families.get(b.ID);
+      if (view !== "archive") {
+        const attention = left.rank - right.rank;
+        if (attention) return attention;
+        if (left.rank === priority.backlog) {
+          const position =
+            (backlogPositions.get(a.ID) ?? Infinity) -
+            (backlogPositions.get(b.ID) ?? Infinity);
+          if (position) return position;
+        }
       }
-      return a.Created.localeCompare(b.Created);
+      return right.activity - left.activity || a.ID.localeCompare(b.ID);
     });
     let count = 0;
     roots.forEach((root) => {
       let children = childrenOf(root.ID).filter((i) => visibleIDs.has(i.ID));
       if (view === "archive")
-        children.sort((a, b) => a.Created.localeCompare(b.Created));
+        children.sort(
+          (a, b) =>
+            Date.parse(a.Created) - Date.parse(b.Created) ||
+            a.ID.localeCompare(b.ID),
+        );
       const rootMatches = matches(root),
         matchedChildren = children.filter(matches);
       if (!rootMatches && !matchedChildren.length) return;
